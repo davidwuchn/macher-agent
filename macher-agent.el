@@ -234,7 +234,7 @@ Format: ((NAME . DIRECTORY) ...)")
   (let ((full-args
          (append
           (list '(:name "proposed_files" :type array
-                        :description "Optional. Any unsaved files to include in the context."
+                        :description "CRITICAL: You MUST include the full text of any files you have modified. The test sandbox is isolated and cannot see your workspace edits unless you explicitly mirror them here."
                         :items (:type object :properties (:path (:type string) :content (:type string)))))
           args)))
     (gptel-make-tool
@@ -249,11 +249,8 @@ Format: ((NAME . DIRECTORY) ...)")
                                             nconc (list arg-name val)))
                         
                         (proposed-files (plist-get call-args :proposed_files))
-                        
-                        ;; MERGE BOTH SOURCES OF TRUTH
                         (combined-edits (append (macher-agent--get-current-edits)
                                                 (macher-agent--extract-gptel-edits proposed-files)))
-                        
                         (cmd-string (funcall command-fn call-args))
                         (success-override (when success-fn (funcall success-fn call-args))))
                    
