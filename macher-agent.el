@@ -13,6 +13,42 @@
 (require 'gptel)
 (require 'project)
 
+(defvar-local macher-agent--persistent-context nil
+  "Stores the macher context across continuous agent tool turns.")
+
+(defun macher-agent--setup-tools-advice (orig-fn fsm get-context)
+  "Advise macher tool setup to use a persistent context across auto-continuations."
+  (let* ((info (gptel-fsm-info fsm))
+         (buffer (plist-get info :buffer)))
+    (if (and buffer (buffer-live-p buffer))
+        (with-current-buffer buffer
+          (let ((original-get-context get-context))
+            (funcall orig-fn fsm
+                     (lambda ()
+                       ;; Force macher's internal tracker to register activity
+                       (funcall original-get-context)
+                       ;; Cache the context on the first turn
+                       (unless macher-agent--persistent-context
+                         (setq macher-agent--persistent-context (funcall original-get-context)))
+                       
+                       (let ((ctx macher-agent--persistent-context))
+                         (when ctx
+                           ;; Inject persistent context into current FSM so patch generation catches it
+                           (let ((fsm-info (gptel-fsm-info fsm)))
+                             (setf (gptel-fsm-info fsm) 
+                                   (plist-put fsm-info :macher--context ctx)))
+                           (setq macher--fsm-latest fsm))
+                         ctx)))))
+      (funcall orig-fn fsm get-context))))
+
+(advice-add 'macher--setup-tools :around #'macher-agent--setup-tools-advice)
+
+(defun macher-agent-clear-context ()
+  "Clear the persistent sub-agent context to start a fresh task."
+  (interactive)
+  (setq-local macher-agent--persistent-context nil)
+  (message "Agent context cleared."))
+
 (defun macher-agent--fix-directory-workspace-name (orig-fn workspace &rest args)
   "Provide a fallback name for raw directory workspaces to prevent macher crashes."
   (if (eq (car-safe workspace) 'directory)
@@ -30,59 +66,22 @@
 
 ;; --- CONTEXT WRAPPERS ---
 
-(defun macher-agent--get-current-edits ()
-  "Synchronously fetch pending edits from the current buffer's macher context.
-Strips Lisp properties and forces relative paths to prevent sandbox escape."
-  (let ((context (when (fboundp 'macher-context) (macher-context))))
-    (when (and context
-               (fboundp 'macher-context-p)
-               (macher-context-p context))
-      (let* ((root (locate-dominating-file default-directory ".git"))
-             (project-root (if root
-                               (file-name-as-directory (expand-file-name root))
-                             (file-name-as-directory default-directory)))
-             (edits nil))
-        (dolist (entry (macher-context-contents context))
-          (let* ((path (car entry))
-                 (new-content (if (stringp (cdr entry))
-                                  (cdr entry)
-                                (cddr entry))))
-            (when (and path new-content)
-              (let ((safe-path (if (stringp path) (substring-no-properties path) path))
-                    (safe-content (if (stringp new-content) (substring-no-properties new-content) new-content)))
-                
-                ;; Convert absolute paths 
-                (when (file-name-absolute-p safe-path)
-                  (setq safe-path (file-relative-name safe-path project-root)))
-                
-                (push (cons safe-path safe-content) edits)))))
-        edits))))
-
-(defun macher-agent--extract-gptel-edits (proposed-files)
-  "Extract standard gptel JSON edits, enforcing relative paths."
-  (let ((edits nil)
-        (root (locate-dominating-file default-directory ".git")))
-    (let ((project-root (if root
-                            (file-name-as-directory (expand-file-name root))
-                          (file-name-as-directory default-directory))))
-      (when (vectorp proposed-files)
-        (seq-doseq (item proposed-files)
-          (when (and item (listp item))
-            (let ((path (or (alist-get 'path item) (plist-get item :path)))
-                  (content (or (alist-get 'content item) (plist-get item :content))))
-              (when (and path (stringp path))
-                (let ((safe-path (substring-no-properties path)))
-                  
-                  ;; relative paths
-                  (when (file-name-absolute-p safe-path)
-                    (setq safe-path (file-relative-name safe-path project-root)))
-                  
-                  (push (cons safe-path
-                              (if (stringp content)
-                                  (substring-no-properties content)
-                                content))
-                        edits)))))))
-      edits)))
+(defun macher-agent--get-context-edits (context)
+  "Extract in-memory changes from the given macher CONTEXT."
+  (let ((edits nil))
+    (when (and context (macher-context-p context))
+      (let* ((contents-alist (macher-context-contents context))
+             (workspace (macher-context-workspace context))
+             (root (macher--workspace-root workspace)))
+        (dolist (entry contents-alist)
+          (let* ((abs-path (car entry))
+                 (content-pair (cdr entry))
+                 (new-content (cdr content-pair))
+                 (rel-path (file-relative-name abs-path root)))
+            ;; Extract only files that differ from the disk state
+            (when (and new-content (not (equal (car content-pair) new-content)))
+              (push (cons rel-path new-content) edits))))))
+    edits))
 
 ;; async
 
@@ -190,18 +189,24 @@ Format: ((NAME . DIRECTORY) ...)")
 
 (add-to-list 'gptel-tools macher-agent-write-to-buffer-tool)
 
-(defun macher-agent--collision-warning (patch-content context)
+(defun macher-agent--collision-warning (context fsm callback)
   "Inspect the proposed edits for path collisions and inject a warning if necessary."
   (let ((collision-detected nil)
         (root-files (directory-files (or (locate-dominating-file default-directory ".git") default-directory) nil "^[^.]")))
-    (dolist (entry (macher-context-contents context))
-      (let* ((path (car entry))
-             (filename (file-name-nondirectory path)))
-        (when (and (string-match-p "/" path) (member filename root-files))
-          (setq collision-detected t))))
-    (if collision-detected
-        (concat "WARNING: Potential filename collision detected between sub-directories and the project root.\nIt is highly recommended to apply this patch using an external shell utility (ie, `git apply`) rather than the native Emacs interface to ensure filesystem integrity.\n\n" patch-content)
-      patch-content)))
+    
+    (when context
+      (dolist (entry (macher-context-contents context))
+        (let* ((path (car entry))
+               (filename (file-name-nondirectory path)))
+          (when (and (string-match-p "/" path) (member filename root-files))
+            (setq collision-detected t)))))
+    
+    (when collision-detected
+      (goto-char (point-min))
+      (insert "WARNING: Potential filename collision detected between sub-directories and the project root.\nIt is highly recommended to apply this patch using an external shell utility (ie, `git apply`) rather than the native Emacs interface to ensure filesystem integrity.\n\n"))
+    
+    ;; CRITICAL: You must execute the callback to continue the patch generation chain
+    (funcall callback)))
 
 (add-hook 'macher-patch-prepare-functions #'macher-agent--collision-warning)
 
@@ -231,35 +236,33 @@ Format: ((NAME . DIRECTORY) ...)")
 ;;;###autoload
 (cl-defun macher-agent-make-tool (&key name description command-fn success-fn output-filter args)
   "Construct a public tool for gptel that automatically executes in a temporary sandbox."
-  (let ((full-args
-         (append
-          (list '(:name "proposed_files" :type array
-                        :description "CRITICAL: You MUST include the full text of any files you have modified. The test sandbox is isolated and cannot see your workspace edits unless you explicitly mirror them here."
-                        :items (:type object :properties (:path (:type string) :content (:type string)))))
-          args)))
-    (gptel-make-tool
-     :name name
-     :description description
-     :async t
-     :args full-args
-     :function (lambda (callback &rest tool-args)
-                 (let* ((call-args (cl-loop for arg-def in full-args
-                                            for val in tool-args
-                                            for arg-name = (intern (concat ":" (plist-get arg-def :name)))
-                                            nconc (list arg-name val)))
-                        
-                        (proposed-files (plist-get call-args :proposed_files))
-                        (combined-edits (append (macher-agent--get-current-edits)
-                                                (macher-agent--extract-gptel-edits proposed-files)))
-                        (cmd-string (funcall command-fn call-args))
-                        (success-override (when success-fn (funcall success-fn call-args))))
-                   
-                   (macher-agent--pure-async-execute
-                    combined-edits
-                    cmd-string
-                    success-override
-                    (lambda (result)
-                      (funcall callback (if output-filter (funcall output-filter result) result)))))))))
+  (macher--make-tool nil
+                     :name name
+                     :description description
+                     :async t
+                     :args args
+                     :category macher-tool-category
+                     :function (lambda (context callback &rest tool-args)
+                                 (let* ((call-args
+                                         (if (and tool-args (keywordp (car tool-args)))
+                                             tool-args
+                                           (let ((result nil))
+                                             (cl-loop for arg-def in args
+                                                      for i from 0
+                                                      for arg-name = (intern (concat ":" (plist-get arg-def :name)))
+                                                      do (setq result (plist-put result arg-name (nth i tool-args))))
+                                             result)))
+                                        (cmd-string (funcall command-fn call-args))
+                                        (success-override (when success-fn (funcall success-fn call-args)))
+                                        ;; Pull the virtual edits using the injected context
+                                        (pending-edits (macher-agent--get-context-edits context)))
+                                   
+                                   (macher-agent--pure-async-execute
+                                    pending-edits
+                                    cmd-string
+                                    success-override
+                                    (lambda (result)
+                                      (funcall callback (if output-filter (funcall output-filter result) result))))))))
 
 (add-hook 'gptel-mode-hook #'macher-agent-restore-session-hook)
 

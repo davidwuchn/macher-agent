@@ -1,6 +1,6 @@
 # macher-agent
 
-This is a collection of tools inspired by gptel-agent but using the ethos of macher. 
+This is a collection of tools inspired by [gptel-agent](https://github.com/karthink/gptel-agent/) but using the ethos of [macher](https://github.com/kmontag/macher). 
 
 This attempts to avoid working directly on live files and instead operates within the macher context. With the verification gate being the final patch that's output at the end of execution.
 
@@ -18,17 +18,7 @@ To integrate macher-agent into your workflow, ensure that macher and gptel are a
 
 ## Known Limitations
 
-The async tool execution has a hard limit of around 60k characters. Generally if this happens your context would exploded so more than likely wouldn't be wanted. There isn't exception handing for this edge case and it will crash.
-
 If a modified file in a subfolder shares a base filename with a file in the root directory, a warning is injected into the patch buffer advising you to apply the changes via an external utility (patch, git apply etc.) to ensure filesystem integrity.
-
-### Why does `diff-apply-buffer` misbehave when the patch contains new or deleted files?
-
-`diff-mode` in Emacs 30.x and below doesn't handle file creations/deletions well. The issue has been
-fixed upstream, and the fix will likely be included in the next major Emacs release. In the
-meantime, if this case comes up often for you, see
-[#45](https://github.com/kmontag/macher/issues/45) for possible workarounds. (from macher README)
-
 
 ## Example
 
@@ -77,17 +67,17 @@ This workflow demonstrates how to use the planner preset to analyse a repository
 
 Start your planning session
 - Open a new buffer give it a name like *Planner*
-- Activate gptel-mode (you can select a planner preset for example)
+- Activate ```gptel-mode``` (you can select a planner preset for example)
 
 Instantiate the executor
-- Run M-x macher-agent-add-subagent.
+- Run ```M-x macher-agent-add-subagent```.
 - You're prompted for an agent name
 - When prompted for the directory, select the specific sub-module you want the agent to work in
 - This automatically injects a system directive into your active planner buffer, informing the LLM that *macher-agent: x* is available.
 
 Delegate the task
 - Prompt the planner with your objective and end with "dispatch/write the plan to x buffer" or similar
-- The planner will use write_to_buffer to push the text directly into the sub agents buffer.
+- The planner will use ```write_to_buffer``` to push the text directly into the sub agents buffer.
 
 Execute the plan
 - Switch to the *macher-agent: <sub agent>* buffer.
