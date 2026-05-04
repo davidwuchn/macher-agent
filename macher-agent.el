@@ -39,27 +39,12 @@ Strips Lisp properties to prevent formatting crashes."
                   edits)))
         edits))))
 
-(defun macher-agent--extract-gptel-edits (proposed-files)
-  "Extract standard gptel JSON edits, stripping properties."
-  (let ((edits nil))
-    (when (vectorp proposed-files)
-      (seq-doseq (item proposed-files)
-        (when (and item (listp item))
-          (let ((path (or (alist-get 'path item) (plist-get item :path)))
-                (content (or (alist-get 'content item) (plist-get item :content))))
-            (when (and path (stringp path))
-              (push (cons (substring-no-properties path)
-                          (if (stringp content)
-                              (substring-no-properties content)
-                            content))
-                    edits))))))
-    edits))
 
 ;; async
 
 (defun macher-agent--pure-async-execute (context cmd success-override callback)
   "Execute CMD inside a temporary sandbox cleanly and asynchronously.
-Does NOT block the Emacs event loop. Uses pipes for massive output safety."
+Does NOT block the Emacs event loop."
   (let* ((root (locate-dominating-file default-directory ".git"))
          (project-root (if root
                            (file-name-as-directory (expand-file-name root))
@@ -68,9 +53,7 @@ Does NOT block the Emacs event loop. Uses pipes for massive output safety."
          (rsync-cmd (format "rsync -a --exclude='target/' --exclude='.git/' %s %s"
                             (shell-quote-argument project-root)
                             (shell-quote-argument temp-dir)))
-         
          (process-connection-type nil)
-         
          (rsync-proc (start-process-shell-command "rsync-sandbox" nil rsync-cmd)))
     
     (set-process-sentinel
@@ -90,11 +73,10 @@ Does NOT block the Emacs event loop. Uses pipes for massive output safety."
                 (cmd-proc (start-process-shell-command "macher-cmd" output-buffer target-cmd)))
            (set-process-sentinel
             cmd-proc
-            (lambda (cmd-p _cmd-event)
+            (lambda (cmd-p cmd-event)
               (when (memq (process-status cmd-p) '(exit signal))
                 (let ((output (with-current-buffer output-buffer (buffer-string))))
                   (kill-buffer output-buffer)
-                  
                   (if (and success-override 
                            (= (process-exit-status cmd-p) 0) 
                            (string-empty-p output))
@@ -112,63 +94,42 @@ Does NOT block the Emacs event loop. Uses pipes for massive output safety."
     (with-current-buffer buf
       (markdown-mode)
       (gptel-mode 1)
+      
       (setq default-directory full-dir)
-      (setq-local macher--workspace (cons 'directory full-dir))
+      
+      (setq-local project-find-functions
+                  (list (lambda (_dir) (cons 'macher-agent full-dir))))
+      
       (insert (format "# Sub-Agent: %s\nWorkspace locked to: %s\n\n" name full-dir)))
-    
+
     (push (cons name full-dir) macher-agent-active-subagents)
     
-    (message "Instantiated sub-agent: %s (Context injected via payload advice)" buf-name)))
+    (message "Instantiated sub-agent: %s (Native project.el isolation applied)" buf-name)))
 
-(defvar-local macher-agent-active-subagents nil
-  "An alist tracking active sub-agents for the current session.
+(defvar macher-agent-active-subagents nil
+  "An alist tracking active sub-agents globally for the current Emacs session.
 Format: ((NAME . DIRECTORY) ...)")
 
 (defun macher-agent--inject-context-advice (orig-fn &optional prompt &rest args)
   "Dynamically inject sub-agent context into the gptel request payload at send-time."
   (if macher-agent-active-subagents
       (let* ((system-arg (plist-get args :system))
-
-             (base-system (cond
-                           ((stringp system-arg) system-arg)
-                           ((and (boundp 'gptel-system-message)
-                                 (stringp gptel-system-message))
-                            gptel-system-message)
-                           (t "")))
-             
+             (safe-system-msg (if (boundp 'gptel-system-message) 
+                                  gptel-system-message 
+                                ""))
+             (base-system (or system-arg safe-system-msg ""))
              (agent-descriptions 
               (mapconcat (lambda (agent)
                            (format "- Buffer '*macher-agent: %s*' (Directory: %s)" 
                                    (car agent) (cdr agent)))
                          macher-agent-active-subagents "\n"))
-             
              (directive (format "\n\nSYSTEM DIRECTIVE: You have access to the following isolated sub-agent workspaces. You may dispatch instructions to them using the write_to_buffer tool:\n%s" agent-descriptions))
-             
              (new-system (concat base-system directive))
              (new-args (plist-put (copy-sequence args) :system new-system)))
         (apply orig-fn prompt new-args))
-    
     (apply orig-fn prompt args)))
 
 (advice-add 'gptel-request :around #'macher-agent--inject-context-advice)
-
-(defun macher-agent-refresh-system-prompt ()
-  "Safely update `gptel-system-message` with the current list of sub-agents."
-  (when (boundp 'gptel-system-message)
-    (let* ((parts (split-string (or gptel-system-message "") macher-agent--directive-separator))
-           (base-prompt (car parts)))
-      (if macher-agent-active-subagents
-          (let* ((agent-descriptions 
-                  (mapconcat (lambda (agent)
-                               (format "- Buffer '*macher-agent: %s*' (Directory: %s)" 
-                                       (car agent) (cdr agent)))
-                             macher-agent-active-subagents "\n"))
-                 (directive (format "\nSYSTEM DIRECTIVE: You have access to the following isolated workspaces. Dispatch instructions using the write_to_buffer tool:\n%s" agent-descriptions)))
-            
-            (setq-local gptel-system-message 
-                        (concat base-prompt macher-agent--directive-separator directive)))
-        
-        (setq-local gptel-system-message base-prompt)))))
 
 ;;;###autoload
 (defvar macher-agent-write-to-buffer-tool
@@ -177,7 +138,6 @@ Format: ((NAME . DIRECTORY) ...)")
    :description "Write complete content to a specific Emacs buffer. You must call this tool ONLY ONCE per task."
    :args (list '(:name "buffer_name" :type string :description "The exact name of the destination buffer.")
                '(:name "content" :type string :description "The text content to write."))
-   
    :function (lambda (buffer_name content)
                (let ((target-buffer (get-buffer-create (substring-no-properties buffer_name))))
                  (with-current-buffer target-buffer
@@ -186,6 +146,27 @@ Format: ((NAME . DIRECTORY) ...)")
                  (format "SUCCESS: Content successfully dispatched to buffer '%s'." buffer_name)))))
 
 (add-to-list 'gptel-tools macher-agent-write-to-buffer-tool)
+
+;;;###autoload
+(defvar macher-agent-edit-file-tool
+  (gptel-make-tool
+   :name "edit_file_in_workspace"
+   :description "Apply code changes to a file in the workspace. You MUST use this tool to save your edits before calling execution tools like rtk_cargo_runner, otherwise they will run against stale code."
+   :args (list '(:name "path" :type string :description "Path to the file, relative to the workspace root.")
+               '(:name "content" :type string :description "The complete new source code for the file."))
+   :function (lambda (path content)
+               (let* ((safe-path (substring-no-properties path))
+                      (safe-content (substring-no-properties content))
+                      (full-path (expand-file-name safe-path default-directory)))
+                 (make-directory (file-name-directory full-path) t)
+                 (with-current-buffer (find-file-noselect full-path)
+                   (erase-buffer)
+                   (insert safe-content)
+                   ;; Marking as modified forces macher to track it as a pending edit
+                   (set-buffer-modified-p t))
+                 (format "SUCCESS: File '%s' updated in the in-memory workspace. Ready for execution tools." safe-path)))))
+
+(add-to-list 'gptel-tools macher-agent-edit-file-tool)
 
 (defun macher-agent--collision-warning (patch-content context)
   "Inspect the proposed edits for path collisions and inject a warning if necessary."
@@ -223,47 +204,39 @@ Format: ((NAME . DIRECTORY) ...)")
                 (markdown-mode)
                 (gptel-mode 1)
                 (setq-local macher--workspace (cons 'directory (expand-file-name dir)))
-                (insert (format "# Sub-Agent: %s\nWorkspace locked to: %s\n\n" name dir))))))
-        
-        ;; Refresh the prompt once all saved agents are loaded
-        (macher-agent-refresh-system-prompt)))))
+                (insert (format "# Sub-Agent: %s\nWorkspace locked to: %s\n\n" name dir))))))))))
 
 ;;;###autoload
 (cl-defun macher-agent-make-tool (&key name description command-fn success-fn output-filter args)
-  "Construct a public tool for gptel that automatically executes in a temporary sandbox."
-  (let ((full-args
-         (append
-          (list '(:name "proposed_files" :type array
-                        :description "Optional. Any unsaved files to include in the context."
-                        :items (:type object :properties (:path (:type string) :content (:type string)))))
-          args)))
-    (gptel-make-tool
-     :name name
-     :description description
-     :async t
-     :args full-args
-     :function (lambda (callback &rest tool-args)
-
-                 (let* ((call-args (cl-loop for arg-def in full-args
-                                            for val in tool-args
-                                            
-                                            for arg-name = (intern (concat ":" (plist-get arg-def :name)))
-                                            nconc (list arg-name val)))
-                        
-                        (proposed-files (plist-get call-args :proposed_files))
-                        (combined-edits (append (macher-agent--get-current-edits)
-                                                (macher-agent--extract-gptel-edits proposed-files)))
-                        (cmd-string (funcall command-fn call-args))
-                        (success-override (when success-fn (funcall success-fn call-args))))
-                   
-                   (macher-agent--pure-async-execute
-                    combined-edits
-                    cmd-string
-                    success-override
-                    (lambda (result)
-                      (funcall callback (if output-filter (funcall output-filter result) result)))))))))
+  "Construct a public tool for gptel that automatically executes in a temporary sandbox.
+  
+NAME is the string identifier for the tool.
+DESCRIPTION instructs the LLM on how and when to use this tool.
+COMMAND-FN receives the parsed argument plist and must return the shell command string.
+SUCCESS-FN (optional) receives the parsed argument plist and returns a string to yield if the exit code is 0 and output is empty.
+OUTPUT-FILTER (optional) receives the raw shell output string and returns a modified string to yield.
+ARGS (optional) is a list of gptel tool arguments. (Proposed files are no longer automatically injected)."
+  (gptel-make-tool
+   :name name
+   :description description
+   :async t
+   :args args
+   :function (lambda (callback &rest tool-args)
+               (let* ((call-args (cl-loop for arg-def in args
+                                          for val in tool-args
+                                          for arg-name = (intern (concat ":" (plist-get arg-def :name)))
+                                          nconc (list arg-name val)))
+                      ;; FIX: Only pull from actual Emacs buffers via macher-context
+                      (combined-edits (macher-agent--get-current-edits))
+                      (cmd-string (funcall command-fn call-args))
+                      (success-override (when success-fn (funcall success-fn call-args))))
+                 (macher-agent--pure-async-execute
+                  combined-edits
+                  cmd-string
+                  success-override
+                  (lambda (result)
+                    (funcall callback (if output-filter (funcall output-filter result) result))))))))
 
 (add-hook 'gptel-mode-hook #'macher-agent-restore-session-hook)
 
 (provide 'macher-agent)
-
