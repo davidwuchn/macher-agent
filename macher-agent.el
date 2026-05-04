@@ -226,14 +226,7 @@ Format: ((NAME . DIRECTORY) ...)")
 
 ;;;###autoload
 (cl-defun macher-agent-make-tool (&key name description command-fn success-fn output-filter args)
-  "Construct a public tool for gptel that automatically executes in a temporary sandbox.
-  
-NAME is the string identifier for the tool.
-DESCRIPTION instructs the LLM on how and when to use this tool.
-COMMAND-FN receives the parsed argument plist and must return the shell command string.
-SUCCESS-FN (optional) receives the parsed argument plist and returns a string to yield if the exit code is 0 and output is empty.
-OUTPUT-FILTER (optional) receives the raw shell output string and returns a modified string to yield.
-ARGS (optional) is a list of gptel tool arguments. The `proposed_files` argument is automatically injected."
+  "Construct a public tool for gptel that automatically executes in a temporary sandbox."
   (let ((full-args
          (append
           (list '(:name "proposed_files" :type array
@@ -246,14 +239,19 @@ ARGS (optional) is a list of gptel tool arguments. The `proposed_files` argument
      :async t
      :args full-args
      :function (lambda (callback &rest tool-args)
-                 (let* ((call-args (if (and tool-args (not (keywordp (car tool-args))))
-                                       (car tool-args)
-                                     tool-args))
+
+                 (let* ((call-args (cl-loop for arg-def in full-args
+                                            for val in tool-args
+                                            
+                                            for arg-name = (intern (concat ":" (plist-get arg-def :name)))
+                                            nconc (list arg-name val)))
+                        
                         (proposed-files (plist-get call-args :proposed_files))
                         (combined-edits (append (macher-agent--get-current-edits)
                                                 (macher-agent--extract-gptel-edits proposed-files)))
                         (cmd-string (funcall command-fn call-args))
                         (success-override (when success-fn (funcall success-fn call-args))))
+                   
                    (macher-agent--pure-async-execute
                     combined-edits
                     cmd-string
