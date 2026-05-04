@@ -32,12 +32,11 @@ This setup assumes you have [context-builder](https://github.com/igorls/context-
 (use-package macher-agent
   :after (gptel macher)
   :config
-
   (add-to-list 'gptel-tools
                (macher-agent-make-tool
                 :name "build_project_context"
                 :description "Generate a read-only architectural map of the entire project. This returns structural context rather than compilable source code."
-                :command-fn (lambda (_) "context-builder -y --ignore external --input . -o /dev/stdout </dev/null 2>&1")
+                :command-fn (lambda (_) "context-builder -y -f rs --signatures --ignore external --input . -o /dev/stdout </dev/null 2>&1")
                 :output-filter (lambda (raw-output)
                                  (if (string-prefix-p "Execution failed" raw-output)
                                      raw-output
@@ -45,20 +44,20 @@ This setup assumes you have [context-builder](https://github.com/igorls/context-
 
   (add-to-list 'gptel-tools
                (macher-agent-make-tool
-                :name "rtk_cargo_runner"
-                :description "Execute Rust cargo commands via the rtk runner in an isolated sandbox. You are strictly limited to two actions:
-1. 'check' to analyse the current package and report errors without building object files.
-2. 'test' to execute the test suite.
-Do not attempt to use other cargo commands. If you have made edits using workspace tools, include them in proposed_files to verify they do not break the system."
-                :args (list '(:name "cargo_command"
-                              :type string
-                              :description "The specific cargo command to run (ie, 'check' or 'test')."))
-                :command-fn (lambda (call-args)
-                              (format "rtk cargo %s </dev/null 2>&1"
-                                      (shell-quote-argument (plist-get call-args :cargo_command))))
-                :success-fn (lambda (call-args)
-                              (format "SUCCESS: The cargo command '%s' executed perfectly with no errors."
-                                      (plist-get call-args :cargo_command))))))
+                :name "cargo_check"
+                :description "Run 'cargo check' to compile the project."
+                :args nil
+                :command-fn (lambda (_) "rtk cargo check </dev/null 2>&1")
+                :success-fn (lambda (_) "SUCCESS: The code compiled perfectly with no errors."))
+               )
+  (add-to-list 'gptel-tools
+               (macher-agent-make-tool
+                :name "cargo_test"
+                :description "Run 'cargo test' to test the project."
+                :args nil
+                :command-fn (lambda (_) "rtk cargo test </dev/null 2>&1")
+                :success-fn (lambda (_) "SUCCESS: The tests ran perfectly with no errors."))
+               ))
   ```
 
 ### Agentic workflow
