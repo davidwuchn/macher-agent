@@ -59,7 +59,7 @@ Strips Lisp properties to prevent formatting crashes."
 
 (defun macher-agent--pure-async-execute (context cmd success-override callback)
   "Execute CMD inside a temporary sandbox cleanly and asynchronously.
-Does NOT block the Emacs event loop."
+Does NOT block the Emacs event loop. Uses pipes for massive output safety."
   (let* ((root (locate-dominating-file default-directory ".git"))
          (project-root (if root
                            (file-name-as-directory (expand-file-name root))
@@ -68,12 +68,15 @@ Does NOT block the Emacs event loop."
          (rsync-cmd (format "rsync -a --exclude='target/' --exclude='.git/' %s %s"
                             (shell-quote-argument project-root)
                             (shell-quote-argument temp-dir)))
+         
+         (process-connection-type nil)
+         
          (rsync-proc (start-process-shell-command "rsync-sandbox" nil rsync-cmd)))
     
     (set-process-sentinel
      rsync-proc
      (lambda (_proc event)
-       (when (string-match-p "finished" event)
+       (when (memq (process-status _proc) '(exit signal))
          (dolist (edit context)
            (let* ((path (car edit))
                   (content (cdr edit))
@@ -87,10 +90,11 @@ Does NOT block the Emacs event loop."
                 (cmd-proc (start-process-shell-command "macher-cmd" output-buffer target-cmd)))
            (set-process-sentinel
             cmd-proc
-            (lambda (cmd-p cmd-event)
-              (when (string-match-p "finished" cmd-event)
+            (lambda (cmd-p _cmd-event)
+              (when (memq (process-status cmd-p) '(exit signal))
                 (let ((output (with-current-buffer output-buffer (buffer-string))))
                   (kill-buffer output-buffer)
+                  
                   (if (and success-override 
                            (= (process-exit-status cmd-p) 0) 
                            (string-empty-p output))
