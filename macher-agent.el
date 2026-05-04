@@ -13,6 +13,15 @@
 (require 'gptel)
 (require 'project)
 
+(defun macher-agent--fix-directory-workspace-name (orig-fn workspace &rest args)
+  "Provide a fallback name for raw directory workspaces to prevent macher crashes."
+  (if (eq (car-safe workspace) 'directory)
+      (file-name-nondirectory (directory-file-name (cdr workspace)))
+    (apply orig-fn workspace args)))
+
+(with-eval-after-load 'macher
+  (advice-add 'macher--workspace-name :around #'macher-agent--fix-directory-workspace-name))
+
 (cl-defmethod project-root ((project (head macher-agent)))
   "Return the root directory for an isolated sub-agent workspace."
   (cdr project))
@@ -129,17 +138,16 @@ Does NOT block the Emacs event loop."
     (with-current-buffer buf
       (markdown-mode)
       (gptel-mode 1)
-      
       (setq default-directory full-dir)
       
-      (setq-local project-find-functions
-                  (list (lambda (_dir) (cons 'macher-agent full-dir))))
+      ;; RESTORED: Explicitly bind the macher workspace.
+      (setq-local macher--workspace (cons 'directory full-dir))
       
       (insert (format "# Sub-Agent: %s\nWorkspace locked to: %s\n\n" name full-dir)))
 
     (push (cons name full-dir) macher-agent-active-subagents)
     
-    (message "Instantiated sub-agent: %s (Native project.el isolation applied)" buf-name)))
+    (message "Instantiated sub-agent: %s (Macher workspace bound)" buf-name)))
 
 (defvar macher-agent-active-subagents nil
   "An alist tracking active sub-agents globally for the current Emacs session.
@@ -222,34 +230,39 @@ Format: ((NAME . DIRECTORY) ...)")
 
 ;;;###autoload
 (cl-defun macher-agent-make-tool (&key name description command-fn success-fn output-filter args)
-  "Construct a public tool for gptel that automatically executes in a temporary sandbox.
-  
-NAME is the string identifier for the tool.
-DESCRIPTION instructs the LLM on how and when to use this tool.
-COMMAND-FN receives the parsed argument plist and must return the shell command string.
-SUCCESS-FN (optional) receives the parsed argument plist and returns a string to yield if the exit code is 0 and output is empty.
-OUTPUT-FILTER (optional) receives the raw shell output string and returns a modified string to yield.
-ARGS (optional) is a list of gptel tool arguments. (Proposed files are no longer automatically injected)."
-  (gptel-make-tool
-   :name name
-   :description description
-   :async t
-   :args args
-   :function (lambda (callback &rest tool-args)
-               (let* ((call-args (cl-loop for arg-def in args
-                                          for val in tool-args
-                                          for arg-name = (intern (concat ":" (plist-get arg-def :name)))
-                                          nconc (list arg-name val)))
-                      ;; FIX: Only pull from actual Emacs buffers via macher-context
-                      (combined-edits (macher-agent--get-current-edits))
-                      (cmd-string (funcall command-fn call-args))
-                      (success-override (when success-fn (funcall success-fn call-args))))
-                 (macher-agent--pure-async-execute
-                  combined-edits
-                  cmd-string
-                  success-override
-                  (lambda (result)
-                    (funcall callback (if output-filter (funcall output-filter result) result))))))))
+  "Construct a public tool for gptel that automatically executes in a temporary sandbox."
+  (let ((full-args
+         (append
+          (list '(:name "proposed_files" :type array
+                        :description "Optional. Any unsaved files to include in the context."
+                        :items (:type object :properties (:path (:type string) :content (:type string)))))
+          args)))
+    (gptel-make-tool
+     :name name
+     :description description
+     :async t
+     :args full-args
+     :function (lambda (callback &rest tool-args)
+                 (let* ((call-args (cl-loop for arg-def in full-args
+                                            for val in tool-args
+                                            for arg-name = (intern (concat ":" (plist-get arg-def :name)))
+                                            nconc (list arg-name val)))
+                        
+                        (proposed-files (plist-get call-args :proposed_files))
+                        
+                        ;; MERGE BOTH SOURCES OF TRUTH
+                        (combined-edits (append (macher-agent--get-current-edits)
+                                                (macher-agent--extract-gptel-edits proposed-files)))
+                        
+                        (cmd-string (funcall command-fn call-args))
+                        (success-override (when success-fn (funcall success-fn call-args))))
+                   
+                   (macher-agent--pure-async-execute
+                    combined-edits
+                    cmd-string
+                    success-override
+                    (lambda (result)
+                      (funcall callback (if output-filter (funcall output-filter result) result)))))))))
 
 (add-hook 'gptel-mode-hook #'macher-agent-restore-session-hook)
 
