@@ -19,26 +19,61 @@
 
 ;; context wrappers
 
+;; --- CONTEXT WRAPPERS ---
+
 (defun macher-agent--get-current-edits ()
   "Synchronously fetch pending edits from the current buffer's macher context.
-Strips Lisp properties to prevent formatting crashes."
+Strips Lisp properties and forces relative paths to prevent sandbox escape."
   (let ((context (when (fboundp 'macher-context) (macher-context))))
     (when (and context
                (fboundp 'macher-context-p)
                (macher-context-p context))
-      (let ((edits nil))
+      (let* ((root (locate-dominating-file default-directory ".git"))
+             (project-root (if root
+                               (file-name-as-directory (expand-file-name root))
+                             (file-name-as-directory default-directory)))
+             (edits nil))
         (dolist (entry (macher-context-contents context))
           (let* ((path (car entry))
-                 (new-content (cddr entry)))
-            (push (cons (if (stringp path)
-                            (substring-no-properties path)
-                          path)
-                        (if (stringp new-content)
-                            (substring-no-properties new-content)
-                          new-content))
-                  edits)))
+                 (new-content (if (stringp (cdr entry))
+                                  (cdr entry)
+                                (cddr entry))))
+            (when (and path new-content)
+              (let ((safe-path (if (stringp path) (substring-no-properties path) path))
+                    (safe-content (if (stringp new-content) (substring-no-properties new-content) new-content)))
+                
+                ;; Convert absolute paths 
+                (when (file-name-absolute-p safe-path)
+                  (setq safe-path (file-relative-name safe-path project-root)))
+                
+                (push (cons safe-path safe-content) edits)))))
         edits))))
 
+(defun macher-agent--extract-gptel-edits (proposed-files)
+  "Extract standard gptel JSON edits, enforcing relative paths."
+  (let ((edits nil)
+        (root (locate-dominating-file default-directory ".git")))
+    (let ((project-root (if root
+                            (file-name-as-directory (expand-file-name root))
+                          (file-name-as-directory default-directory))))
+      (when (vectorp proposed-files)
+        (seq-doseq (item proposed-files)
+          (when (and item (listp item))
+            (let ((path (or (alist-get 'path item) (plist-get item :path)))
+                  (content (or (alist-get 'content item) (plist-get item :content))))
+              (when (and path (stringp path))
+                (let ((safe-path (substring-no-properties path)))
+                  
+                  ;; relative paths
+                  (when (file-name-absolute-p safe-path)
+                    (setq safe-path (file-relative-name safe-path project-root)))
+                  
+                  (push (cons safe-path
+                              (if (stringp content)
+                                  (substring-no-properties content)
+                                content))
+                        edits)))))))
+      edits)))
 
 ;; async
 
@@ -146,27 +181,6 @@ Format: ((NAME . DIRECTORY) ...)")
                  (format "SUCCESS: Content successfully dispatched to buffer '%s'." buffer_name)))))
 
 (add-to-list 'gptel-tools macher-agent-write-to-buffer-tool)
-
-;;;###autoload
-(defvar macher-agent-edit-file-tool
-  (gptel-make-tool
-   :name "edit_file_in_workspace"
-   :description "Apply code changes to a file in the workspace. You MUST use this tool to save your edits before calling execution tools like rtk_cargo_runner, otherwise they will run against stale code."
-   :args (list '(:name "path" :type string :description "Path to the file, relative to the workspace root.")
-               '(:name "content" :type string :description "The complete new source code for the file."))
-   :function (lambda (path content)
-               (let* ((safe-path (substring-no-properties path))
-                      (safe-content (substring-no-properties content))
-                      (full-path (expand-file-name safe-path default-directory)))
-                 (make-directory (file-name-directory full-path) t)
-                 (with-current-buffer (find-file-noselect full-path)
-                   (erase-buffer)
-                   (insert safe-content)
-                   ;; Marking as modified forces macher to track it as a pending edit
-                   (set-buffer-modified-p t))
-                 (format "SUCCESS: File '%s' updated in the in-memory workspace. Ready for execution tools." safe-path)))))
-
-(add-to-list 'gptel-tools macher-agent-edit-file-tool)
 
 (defun macher-agent--collision-warning (patch-content context)
   "Inspect the proposed edits for path collisions and inject a warning if necessary."
