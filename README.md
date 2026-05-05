@@ -62,22 +62,18 @@ This setup assumes you have [context-builder](https://github.com/igorls/context-
 
 ### Agentic workflow
 
-This workflow demonstrates how to use the planner preset to analyse a repository and seamlessly hand off the implementation details to an isolated sub-agent.
+This workflow demonstrates how to use a planner to seamlessly hand off the implementation details to an isolated sub-agent (or group) entirely through tool calls.
 
-Start your planning session
-- Open a new buffer give it a name like *Planner*
-- Activate ```gptel-mode``` (you can select a planner preset for example)
+* `spawn_subagent` - Instantiate a new, macher context isolated sub-agent buffer in same workspace
+* `write_to_buffer` - Dispatches the plans/instructions directly into the newly created sub-agent's buffer.
+* `execute_subagent_blocking` - Triggers the sub-agent to execute its task autonomously and waiting (allows for patches to be applied or limit parallel LLM execution)
+* `execute_subagent_buffer` - Fire and forget. Best when sub agents in own workspace
 
-Instantiate the executor
-- Run ```M-x macher-agent-add-subagent```.
-- You're prompted for an agent name
-- When prompted for the directory, select the specific sub-module you want the agent to work in
-- This automatically injects a system directive into your active planner buffer, informing the LLM that *macher-agent: x* is available.
 
-Delegate the task
-- Prompt the planner with your objective and end with "dispatch/write the plan to x buffer" or similar
-- The planner will use ```write_to_buffer``` to push the text directly into the sub agents buffer.
+### Semi-agentic workflow
 
-Execute the plan
-- Switch to the *macher-agent: <sub agent>* buffer.
-- Add a preset to avoid prompt collisions and away it goes. If it uses macher-agent tools they will work async in the background without locking GUI and having access to the tools as the sandbox evolves...
+Human-in-the-loop orchestratio using interactive Emacs commands to manually manage your sub-agents.
+
+* `M-x macher-agent-add-subagent` - Interactively prompts you for a name and a target directory, then spins up a dedicated, isolated sub-agent buffer locked to that specific workspace. Makes current agent aware of sub agents, for example allowing you to instruct it to `write_to_buffer` with plans, research etc.
+* `M-x macher-agent-clear-context` - Clears the persistent memory and pending edits of the current sub-agent buffer, allowing you to start a completely fresh task without destroying the buffer itself.
+* **Manual Execution** - You can manually type your instructions directly into any sub-agent buffer and trigger `gptel-send` (or `macher-implement`). The agent will still execute its tasks asynchronously in the background and generate a reviewable patch, but you remain in full control of the dispatching.

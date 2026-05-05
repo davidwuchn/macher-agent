@@ -173,6 +173,43 @@ Format: ((NAME . DIRECTORY) ...)")
 
 (advice-add 'gptel-request :around #'macher-agent--inject-context-advice)
 
+;; macher-agent-tools
+
+(defvar macher-agent-spawn-subagent-tool
+  (gptel-make-tool
+   :name "spawn_subagent"
+   :description "Create a new, isolated sub-agent in the current project directory. You provide the name. Use this to spin up a worker for a specific task."
+   :args (list '(:name "name" :type string :description "The name of the new sub-agent."))
+   :function (lambda (name)
+               ;; Inherit the current buffer's directory
+               (macher-agent-add-subagent name default-directory)
+               (format "SUCCESS: Sub-agent '%s' created and locked to %s." name default-directory))))
+
+(add-to-list 'gptel-tools macher-agent-spawn-subagent-tool)
+
+(defvar macher-agent-execute-blocking-tool
+  (gptel-make-tool
+   :name "execute_subagent_blocking"
+   :description "Trigger a sub-agent and WAIT for it to finish its task before continuing. Call this after dispatching instructions via write_to_buffer."
+   :async t
+   :args (list '(:name "buffer_name" :type string :description "The exact name of the destination buffer."))
+   :function (lambda (callback buffer-name)
+               (let ((buf (get-buffer (substring-no-properties buffer-name))))
+                 (if (not (buffer-live-p buf))
+                     (funcall callback (format "ERROR: Buffer '%s' does not exist." buffer-name))
+                   (with-current-buffer buf
+                     (goto-char (point-max))
+                     (gptel-send)
+                     (if gptel--fsm
+                         (macher--add-termination-handler
+                          gptel--fsm
+                          (lambda (fsm)
+                            (funcall callback (format "SUCCESS: Sub-agent '%s' has finished executing." buffer-name))))
+                       (funcall callback "ERROR: Failed to start gptel request in sub-agent."))))))))
+
+(add-to-list 'gptel-tools macher-agent-execute-blocking-tool)
+
+;; vanilla gptel-tools but related to above
 ;;;###autoload
 (defvar macher-agent-write-to-buffer-tool
   (gptel-make-tool
@@ -188,6 +225,25 @@ Format: ((NAME . DIRECTORY) ...)")
                  (format "SUCCESS: Content successfully dispatched to buffer '%s'." buffer_name)))))
 
 (add-to-list 'gptel-tools macher-agent-write-to-buffer-tool)
+
+(defvar macher-agent-execute-subagent-tool
+  (gptel-make-tool
+   :name "execute_subagent_buffer"
+   :description "Trigger a sub-agent to begin processing the instructions in its buffer."
+   :args (list '(:name "buffer_name" 
+                       :type string 
+                       :description "The exact name of the destination buffer."))
+   :function (lambda (buffer_name)
+               (let ((buf (get-buffer (substring-no-properties buffer_name))))
+                 (if (buffer-live-p buf)
+                     (with-current-buffer buf
+                       (goto-char (point-max))
+                       (gptel-send)
+                       (format "SUCCESS: Sub-agent in '%s' has been triggered and is executing asynchronously." buffer_name))
+                   (format "ERROR: Buffer '%s' does not exist. Ensure the sub-agent was instantiated." buffer_name))))))
+
+(add-to-list 'gptel-tools macher-agent-execute-subagent-tool)
+
 
 (defun macher-agent--collision-warning (context fsm callback)
   "Inspect the proposed edits for path collisions and inject a warning if necessary."
