@@ -4,11 +4,15 @@ This is a collection of tools inspired by [gptel-agent](https://github.com/karth
 
 This attempts to avoid working directly on live files and instead operates within the macher context. With the verification gate being the final patch that's output at the end of execution.
 
-This also contains some helpers to make tools that work in the macher ephemeral context using ```macher-agent-make-tool```
+This also contains some helpers to make tools that work in the macher ephemeral context using `macher-agent-make-tool`, native sub-agent orchestration with `macher-agent-add-subagent`, and event-loop blocking workarounds to keep the GUI free.
 
-Native sub-agent orhcestation with ```macher-agent-add-subagent```
+## Why macher-agent?
 
-A bit of work around the event-loop blocking to keep the GUI free -- gptel is good at this but needed some tweaks for the same experience with macher.
+`macher-agent` enables an agent to execute shell commands (like `cargo check` or test suites) in an isolated sandbox against its own unsaved, in-memory edits. The macher context persists by default across auto-continuations effectively providing a continuous `macher-revise` loop by default until the objective is achieved. 
+
+The auto sync is able to determine if patches were applied, if intermediate edits have been made or if the context is still valid. You only need to use clear to intentionally remove outstanding changes from the agent context.
+
+You can also adopt a auto-agentic CLI style approach where a planner dynamically spins up, delegates to sub-agents entirely through tool calls. Or you could use a semi-agentic workflow, manually instantiating sub-agents and dispatching instructions yourself while still benefiting from the non-blocking, sandboxed execution.
 
 
 ## Instatllation

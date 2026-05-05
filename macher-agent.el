@@ -64,8 +64,6 @@
 
 ;; context wrappers
 
-;; --- CONTEXT WRAPPERS ---
-
 (defun macher-agent--get-context-edits (context)
   "Extract in-memory changes from the given macher CONTEXT."
   (let ((edits nil))
@@ -152,26 +150,61 @@ Does NOT block the Emacs event loop."
   "An alist tracking active sub-agents globally for the current Emacs session.
 Format: ((NAME . DIRECTORY) ...)")
 
-(defun macher-agent--inject-context-advice (orig-fn &optional prompt &rest args)
-  "Dynamically inject sub-agent context into the gptel request payload at send-time."
-  (if macher-agent-active-subagents
-      (let* ((system-arg (plist-get args :system))
-             (safe-system-msg (if (boundp 'gptel-system-message) 
-                                  gptel-system-message 
-                                ""))
-             (base-system (or system-arg safe-system-msg ""))
-             (agent-descriptions 
-              (mapconcat (lambda (agent)
-                           (format "- Buffer '*macher-agent: %s*' (Directory: %s)" 
-                                   (car agent) (cdr agent)))
-                         macher-agent-active-subagents "\n"))
-             (directive (format "\n\nSYSTEM DIRECTIVE: You have access to the following isolated sub-agent workspaces. You may dispatch instructions to them using the write_to_buffer tool:\n%s" agent-descriptions))
-             (new-system (concat base-system directive))
-             (new-args (plist-put (copy-sequence args) :system new-system)))
-        (apply orig-fn prompt new-args))
-    (apply orig-fn prompt args)))
+(defun macher-agent--auto-sync-context (ctx)
+  "Check the physical disk and fast-forward the agent's memory if needed."
+  (when ctx
+    (let ((contents (macher-context-contents ctx))
+          (synced nil))
+      (dolist (entry contents)
+        (let* ((path (car entry))
+               (content-pair (cdr entry))
+               (orig (car content-pair))
+               (new (cdr content-pair))
+               (disk (when (file-exists-p path)
+                       (with-temp-buffer
+                         (insert-file-contents path)
+                         (buffer-string)))))
+          (when disk
+            (cond
+             ;; fast-forward baseline
+             ((and new (string= disk new) (not (string= orig new)))
+              (setcar content-pair disk)
+              (setq synced t))
+             ;; intermediate edit
+             ((and (not (string= disk orig)) (not (string= disk new)))
+              (setcar content-pair disk)
+              (setcdr content-pair disk)
+              (setq synced t))))))
+      ;; Reset
+      (when synced
+        (setf (macher-context-dirty-p ctx) nil)))))
 
-(advice-add 'gptel-request :around #'macher-agent--inject-context-advice)
+(defun macher-agent--setup-tools-advice (orig-fn fsm get-context)
+  "Advise macher tool setup to use a persistent context and auto-sync with disk."
+  (let* ((info (gptel-fsm-info fsm))
+         (buffer (plist-get info :buffer)))
+    (if (and buffer (buffer-live-p buffer))
+        (with-current-buffer buffer
+          (let ((original-get-context get-context))
+            (funcall orig-fn fsm
+                     (lambda ()
+                       (funcall original-get-context)
+                       (unless macher-agent--persistent-context
+                         (setq macher-agent--persistent-context (funcall original-get-context)))
+                       
+                       (let ((ctx macher-agent--persistent-context))
+                         (when ctx
+                           ;; Automatically validate memory against the file system
+                           (macher-agent--auto-sync-context ctx)
+                           
+                           (let ((fsm-info (gptel-fsm-info fsm)))
+                             (setf (gptel-fsm-info fsm) 
+                                   (plist-put fsm-info :macher--context ctx)))
+                           (setq macher--fsm-latest fsm))
+                         ctx)))))
+      (funcall orig-fn fsm get-context))))
+
+(advice-add 'macher--setup-tools :around #'macher-agent--setup-tools-advice)
 
 ;; macher-agent-tools
 
