@@ -1,3 +1,4 @@
+
 # macher-agent
 
 This is a collection of tools inspired by [gptel-agent](https://github.com/karthink/gptel-agent/) but using the ethos of [macher](https://github.com/kmontag/macher). 
@@ -70,7 +71,7 @@ This workflow demonstrates how to use a planner to seamlessly hand off the imple
 
 * `spawn_subagent` - Instantiate a new, macher context isolated sub-agent buffer in same workspace
 * `write_to_buffer` - Dispatches the plans/instructions directly into the newly created sub-agent's buffer.
-* `execute_subagent_blocking` - Triggers the sub-agent to execute its task autonomously and waiting (allows for patches to be applied or limit parallel LLM execution)
+* `execute_subagent_buffer_blocking` - Triggers the sub-agent to execute its task autonomously and waiting (allows for patches to be applied or limit parallel LLM execution)
 * `execute_subagent_buffer` - Fire and forget. Best when sub agents in own workspace
 
 

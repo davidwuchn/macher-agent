@@ -62,6 +62,108 @@
   "Return the root directory for an isolated sub-agent workspace."
   (cdr project))
 
+(defvar-local macher-agent--gptel-finished nil
+  "Flag to indicate standard gptel finished its current stream.")
+
+(defun macher-agent--gptel-finished-hook (&rest _)
+  "Hook to mark gptel request as finished."
+  (setq macher-agent--gptel-finished t))
+
+(defun macher-agent--wait-for-completion (buf callback actual-name fsm)
+  "Wait for the FSM to complete using event-driven handlers, catching auto-continuations."
+  (macher--add-termination-handler
+   fsm
+   (lambda (_)
+     (run-at-time 0.5 nil
+                  (lambda ()
+                    (if (not (buffer-live-p buf))
+                        (funcall callback (format "ERROR: Buffer '%s' was killed." actual-name))
+                      (let ((current-fsm (buffer-local-value 'macher--fsm-latest buf)))
+                        (if (and current-fsm (not (eq current-fsm fsm)))
+                            (macher-agent--wait-for-completion buf callback actual-name current-fsm)
+                          (funcall callback (format "SUCCESS: Sub-agent '%s' completely finished its tasks." actual-name))))))))))
+
+(defun macher-agent--catch-fsm-and-wait (buf callback actual-name)
+  "Poll until macher initializes the FSM OR standard gptel finishes generating."
+  (if (not (buffer-live-p buf))
+      (funcall callback (format "ERROR: Buffer '%s' was killed." actual-name))
+    (let ((fsm (buffer-local-value 'macher--fsm-latest buf))
+          (finished (buffer-local-value 'macher-agent--gptel-finished buf)))
+      (cond
+       ;; Case 1: The LLM used a tool! Hand off to the robust FSM event listener.
+       (fsm
+        (macher-agent--wait-for-completion buf callback actual-name fsm))
+       
+       ;; Case 2: The LLM replied with plain text and gptel says it finished writing.
+       (finished
+        (run-at-time 0.5 nil
+                     (lambda ()
+                       (if (not (buffer-live-p buf))
+                           (funcall callback (format "ERROR: Buffer '%s' killed." actual-name))
+                         (let ((new-fsm (buffer-local-value 'macher--fsm-latest buf)))
+                           (if new-fsm
+                               (macher-agent--wait-for-completion buf callback actual-name new-fsm)
+                             (funcall callback (format "SUCCESS: Sub-agent '%s' finished responding (No tools used)." actual-name))))))))
+       
+       ;; Case 3: Still actively generating text. Check again in 0.1s.
+       (t
+        (run-at-time 0.1 nil (lambda () (macher-agent--catch-fsm-and-wait buf callback actual-name))))))))(defvar-local macher-agent--gptel-finished nil
+  "Flag to indicate standard gptel finished its current stream.")
+
+(defun macher-agent--gptel-finished-hook (&rest _)
+  "Hook to mark gptel request as finished."
+  (setq macher-agent--gptel-finished t))
+
+(defun macher-agent--wait-for-completion (buf callback actual-name fsm)
+  "Wait for the FSM to complete using event-driven handlers, catching auto-continuations."
+  (macher--add-termination-handler
+   fsm
+   (lambda (_)
+     (run-at-time 0.5 nil
+                  (lambda ()
+                    (if (not (buffer-live-p buf))
+                        (funcall callback (format "ERROR: Buffer '%s' was killed." actual-name))
+                      (let ((current-fsm (buffer-local-value 'macher--fsm-latest buf)))
+                        (if (and current-fsm (not (eq current-fsm fsm)))
+                            (macher-agent--wait-for-completion buf callback actual-name current-fsm)
+                          (funcall callback (format "SUCCESS: Sub-agent '%s' completely finished its tasks." actual-name))))))))))
+
+(defun macher-agent--catch-fsm-and-wait (buf callback actual-name)
+  "Poll until macher initializes the FSM OR standard gptel finishes generating."
+  (if (not (buffer-live-p buf))
+      (funcall callback (format "ERROR: Buffer '%s' was killed." actual-name))
+    (let ((fsm (buffer-local-value 'macher--fsm-latest buf))
+          (finished (buffer-local-value 'macher-agent--gptel-finished buf)))
+      (cond
+       (fsm
+        (macher-agent--wait-for-completion buf callback actual-name fsm))
+       
+       (finished
+        (run-at-time 0.5 nil
+                     (lambda ()
+                       (if (not (buffer-live-p buf))
+                           (funcall callback (format "ERROR: Buffer '%s' killed." actual-name))
+                         (let ((new-fsm (buffer-local-value 'macher--fsm-latest buf)))
+                           (if new-fsm
+                               (macher-agent--wait-for-completion buf callback actual-name new-fsm)
+                             (funcall callback (format "SUCCESS: Sub-agent '%s' finished responding (No tools used)." actual-name))))))))
+       
+       (t
+        (run-at-time 0.1 nil (lambda () (macher-agent--catch-fsm-and-wait buf callback actual-name))))))))
+
+(defun macher-agent--catch-fsm-and-wait (buf callback actual-name attempts)
+  "Poll briefly until macher initializes the FSM, then hand off to the event listener."
+  (if (not (buffer-live-p buf))
+      (funcall callback (format "ERROR: Buffer '%s' was killed." actual-name))
+    (let ((fsm (buffer-local-value 'macher--fsm-latest buf)))
+      (if fsm
+          ;; We caught the new FSM! Attach the event handler immediately.
+          (macher-agent--wait-for-completion buf callback actual-name fsm)
+        (if (> attempts 20) ;; Give up after 2 seconds
+            (funcall callback "ERROR: Sub-agent FSM failed to initialize.")
+          ;; Check again in 0.1s
+          (run-at-time 0.1 nil (lambda () (macher-agent--catch-fsm-and-wait buf callback actual-name (1+ attempts)))))))))
+
 ;; context wrappers
 
 (defun macher-agent--get-context-edits (context)
@@ -125,24 +227,35 @@ Does NOT block the Emacs event loop."
                     (funcall callback output))))))))))))
 
 ;;;###autoload
-(defun macher-agent-add-subagent (name dir)
-  "Interactively instantiate an isolated sub-agent buffer for task delegation."
+(defun macher-agent-add-subagent (name dir &optional no-inject)
+  "Interactively instantiate an isolated sub-agent buffer for task delegation.
+If NO-INJECT is t, skip injecting the system directive into the parent buffer."
   (interactive "sSub-agent name: \nDTarget directory: ")
   (let* ((buf-name (format "*macher-agent: %s*" name))
          (full-dir (file-name-as-directory (expand-file-name dir)))
-         (buf (get-buffer-create buf-name)))
+         (buf (get-buffer-create buf-name))
+         (parent-buf (current-buffer)))
     
     (with-current-buffer buf
       (markdown-mode)
       (gptel-mode 1)
       (setq default-directory full-dir)
-      
-      ;; RESTORED: Explicitly bind the macher workspace.
       (setq-local macher--workspace (cons 'directory full-dir))
-      
       (insert (format "# Sub-Agent: %s\nWorkspace locked to: %s\n\n" name full-dir)))
 
     (push (cons name full-dir) macher-agent-active-subagents)
+    
+    ;; Inject directive invisibly so the LLM reads it but the UI stays clean
+    (unless no-inject
+      (with-current-buffer parent-buf
+        (when (derived-mode-p 'gptel-mode 'markdown-mode 'org-mode 'text-mode)
+          (save-excursion
+            (goto-char (point-max))
+            (let ((start (point)))
+              (insert (format "\n\n[SYSTEM DIRECTIVE: A sub-agent named '%s' has been instantiated and locked to '%s'. You can dispatch tasks to it using the 'write_to_buffer' tool followed by 'execute_subagent_buffer_blocking'. The exact buffer_name to use is '%s'.]\n\n" name full-dir buf-name))
+              (put-text-property start (point) 'invisible t)
+              (put-text-property start (point) 'intangible t)
+              (put-text-property start (point) 'rear-nonsticky t))))))
     
     (message "Instantiated sub-agent: %s (Macher workspace bound)" buf-name)))
 
@@ -208,37 +321,49 @@ Format: ((NAME . DIRECTORY) ...)")
 
 ;; macher-agent-tools
 
+(defun macher-agent--resolve-buffer-name (name)
+  "Ensure the buffer name has the correct macher-agent prefix."
+  (let ((name-str (substring-no-properties name)))
+    (if (string-prefix-p "*macher-agent:" name-str)
+        name-str
+      (format "*macher-agent: %s*" name-str))))
+
 (defvar macher-agent-spawn-subagent-tool
   (gptel-make-tool
    :name "spawn_subagent"
    :description "Create a new, isolated sub-agent in the current project directory. You provide the name. Use this to spin up a worker for a specific task."
    :args (list '(:name "name" :type string :description "The name of the new sub-agent."))
    :function (lambda (name)
-               ;; Inherit the current buffer's directory
-               (macher-agent-add-subagent name default-directory)
-               (format "SUCCESS: Sub-agent '%s' created and locked to %s." name default-directory))))
+               (let ((buf-name (format "*macher-agent: %s*" name)))
+                 ;; Pass 't' to no-inject so it doesn't clutter the LLM's chat log
+                 (macher-agent-add-subagent name default-directory t)
+                 (format "SUCCESS: Sub-agent created. The EXACT buffer name to use for tools is '%s'." buf-name)))))
 
 (add-to-list 'gptel-tools macher-agent-spawn-subagent-tool)
 
 (defvar macher-agent-execute-blocking-tool
   (gptel-make-tool
-   :name "execute_subagent_blocking"
+   :name "execute_subagent_buffer_blocking"
    :description "Trigger a sub-agent and WAIT for it to finish its task before continuing. Call this after dispatching instructions via write_to_buffer."
    :async t
    :args (list '(:name "buffer_name" :type string :description "The exact name of the destination buffer."))
-   :function (lambda (callback buffer-name)
-               (let ((buf (get-buffer (substring-no-properties buffer-name))))
+   :function (lambda (callback buffer_name)
+               (let* ((actual-name (macher-agent--resolve-buffer-name buffer_name))
+                      (buf (get-buffer actual-name)))
                  (if (not (buffer-live-p buf))
-                     (funcall callback (format "ERROR: Buffer '%s' does not exist." buffer-name))
+                     (funcall callback (format "ERROR: Buffer '%s' does not exist." actual-name))
                    (with-current-buffer buf
+                     ;; Wipe old trackers
+                     (setq-local macher--fsm-latest nil)
+                     (setq-local macher-agent--gptel-finished nil)
+                     ;; Guarantee the fallback hook is attached to this buffer
+                     (add-hook 'gptel-post-response-functions #'macher-agent--gptel-finished-hook nil t)
+                     
                      (goto-char (point-max))
                      (gptel-send)
-                     (if gptel--fsm
-                         (macher--add-termination-handler
-                          gptel--fsm
-                          (lambda (fsm)
-                            (funcall callback (format "SUCCESS: Sub-agent '%s' has finished executing." buffer-name))))
-                       (funcall callback "ERROR: Failed to start gptel request in sub-agent."))))))))
+                     
+                     ;; Start the hybrid polling hand-off
+                     (macher-agent--catch-fsm-and-wait buf callback actual-name)))))))
 
 (add-to-list 'gptel-tools macher-agent-execute-blocking-tool)
 
@@ -247,15 +372,16 @@ Format: ((NAME . DIRECTORY) ...)")
 (defvar macher-agent-write-to-buffer-tool
   (gptel-make-tool
    :name "write_to_buffer"
-   :description "Write complete content to a specific Emacs buffer. You must call this tool ONLY ONCE per task."
+   :description "Write complete content to a specific Emacs buffer.."
    :args (list '(:name "buffer_name" :type string :description "The exact name of the destination buffer.")
                '(:name "content" :type string :description "The text content to write."))
    :function (lambda (buffer_name content)
-               (let ((target-buffer (get-buffer-create (substring-no-properties buffer_name))))
+               (let* ((actual-name (macher-agent--resolve-buffer-name buffer_name))
+                      (target-buffer (get-buffer-create actual-name)))
                  (with-current-buffer target-buffer
                    (goto-char (point-max))
                    (insert "\n\n" (substring-no-properties content) "\n"))
-                 (format "SUCCESS: Content successfully dispatched to buffer '%s'." buffer_name)))))
+                 (format "SUCCESS: Content successfully dispatched to buffer '%s'." actual-name)))))
 
 (add-to-list 'gptel-tools macher-agent-write-to-buffer-tool)
 
@@ -263,17 +389,16 @@ Format: ((NAME . DIRECTORY) ...)")
   (gptel-make-tool
    :name "execute_subagent_buffer"
    :description "Trigger a sub-agent to begin processing the instructions in its buffer."
-   :args (list '(:name "buffer_name" 
-                       :type string 
-                       :description "The exact name of the destination buffer."))
+   :args (list '(:name "buffer_name" :type string :description "The exact name of the destination buffer."))
    :function (lambda (buffer_name)
-               (let ((buf (get-buffer (substring-no-properties buffer_name))))
+               (let* ((actual-name (macher-agent--resolve-buffer-name buffer_name))
+                      (buf (get-buffer actual-name)))
                  (if (buffer-live-p buf)
                      (with-current-buffer buf
                        (goto-char (point-max))
                        (gptel-send)
-                       (format "SUCCESS: Sub-agent in '%s' has been triggered and is executing asynchronously." buffer_name))
-                   (format "ERROR: Buffer '%s' does not exist. Ensure the sub-agent was instantiated." buffer_name))))))
+                       (format "SUCCESS: Sub-agent in '%s' has been triggered and is executing asynchronously." actual-name))
+                   (format "ERROR: Buffer '%s' does not exist." actual-name))))))
 
 (add-to-list 'gptel-tools macher-agent-execute-subagent-tool)
 
