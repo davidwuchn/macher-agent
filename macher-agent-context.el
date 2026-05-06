@@ -2,12 +2,27 @@
 
 (require 'project)
 
+(defvar-local macher-agent--is-workspace nil
+  "Flag indicating this buffer operates under the safe macher-agent file scanner.")
+
+(defun macher-agent--project-try-agent (dir)
+  "Intercept project.el queries to inject the crash-proof agent backend."
+  (when macher-agent--is-workspace
+    (cons 'macher-agent dir)))
+
+;; Inject our custom scanner to the front of Emacs's project detection list
+(add-hook 'project-find-functions #'macher-agent--project-try-agent)
+
 (defvar-local macher-agent--persistent-context nil
   "Stores the macher context across continuous agent tool turns.")
 
 (cl-defmethod project-root ((project (head macher-agent)))
   "Return the root directory for an isolated sub-agent workspace."
   (cdr project))
+
+(cl-defmethod project-name ((project (head macher-agent)))
+  "Return a safe name for the isolated sub-agent workspace."
+  (file-name-nondirectory (directory-file-name (cdr project))))
 
 (cl-defmethod project-files ((project (head macher-agent)) &optional dirs)
   "Safely return files for the agent workspace, strictly ignoring unreadable directories."

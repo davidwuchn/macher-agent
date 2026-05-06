@@ -58,13 +58,14 @@ Does NOT block the Emacs event loop and safely returns both successes and errors
                       (funcall callback success-override)
                     (funcall callback output))))))))))))
 
-(cl-defmacro macher-agent-make-tool (&key name description args command-fn success-fn output-filter)
-  "Create a tool that automatically syncs macher's virtual edits into a sandbox before execution."
+(cl-defmacro macher-agent-make-tool (&key name description args command-fn success-fn output-filter category)
+  "Create a tool that automatically syncs macher's virtual edits into a sandbox before execution.
+If CATEGORY is omitted, it defaults to \"macher-agent\"."
   `(gptel-make-tool
     :name ,name
     :description ,description
     :args ,args
-    :category "macher-tool-category"
+    :category ,(or category "macher-agent")
     :async t
     :function (lambda (callback &rest tool-args)
                 (let* ((fsm macher--fsm-latest)
