@@ -1,6 +1,8 @@
 
 # macher-agent
 
+https://github.com/user-attachments/assets/86d55bf3-2435-482e-9f86-360ad69e6e1b
+
 This is a collection of tools inspired by [gptel-agent](https://github.com/karthink/gptel-agent/) but using the ethos of [macher](https://github.com/kmontag/macher). 
 
 This attempts to avoid working directly on live files and instead operates within the macher context. With the verification gate being the final patch that's output at the end of execution.
