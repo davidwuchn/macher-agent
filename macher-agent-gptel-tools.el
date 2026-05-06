@@ -85,7 +85,6 @@
     :tools '("read_file_in_workspace" 
              "list_directory_in_workspace" 
              "search_in_workspace"
-             "get_current_time"
              "spawn_subagent"
              "write_to_buffer"
              "execute_subagent_buffer_blocking")))
