@@ -67,12 +67,12 @@ This setup assumes you have [context-builder](https://github.com/igorls/context-
 
 ### Agentic workflow
 
-This workflow demonstrates how to use a planner to seamlessly hand off the implementation details to an isolated sub-agent (or group) entirely through tool calls.
+This workflow demonstrates how to use the planner preset to analyse a repository and seamlessly hand off the implementation details to an isolated sub-agent entirely through tool calls.
 
-* `spawn_subagent` - Instantiate a new, macher context isolated sub-agent buffer in same workspace
-* `write_to_buffer` - Dispatches the plans/instructions directly into the newly created sub-agent's buffer.
-* `execute_subagent_buffer_blocking` - Triggers the sub-agent to execute its task autonomously and waiting (allows for patches to be applied or limit parallel LLM execution)
-* `execute_subagent_buffer` - Fire and forget. Best when sub agents in own workspace
+* `spawn_subagent` - Instantiates a new, isolated sub-agent buffer locked to the current project directory.
+* `write_to_buffer` - Dispatches the implementation plan and specific instructions directly into the newly created sub-agent's buffer.
+* `execute_subagent_buffer_blocking` - Triggers the sub-agent to execute its task autonomously, pausing the parent agent until the sub-agent finishes its work and generates a patch.
+* `execute_subagent_buffer_nonblocking` - Triggers the sub-agent to begin executing asynchronously in the background, allowing the parent agent to immediately continue its own processing without waiting.
 
 
 ### Semi-agentic workflow
