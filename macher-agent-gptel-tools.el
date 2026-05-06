@@ -4,6 +4,7 @@
   (gptel-make-tool
    :name "spawn_subagent"
    :description "Create a new, isolated sub-agent in the current project directory. You provide the name. Use this to spin up a worker for a specific task."
+   :category "macher-agent-plan"
    :args (list '(:name "name" :type string :description "The name of the new sub-agent."))
    :function (lambda (name)
                (let ((buf-name (format "*macher-agent: %s*" name)))
@@ -14,6 +15,7 @@
   (gptel-make-tool
    :name "write_to_buffer"
    :description "Write complete content to a specific Emacs buffer. You must call this tool ONLY ONCE per task."
+   :category "macher-agent-plan"
    :args (list '(:name "buffer_name" :type string :description "The exact name of the destination buffer.")
                '(:name "content" :type string :description "The text content to write."))
    :function (lambda (buffer_name content)
@@ -28,6 +30,7 @@
   (gptel-make-tool
    :name "execute_subagent_buffer_nonblocking"
    :description "Trigger a sub-agent to begin processing asynchronously without waiting for it to finish."
+   :category "macher-agent-plan"
    :args (list '(:name "buffer_name" :type string :description "The exact name of the destination buffer."))
    :function (lambda (buffer_name)
                (let* ((actual-name (macher-agent--resolve-buffer-name buffer_name))
@@ -51,6 +54,7 @@
   (gptel-make-tool
    :name "execute_subagent_buffer_blocking"
    :description "Trigger a sub-agent and WAIT for it to finish its task before continuing. Call this after dispatching instructions via write_to_buffer."
+   :category "macher-agent-plan"
    :async t
    :args (list '(:name "buffer_name" :type string :description "The exact name of the destination buffer."))
    :function (lambda (callback buffer_name)
@@ -74,11 +78,17 @@
                          (error
                           (funcall callback (format "ERROR starting request: %S" err)))))))))))
 
-;; Register the tools globally
-(add-to-list 'gptel-tools macher-agent-spawn-subagent-tool)
-(add-to-list 'gptel-tools macher-agent-write-to-buffer-tool)
-(add-to-list 'gptel-tools macher-agent-execute-nonblocking-tool)
-(add-to-list 'gptel-tools macher-agent-execute-blocking-tool)
+
+(with-eval-after-load 'macher
+  (gptel-make-preset "macher-agent-plan"
+    :description "Project planning, architectural analysis, and sub-agent orchestration"
+    :tools '("read_file_in_workspace" 
+             "list_directory_in_workspace" 
+             "search_in_workspace"
+             "get_current_time"
+             "spawn_subagent"
+             "write_to_buffer"
+             "execute_subagent_buffer_blocking")))
 
 (provide 'macher-agent-gptel-tools)
 ;;; macher-agent-gptel-tools.el ends here
