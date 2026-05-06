@@ -64,7 +64,7 @@ SPEED is the delay between keystrokes (default 0.04 seconds)."
     (sit-for 1.0) 
 
     ;; Simulate the user typing the objective
-    (demo-macher-agent--type "@macher-agent-plan Spawn a sub-agent. Write instructions in its buffer asking 'What is the capital of France?' and execute it with the blocking tool. Don't wait for an answer")
+    (demo-macher-agent--type "@macher-agent-plan Spawn a sub-agent. Write instructions in its buffer asking 'What is the capital of France?' and execute it with the blocking tool. The sub agent won't provide output")
 
     ;; Pause briefly, then fire the request to the LLM
     (sit-for 0.5)
