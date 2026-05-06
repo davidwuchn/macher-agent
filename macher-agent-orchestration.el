@@ -20,20 +20,24 @@ If DIR is empty, the agent is created as a stateless chat without file system ac
   (let* ((buf-name (format "*macher-agent: %s*" name))
          (buf (get-buffer-create buf-name))
          (parent-buf (current-buffer))
-         ;; FIX: Protect against nil directories from async temp buffers
+
          (safe-dir (if (and dir (stringp dir)) dir (or default-directory "~/")))
          (has-dir (not (string-empty-p safe-dir)))
          (full-dir (when has-dir (file-name-as-directory (expand-file-name safe-dir)))))
     
     (with-current-buffer buf
+
       (when has-dir
         (setq default-directory full-dir)
-        ;; 1. Activate the flag so our project.el hook intercepts the scanner
         (setq-local macher-agent--is-workspace t)
-        ;; 2. Feed macher the standard string format it natively expects
         (setq-local macher--workspace (cons 'project full-dir)))
-      (markdown-mode)
-      (gptel-mode 1)
+
+      (condition-case err
+          (progn
+            (markdown-mode)
+            (gptel-mode 1))
+        (error (message "Warning: Mode initialization had an error: %s" (error-message-string err))))
+
       (insert (format "# Sub-Agent: %s\nWorkspace: %s\n\n" name (if has-dir full-dir "None (Stateless Chat)"))))
 
     (push (cons name (or full-dir "None")) macher-agent-active-subagents)

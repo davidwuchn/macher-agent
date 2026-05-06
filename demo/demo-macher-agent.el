@@ -35,31 +35,36 @@ SPEED is the delay between keystrokes (default 0.04 seconds)."
   (delete-other-windows)
   (split-window-right)
 
-  ;; Programmatically prepare the Planner buffer (vastly safer than driving the minibuffer)
-  (let ((buf (get-buffer-create "*Planner*")))
+  ;; Dynamically resolve the directory this script lives in
+  (let* ((script-file (or load-file-name buffer-file-name))
+         (demo-dir (if script-file (file-name-directory script-file) default-directory))
+         (buf (get-buffer-create "*Planner*")))
+    
+    (with-current-buffer buf
+      ;; 1. Lock the buffer to the demo directory immediately
+      (setq default-directory demo-dir)
+      
+      (markdown-mode)
+      (gptel-mode 1)
+
+      ;; Apply the preset directive and lock in the orchestration tools
+      (when (assoc "macher-agent-plan" gptel-directives)
+        (setq-local gptel--system-message (alist-get "macher-agent-plan" gptel-directives))
+        (make-local-variable 'gptel-tools)
+        (setq gptel-tools '("spawn_subagent"
+                            "write_to_buffer"
+                            "execute_subagent_buffer_blocking")))
+
+      (insert "# Macher Agent Orchestrator\n\n"))
+
+    ;; Switch to the buffer only after the environment is fully set up
     (switch-to-buffer buf)
-    (markdown-mode)
-    (gptel-mode 1)
 
-    ;; Apply the preset directive and lock in the orchestration tools
-    (when (assoc "macher-agent-plan" gptel-directives)
-      (setq-local gptel--system-message (alist-get "macher-agent-plan" gptel-directives))
-      (make-local-variable 'gptel-tools)
-      (setq gptel-tools '("read_file_in_workspace" 
-                          "list_directory_in_workspace" 
-                          "search_in_workspace"
-                          "get_current_time"
-                          "build_project_context" 
-                          "spawn_subagent"
-                          "write_to_buffer"
-                          "execute_subagent_buffer_blocking")))
-
-    (insert "# Macher Agent Orchestrator\n\n")
     ;; Pause for a second so the viewer registers the clean buffer
     (sit-for 1.0) 
 
     ;; Simulate the user typing the objective
-    (demo-macher-agent--type "@macher-agent-plan Spawn a sub-agent named 'geo'. Write instructions in its buffer asking 'What is the capital of France?' and execute it with the blocking tool.")
+    (demo-macher-agent--type "@macher-agent-plan Spawn a sub-agent. Write instructions in its buffer asking 'What is the capital of France?' and execute it with the blocking tool. Don't wait for an answer")
 
     ;; Pause briefly, then fire the request to the LLM
     (sit-for 0.5)
