@@ -1,7 +1,7 @@
 
 # macher-agent
 
-https://github.com/user-attachments/assets/86d55bf3-2435-482e-9f86-360ad69e6e1b
+<img width="1175" height="739" alt="macher-agent-demo" src="https://github.com/user-attachments/assets/2b9dfd67-65fc-4518-9921-8f54143f1275" />
 
 This is a collection of tools inspired by [gptel-agent](https://github.com/karthink/gptel-agent/) but using the ethos of [macher](https://github.com/kmontag/macher). 
 
