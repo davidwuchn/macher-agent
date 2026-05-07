@@ -51,9 +51,7 @@ SPEED is the delay between keystrokes (default 0.04 seconds)."
       (when (assoc "macher-agent-plan" gptel-directives)
         (setq-local gptel--system-message (alist-get "macher-agent-plan" gptel-directives))
         (make-local-variable 'gptel-tools)
-        (setq gptel-tools '("spawn_subagent"
-                            "write_to_buffer"
-                            "execute_subagent_buffer_blocking")))
+        (setq gptel-tools '("spawn_subagent" "delegate_task_to_subagent")))
 
       (insert "# Macher Agent Orchestrator\n\n"))
 
@@ -64,7 +62,7 @@ SPEED is the delay between keystrokes (default 0.04 seconds)."
     (sit-for 1.0) 
 
     ;; Simulate the user typing the objective
-    (demo-macher-agent--type "@macher-agent-plan Spawn a sub-agent. Write instructions in its buffer asking 'What is the capital of France?' and execute it with the blocking tool. The sub agent won't provide output")
+    (demo-macher-agent--type "@macher-agent-plan spawn a sub agent and delgate the task 'What is the capital of France?' and show response.")
 
     ;; Pause briefly, then fire the request to the LLM
     (sit-for 0.5)

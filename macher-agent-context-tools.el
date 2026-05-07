@@ -14,49 +14,71 @@
                 (cons path new-content)))
             (macher-context-contents context))))
 
-(defun macher-agent--pure-async-execute (context cmd success-override callback)
+(defun macher-agent--pure-async-execute (project-root context cmd success-override callback)
   "Execute CMD inside a temporary sandbox cleanly and asynchronously.
-Does NOT block the Emacs event loop and safely returns both successes and errors."
-  (let* ((root (locate-dominating-file default-directory ".git"))
-         (project-root (if root
-                           (file-name-as-directory (expand-file-name root))
-                         (file-name-as-directory default-directory)))
-         (temp-dir (file-name-as-directory (expand-file-name (make-temp-file "sandbox-" t))))
-         (rsync-cmd (format "rsync -a --exclude='target/' --exclude='.git/' --exclude='node_modules/' %s %s"
-                            (shell-quote-argument project-root)
-                            (shell-quote-argument temp-dir)))
-         (rsync-proc (start-process-shell-command "rsync-sandbox" nil rsync-cmd)))
-    
-    (set-process-sentinel
-     rsync-proc
-     (lambda (r-proc _event)
-       (when (memq (process-status r-proc) '(exit signal))
-         (dolist (edit context)
-           (let* ((path (car edit))
-                  (content (cdr edit))
-                  (rel-path (file-relative-name path project-root))
-                  (full-path (expand-file-name rel-path temp-dir)))
-             (make-directory (file-name-directory full-path) t)
-             (with-temp-file full-path
-               (insert content))))
+Does NOT block the Emacs event loop and safely returns both successes and errors.
+Crucially, guarantees sandbox deletion to prevent disk leaks and safely supports TRAMP."
+  (let* ((temp-dir (file-name-as-directory (make-temp-file "sandbox-" t)))
+         (rsync-out-buf (generate-new-buffer " *macher-rsync-out*"))
          
-         (let* ((output-buffer (generate-new-buffer " *macher-async-out*"))
-                (target-cmd (format "cd %s && %s" (shell-quote-argument temp-dir) cmd))
-                (cmd-proc (start-process-shell-command "macher-cmd" output-buffer target-cmd)))
-           
-           (set-process-sentinel
-            cmd-proc
-            (lambda (cmd-p _cmd-event)
-              (when (memq (process-status cmd-p) '(exit signal))
-                (let ((output (with-current-buffer output-buffer (buffer-string)))
-                      (exit-code (process-exit-status cmd-p)))
-                  (kill-buffer output-buffer)
-                  
-                  (if (and success-override 
-                           (= exit-code 0) 
-                           (string-empty-p (string-trim output)))
-                      (funcall callback success-override)
-                    (funcall callback output))))))))))))
+         ;; Define all path logic in the main list
+         (local-root (file-local-name (expand-file-name project-root)))
+         (source (file-name-as-directory local-root))
+         (dest (file-local-name (expand-file-name temp-dir)))
+         
+         ;; Define the command string here so it's available to the whole function
+         (rsync-cmd (format "rsync -a --exclude='target/' %s. %s"
+                            (shell-quote-argument source)
+                            (shell-quote-argument dest))))
+    
+    ;; BODY START: rsync-cmd is now valid here
+    (message "Executing: %s" rsync-cmd)
+
+    (let ((default-directory project-root))
+      (set-process-sentinel
+       (start-file-process-shell-command "rsync-sandbox" rsync-out-buf rsync-cmd)
+       (lambda (r-proc _event)
+         (when (memq (process-status r-proc) '(exit signal))
+           (if (not (= (process-exit-status r-proc) 0))
+               (let ((err-out (with-current-buffer rsync-out-buf (string-trim (buffer-string)))))
+                 (kill-buffer rsync-out-buf)
+                 (delete-directory temp-dir t)
+                 (funcall callback (format "ERROR: Failed to create sandbox (rsync failed).\nCommand: %s\nOutput: %s" rsync-cmd err-out)))
+             
+             (kill-buffer rsync-out-buf)
+             (dolist (edit context)
+               (let* ((path (car edit))
+                      (content (cdr edit))
+                      (rel-path (file-relative-name path project-root))
+                      (full-path (expand-file-name rel-path temp-dir)))
+                 (if content
+                     (progn
+                       (make-directory (file-name-directory full-path) t)
+                       (with-temp-file full-path
+                         (insert content)))
+                   (when (file-exists-p full-path)
+                     (delete-file full-path)))))
+             
+             (let* ((output-buffer (generate-new-buffer " *macher-async-out*"))
+                    ;; Use 'dest' directly as it is the local temp path
+                    (target-cmd (format "cd %s && %s" (shell-quote-argument dest) cmd)))
+               
+               (let ((default-directory project-root))
+                 (set-process-sentinel
+                  (start-file-process-shell-command "macher-cmd" output-buffer target-cmd)
+                  (lambda (cmd-p _cmd-event)
+                    (when (memq (process-status cmd-p) '(exit signal))
+                      (let ((output (with-current-buffer output-buffer (buffer-string)))
+                            (exit-code (process-exit-status cmd-p)))
+                        
+                        (kill-buffer output-buffer)
+                        (delete-directory temp-dir t)
+                        
+                        (if (and success-override 
+                                 (= exit-code 0) 
+                                 (string-empty-p (string-trim output)))
+                            (funcall callback success-override)
+                          (funcall callback output)))))))))))))))
 
 (cl-defmacro macher-agent-make-tool (&key name description args command-fn success-fn output-filter category)
   "Create a tool that automatically syncs macher's virtual edits into a sandbox before execution.
@@ -70,7 +92,12 @@ If CATEGORY is omitted, it defaults to \"macher-agent\"."
     :function (lambda (callback &rest tool-args)
                 (let* ((fsm macher--fsm-latest)
                        (fsm-info (when fsm (gptel-fsm-info fsm)))
-                       (context (when fsm-info (plist-get fsm-info :macher--context))))
+                       (context (when fsm-info (plist-get fsm-info :macher--context)))
+                       ;; Idiomatically extract the root from the macher workspace
+                       (workspace (when context (macher-context-workspace context)))
+                       (project-root (if workspace 
+                                         (file-name-as-directory (macher--workspace-root workspace))
+                                       (file-name-as-directory default-directory))))
                   
                   (let* ((call-args (if (and tool-args (keywordp (car tool-args)))
                                         tool-args
@@ -85,6 +112,7 @@ If CATEGORY is omitted, it defaults to \"macher-agent\"."
                          (pending-edits (macher-agent--get-context-edits context)))
                     
                     (macher-agent--pure-async-execute
+                     project-root
                      pending-edits
                      cmd-string
                      success-override

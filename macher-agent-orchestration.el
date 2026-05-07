@@ -1,5 +1,7 @@
 ;;; macher-agent-orchestration.el --- Interactive sub-agent commands -*- lexical-binding: t; -*-
 
+(require 'macher)
+
 (defun macher-agent--resolve-buffer-name (name)
   "Ensure the buffer name has the correct macher-agent prefix."
   (let ((name-str (substring-no-properties name)))
@@ -20,26 +22,28 @@ If DIR is empty, the agent is created as a stateless chat without file system ac
   (let* ((buf-name (format "*macher-agent: %s*" name))
          (buf (get-buffer-create buf-name))
          (parent-buf (current-buffer))
-
          (safe-dir (if (and dir (stringp dir)) dir (or default-directory "~/")))
          (has-dir (not (string-empty-p safe-dir)))
          (full-dir (when has-dir (file-name-as-directory (expand-file-name safe-dir)))))
     
     (with-current-buffer buf
-
       (when has-dir
         (setq default-directory full-dir)
         (setq-local macher-agent--is-workspace t)
-        (setq-local macher--workspace (cons 'project full-dir)))
+        ;; IDIOMATIC FIX: Use our safe 'agent workspace type, not 'project
+        (setq-local macher--workspace (cons 'agent full-dir)))
 
       (condition-case err
           (progn
             (markdown-mode)
-            (gptel-mode 1))
+            (gptel-mode 1)
+            ;; IDIOMATIC FIX: Automatically apply the strict worker preset
+            (macher--apply-preset-locally 'macher-agent-worker))
         (error (message "Warning: Mode initialization had an error: %s" (error-message-string err))))
 
       (insert (format "# Sub-Agent: %s\nWorkspace: %s\n\n" name (if has-dir full-dir "None (Stateless Chat)"))))
 
+    ;; Track the active subagent
     (push (cons name (or full-dir "None")) macher-agent-active-subagents)
     
     (unless no-inject
@@ -48,10 +52,11 @@ If DIR is empty, the agent is created as a stateless chat without file system ac
           (save-excursion
             (goto-char (point-max))
             (let ((start (point)))
-              (insert (format "\n\n[SYSTEM DIRECTIVE: A sub-agent named '%s' has been instantiated%s. You can dispatch tasks to it using the 'write_to_buffer' tool followed by 'execute_subagent_buffer_blocking'. The exact buffer_name to use is '%s'.]\n\n" 
+              (insert (format "\n\n[SYSTEM DIRECTIVE: A sub-agent named '%s' has been instantiated%s. You can dispatch tasks to it using 'delegate_task_to_subagent'. The exact buffer_name to use is '%s'.]\n\n" 
                               name 
                               (if has-dir (format " and locked to '%s'" full-dir) " for stateless reasoning") 
                               buf-name))
+              ;; Keep the hidden text properties so it doesn't clutter the user's view
               (put-text-property start (point) 'invisible t)
               (put-text-property start (point) 'intangible t)
               (put-text-property start (point) 'rear-nonsticky t))))))

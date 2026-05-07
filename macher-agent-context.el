@@ -1,42 +1,53 @@
 ;;; macher-agent-context.el --- Context and file system handling -*- lexical-binding: t; -*-
 
-(require 'project)
+(require 'macher)
+
+;; --- 1. Global Flags & State ---
 
 (defvar-local macher-agent--is-workspace nil
   "Flag indicating this buffer operates under the safe macher-agent file scanner.")
 
-(defun macher-agent--project-try-agent (dir)
-  "Intercept project.el queries to inject the crash-proof agent backend."
-  (when macher-agent--is-workspace
-    (cons 'macher-agent dir)))
-
-;; Inject our custom scanner to the front of Emacs's project detection list
-(add-hook 'project-find-functions #'macher-agent--project-try-agent)
-
 (defvar-local macher-agent--persistent-context nil
   "Stores the macher context across continuous agent tool turns.")
 
-(cl-defmethod project-root ((project (head macher-agent)))
-  "Return the root directory for an isolated sub-agent workspace."
-  (cdr project))
+;; --- 2. Native Macher Workspace Definition ---
 
-(cl-defmethod project-name ((project (head macher-agent)))
+(defun macher-agent--get-root (dir)
+  "Return the root directory for the agent workspace."
+  dir)
+
+(defun macher-agent--get-name (dir)
   "Return a safe name for the isolated sub-agent workspace."
-  (file-name-nondirectory (directory-file-name (cdr project))))
+  (concat "Agent: " (file-name-nondirectory (directory-file-name dir))))
 
-(cl-defmethod project-files ((project (head macher-agent)) &optional dirs)
+(defun macher-agent--get-files (dir)
   "Safely return files for the agent workspace, strictly ignoring unreadable directories."
-  (let ((root (cdr project)))
-    (condition-case nil
-        (directory-files-recursively
-         root "^[^.]" nil
-         (lambda (d)
-           (let ((base (file-name-nondirectory (directory-file-name d))))
-             (and (not (member base '(".git" "target" "node_modules" ".Trash" "Library")))
-                  (condition-case nil
-                      (progn (directory-files d) t)
-                    (error nil))))))
-      (error nil))))
+  (condition-case nil
+      (directory-files-recursively
+       dir "^[^.]" nil
+       (lambda (d)
+         (let ((base (file-name-nondirectory (directory-file-name d))))
+           (and (not (member base '(".git" "target" "node_modules" ".Trash" "Library")))
+                (condition-case nil
+                    (progn (directory-files d) t)
+                  (error nil))))))
+    (error nil)))
+
+;; Register the new agent workspace type
+(add-to-list 'macher-workspace-types-alist
+             '(agent . (:get-root macher-agent--get-root
+                                  :get-name macher-agent--get-name
+                                  :get-files macher-agent--get-files)))
+
+(defun macher-workspace-agent ()
+  "Detect if the current buffer should use the safe agent workspace."
+  (when macher-agent--is-workspace
+    (cons 'agent default-directory)))
+
+;; Inject custom scanner to the front of macher's detection list
+(add-hook 'macher-workspace-functions #'macher-workspace-agent)
+
+;; --- 3. Context Synchronisation & Persistence ---
 
 (defun macher-agent--auto-sync-context (ctx)
   "Check the physical disk and fast-forward the agent's memory if needed."
@@ -63,6 +74,45 @@
               (setq synced t))))))
       (when synced
         (setf (macher-context-dirty-p ctx) nil)))))
+
+(defvar macher-context-resolved-functions nil
+  "Abnormal hook run when a macher context is lazily resolved for a request.
+
+Functions are called with two arguments: (CONTEXT FSM).
+Functions can be used to modify the CONTEXT object, trigger side-effects,
+or update the FSM state.")
+
+(defun macher-agent--simulate-resolved-hook-advice (orig-fn fsm get-context)
+  "Simulate an upstream hook that fires when the context is resolved."
+  (let ((wrapped-get-context
+         (lambda ()
+           (let ((ctx (funcall get-context)))
+             ;; 1. Fire our simulated upstream hook
+             (run-hook-with-args 'macher-context-resolved-functions ctx fsm)
+             ;; 2. Return the context from the FSM (in case a hook function swapped it)
+             (plist-get (gptel-fsm-info fsm) :macher--context)))))
+    (funcall orig-fn fsm wrapped-get-context)))
+
+(advice-add 'macher--setup-tools :around #'macher-agent--simulate-resolved-hook-advice)
+
+(defun macher-agent-persist-context-hook (ctx fsm)
+  "Maintain a persistent context and synchronise it with the disk."
+  (when ctx
+    (unless macher-agent--persistent-context
+      (setq macher-agent--persistent-context ctx))
+    
+    (let ((persistent-ctx macher-agent--persistent-context))
+      (macher-agent--auto-sync-context persistent-ctx)
+      
+      (let ((fsm-info (gptel-fsm-info fsm)))
+        (setf (gptel-fsm-info fsm) 
+              (plist-put fsm-info :macher--context persistent-ctx)))
+      
+      (setq macher--fsm-latest fsm))))
+
+(add-hook 'macher-context-resolved-functions #'macher-agent-persist-context-hook)
+
+;; --- 4. Interactive Commands ---
 
 (defun macher-agent-apply-patch ()
   "Apply the current patch buffer using external diff utilities to avoid collisions."
