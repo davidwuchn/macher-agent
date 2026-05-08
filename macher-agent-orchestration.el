@@ -2,12 +2,24 @@
 
 (require 'macher)
 
+(defvar-local macher-agent--scoped-buffers nil
+  "An explicit list of buffer names this specific agent is allowed to access.")
+
+;;;###autoload
+(defun macher-agent-add-buffer-to-scope (buffer)
+  "Manually add an existing Emacs BUFFER to the current agent's scope."
+  (interactive "bAdd buffer to current agent's scope: ")
+  (let ((buf-name (if (stringp buffer) buffer (buffer-name (get-buffer buffer)))))
+    ;; Ensure the current buffer has its own local list
+    (unless (local-variable-p 'macher-agent--scoped-buffers)
+      (setq-local macher-agent--scoped-buffers nil))
+    
+    (add-to-list 'macher-agent--scoped-buffers buf-name)
+    (message "SUCCESS: Added '%s' to the agent's restricted scope." buf-name)))
+
 (defun macher-agent--resolve-buffer-name (name)
-  "Ensure the buffer name has the correct macher-agent prefix."
-  (let ((name-str (substring-no-properties name)))
-    (if (string-prefix-p "*macher-agent:" name-str)
-        name-str
-      (format "*macher-agent: %s*" name-str))))
+  "Return the clean buffer name. Prefix forcing is removed as scope is handled explicitly."
+  (substring-no-properties name))
 
 ;;;###autoload
 (defun macher-agent-add-subagent (name dir &optional no-inject)
@@ -25,6 +37,9 @@ If DIR is empty, the agent is created as a stateless chat without file system ac
          (safe-dir (if (and dir (stringp dir)) dir (or default-directory "~/")))
          (has-dir (not (string-empty-p safe-dir)))
          (full-dir (when has-dir (file-name-as-directory (expand-file-name safe-dir)))))
+
+    ;; Track the sub-agent in the parent's explicit scope list
+    (add-to-list 'macher-agent--scoped-buffers buf-name)
     
     (with-current-buffer buf
       (when has-dir

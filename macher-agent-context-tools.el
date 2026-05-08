@@ -41,9 +41,9 @@
 (defun macher-agent--build-rsync-cmd (source dest)
   "Generate the rsync command to copy SOURCE to DEST safely."
   (let ((src-local (file-name-as-directory (file-local-name (expand-file-name source))))
-        (dst-local (file-local-name (expand-file-name dest))))
-    (exclude-args (mapconcat (lambda (ex) (format "--exclude=%s" (shell-quote-argument ex))) 
-                             macher-agent-sandbox-excludes " "))
+        (dst-local (file-local-name (expand-file-name dest)))
+        (exclude-args (mapconcat (lambda (ex) (format "--exclude=%s" (shell-quote-argument ex))) 
+                                 macher-agent-sandbox-excludes " ")))
     (format "rsync -a %s %s %s"
             exclude-args
             (shell-quote-argument src-local)

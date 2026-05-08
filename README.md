@@ -69,13 +69,25 @@ This setup assumes you have [context-builder](https://github.com/igorls/context-
 
 ### Agentic workflow
 
-This workflow demonstrates how to use the planner preset to analyse a repository and seamlessly hand off the implementation details to an isolated sub-agent entirely through tool calls.
+This workflow demonstrates how to use the planner preset to analyse a repository and seamlessly hand off the implementation details to an isolated sub-agent entirely through tool calls. Agents interact with files and buffers via a virtual memory context, allowing changes to be reviewed as patches before being committed.
+
+### Orchestration
 
 * `spawn_subagent` - Instantiates a new, isolated sub-agent buffer locked to the current project directory.
-* `write_to_buffer` - Dispatches the implementation plan and specific instructions directly into the newly created sub-agent's buffer.
 * `execute_subagent_buffer_blocking` - Triggers the sub-agent to execute its task autonomously, pausing the parent agent until the sub-agent finishes its work and generates a patch.
 * `execute_subagent_buffer_nonblocking` - Triggers the sub-agent to begin executing asynchronously in the background, allowing the parent agent to immediately continue its own processing without waiting.
 
+### Emacs Buffer Operations
+
+* `write_to_buffer` - Proposes a change to a live Emacs buffer, creating a virtual patch for review (ie via ediff) rather than mutating the buffer immediately.
+
+* `write_and_commit_buffer` - Directly overwrites an Emacs buffer and fast-forwards the context to synchronise the agent's awareness.
+
+* `read_buffer` - Reads the contents of an agent buffer, prioritising proposed virtual edits if modified during the current turn, or returning the live Emacs buffer state otherwise.
+
+* `list_agent_buffers` - Scans the current Emacs session and returns a filtered list of all active orchestrator and sub-agent buffers.
+
+* `search_agent_buffers` - Performs a regex search across all active agent buffers, returning matching lines and their locations.
 
 ### Semi-agentic workflow
 
@@ -84,3 +96,33 @@ Human-in-the-loop orchestratio using interactive Emacs commands to manually mana
 * `M-x macher-agent-add-subagent` - Interactively prompts you for a name and a target directory, then spins up a dedicated, isolated sub-agent buffer locked to that specific workspace. Makes current agent aware of sub agents, for example allowing you to instruct it to `write_to_buffer` with plans, research etc.
 * `M-x macher-agent-clear-context` - Clears the persistent memory and pending edits of the current sub-agent buffer, allowing you to start a completely fresh task without destroying the buffer itself.
 * **Manual Execution** - You can manually type your instructions directly into any sub-agent buffer and trigger `gptel-send` (or `macher-implement`). The agent will still execute its tasks asynchronously in the background and generate a reviewable patch, but you remain in full control of the dispatching.
+
+### 1. Interactive User Commands
+These are the `M-x` commands designed for human-in-the-loop orchestration and workspace management.
+
+| Command | Description |
+| :--- | :--- |
+| `macher-agent-add-subagent` | Interactively prompts for a name and directory, then spins up a dedicated, isolated sub-agent buffer locked to that workspace. |
+| `macher-agent-add-buffer-to-scope` | Manually injects an existing Emacs buffer into the current agent's allowed access scope, granting it permission to read/edit it. |
+| `macher-agent-clear-context` | Clears the persistent virtual memory and pending edits of the current agent or sub-agent buffer, allowing a fresh start. |
+| `macher-agent-apply-patch` | Safely applies the current patch buffer using external diff utilities (like `git apply` or `patch`) to avoid Emacs collision errors. |
+| `macher-agent-insert-patch` | Inserts the proposed patch from the current workspace directly into the chat buffer for review. |
+| `macher-agent-apply-virtual-buffers` | Alternative buffer patching function to ediff-patch-buffer |
+
+---
+
+### 2. Agent Tools
+These are the `gptel` tools exposed to the LLM to facilitate orchestration, file operations, and buffer manipulation.
+
+| Tool Name | Description |
+| :--- | :--- |
+| `spawn_subagent` | Creates a new, isolated sub-agent in the current project directory and registers it to the parent agent's access scope. |
+| `delegate_task_to_subagent` | Writes instructions to a sub-agent with strict submission reminders and waits for its final synthesised response. |
+| `execute_subagent_buffer_blocking` | Triggers a sub-agent to execute autonomously, pausing the parent agent until it finishes its work and generates an output. |
+| `execute_subagent_buffer_nonblocking`| Triggers a sub-agent to execute asynchronously in the background, allowing the parent agent to continue processing immediately. |
+| `write_to_buffer` | Proposes new content for a live Emacs buffer, creating a virtual patch for review rather than mutating it immediately. |
+| `write_and_commit_buffer` | Directly overwrites an Emacs buffer and fast-forwards the context to synchronise the agent's awareness. |
+| `read_buffer` | Reads a scoped buffer's contents, prioritising proposed virtual edits if modified during the current turn, or the live state otherwise. |
+| `list_agent_buffers` | Returns a filtered list of all active orchestrator and sub-agent buffers within the agent's explicit allowlist. |
+| `search_agent_buffers` | Performs a regex search across all allowed agent buffers, returning matching text and their line numbers. |
+| `submit_task_result` | Used strictly by worker sub-agents to submit their final, synthesised answer back to the parent orchestrator. |
