@@ -95,7 +95,7 @@
       (when synced
         (setf (macher-context-dirty-p ctx) nil)))))
 
-(defvar macher-context-resolved-functions nil
+(defvar macher-agent-context-resolved-functions nil
   "Abnormal hook run when a macher context is lazily resolved for a request.
 
 Functions are called with two arguments: (CONTEXT FSM).
@@ -107,13 +107,11 @@ or update the FSM state.")
   (let ((wrapped-get-context
          (lambda ()
            (let ((ctx (funcall get-context)))
-             ;; 1. Fire our simulated upstream hook
-             (run-hook-with-args 'macher-context-resolved-functions ctx fsm)
-             ;; 2. Return the context from the FSM (in case a hook function swapped it)
+             (run-hook-with-args 'macher-agent-context-resolved-functions ctx fsm)
              (plist-get (gptel-fsm-info fsm) :macher--context)))))
     (funcall orig-fn fsm wrapped-get-context)))
 
-(advice-add 'macher--setup-tools :around #'macher-agent--simulate-resolved-hook-advice)
+(add-hook 'macher-agent-context-resolved-functions #'macher-agent-persist-context-hook)
 
 (defun macher-agent-persist-context-hook (ctx fsm)
   "Maintain a persistent context and synchronise it with the disk."

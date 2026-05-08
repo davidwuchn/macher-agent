@@ -27,11 +27,25 @@
            (kill-buffer out-buf)
            (funcall callback exit-code output)))))))
 
+(defgroup macher-agent nil
+  "Sandboxed, Language-Agnostic AI Workflows."
+  :group 'gptel
+  :prefix "macher-agent-")
+
+(defcustom macher-agent-sandbox-excludes 
+  '(".git/" "target/" "node_modules/" ".Trash/" "Library/" ".venv/" "__pycache__/")
+  "List of directories to exclude when syncing the workspace to a sandbox."
+  :type '(repeat string)
+  :group 'macher-agent)
+
 (defun macher-agent--build-rsync-cmd (source dest)
   "Generate the rsync command to copy SOURCE to DEST safely."
   (let ((src-local (file-name-as-directory (file-local-name (expand-file-name source))))
         (dst-local (file-local-name (expand-file-name dest))))
-    (format "rsync -a --exclude='target/' %s %s"
+    (exclude-args (mapconcat (lambda (ex) (format "--exclude=%s" (shell-quote-argument ex))) 
+                             macher-agent-sandbox-excludes " "))
+    (format "rsync -a %s %s %s"
+            exclude-args
             (shell-quote-argument src-local)
             (shell-quote-argument dst-local))))
 

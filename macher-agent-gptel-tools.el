@@ -2,12 +2,17 @@
 
 (require 'macher)
 
+(defcustom macher-agent-tool-timeout-attempts 1200
+  "Maximum number of 0.5s polling attempts before a sub-agent times out."
+  :type 'integer
+  :group 'macher-agent)
+
 (defun macher-agent--wait-and-return (buf callback &optional attempts)
   "Wait for the sub-agent to populate its final result variable."
   (let ((attempts (or attempts 0)))
     (cond
      ;; Timeout if the sub-agent takes too long (ie > 1200 attempts / 2 minutes)
-     ((> attempts 1200)
+     ((> attempts macher-agent-tool-timeout-attempts)
       (funcall callback "ERROR: Sub-agent timed out before submitting a result."))
      
      ;; Check if the buffer is still alive
