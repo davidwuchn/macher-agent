@@ -50,7 +50,7 @@
 ;; --- 3. Context Synchronisation & Persistence ---
 
 (defun macher-agent--auto-sync-context (ctx)
-  "Check the physical disk and fast-forward the agent's memory if needed."
+  "Check live buffers and physical disk to fast-forward the agent's memory if needed."
   (when ctx
     (let ((contents (macher-context-contents ctx))
           (synced nil))
@@ -59,19 +59,39 @@
                (content-pair (cdr entry))
                (orig (car content-pair))
                (new (cdr content-pair))
-               (disk (when (file-exists-p path)
-                       (with-temp-buffer
-                         (insert-file-contents path)
-                         (buffer-string)))))
-          (when disk
-            (cond
-             ((and new (string= disk new) (not (string= orig new)))
-              (setcar content-pair disk)
-              (setq synced t))
-             ((and (not (string= disk orig)) (not (string= disk new)))
-              (setcar content-pair disk)
-              (setcdr content-pair disk)
-              (setq synced t))))))
+               (buf (get-file-buffer path))
+               (disk-exists (file-exists-p path))
+               ;; 1. Determine the true current state (Buffer > Disk > Deleted)
+               (current-state 
+                (cond
+                 ((and buf (buffer-modified-p buf))
+                  (with-current-buffer buf
+                    (buffer-substring-no-properties (point-min) (point-max))))
+                 (disk-exists
+                  (with-temp-buffer
+                    (insert-file-contents path)
+                    (buffer-string)))
+                 (t nil))))
+          
+          (cond
+           ;; Case A: File was deleted externally
+           ((null current-state)
+            (when (or orig new)
+              (setcar content-pair nil)
+              (setcdr content-pair nil)
+              (setq synced t)))
+           
+           ;; Case B: External state caught up to 'new' (e.g. Patch was applied)
+           ((and new (equal current-state new) (not (equal orig new)))
+            (setcar content-pair current-state)
+            (setq synced t))
+           
+           ;; Case C: External state diverged completely (External edit)
+           ((and (not (equal current-state orig)) (not (equal current-state new)))
+            (setcar content-pair current-state)
+            (setcdr content-pair current-state)
+            (setq synced t)))))
+      
       (when synced
         (setf (macher-context-dirty-p ctx) nil)))))
 
