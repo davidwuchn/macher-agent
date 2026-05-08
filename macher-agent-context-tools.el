@@ -31,7 +31,7 @@
   "Generate the rsync command to copy SOURCE to DEST safely."
   (let ((src-local (file-name-as-directory (file-local-name (expand-file-name source))))
         (dst-local (file-local-name (expand-file-name dest))))
-    (format "rsync -a --exclude='target/' %s. %s"
+    (format "rsync -a --exclude='target/' %s %s"
             (shell-quote-argument src-local)
             (shell-quote-argument dst-local))))
 
