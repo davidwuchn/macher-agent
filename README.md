@@ -17,6 +17,15 @@ The auto sync is able to determine if patches were applied, if intermediate edit
 
 You can also adopt a auto-agentic CLI style approach where a planner dynamically spins up, delegates to sub-agents entirely through tool calls. Or you could use a semi-agentic workflow, manually instantiating sub-agents and dispatching instructions yourself while still benefiting from the non-blocking, sandboxed execution.
 
+###  Emacs-native architecture mapping
+
+* Sandboxing and isolation are handled by routing modifications through a virtual memory `macher` context, culminating in a reviewable ediff patch rather than live file mutation.
+* Asynchronous background execution is achieved via non-blocking sub-agent commands, keeping your editor GUI entirely responsive whilst the agent works.
+* Multi-agent orchestration for complex tasks is replicated natively by allowing a planner to dynamically spin up isolated buffers, dispatch instructions, and await synthesised responses via tool calls.
+* System integration and automated testing rely on dynamic tool creation, running filesystem aware tools against in-memory edits to self-correct compilation errors before presenting a final patch.
+* Contextual integrity in patches and state preservation mirror external versioning by embedding the continuous conversation directly into intermediate patches, ensuring the agent's logic remains tethered to the proposed code.
+* Infinite task loops and token management are sustained using `gptel` episodic sliding memory to compress older transcripts into structured summaries, preventing context degradation whilst retaining the full human-readable history in your buffer.
+* Reverting and branching can be managed manually by clearing a sub-agent's context to wipe the slate clean, or by inspecting the conversational breadcrumbs left in intermediate patches.
 
 ## Instatllation
 
