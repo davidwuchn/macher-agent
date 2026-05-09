@@ -26,61 +26,40 @@
   (substring-no-properties name))
 
 ;;;###autoload
-(defun macher-agent-add-subagent (name dir &optional no-inject)
-  "Interactively instantiate an isolated sub-agent buffer for task delegation.
-If DIR is empty, the agent is created as a stateless chat without file system access."
-  (interactive
-   (let* ((agent-name (read-string "Sub-agent name: "))
-          (use-dir (y-or-n-p "Bind sub-agent to a workspace directory? "))
-          (agent-dir (if use-dir (read-directory-name "Target directory: ") "")))
-     (list agent-name agent-dir)))
-  
+(defun macher-agent-add-subagent (name dir &optional _display)
+  "Create a new sub-agent buffer completely silently.
+No workspace path or system directives are printed to the buffer."
   (let* ((buf-name (format "*macher-agent: %s*" name))
          (buf (get-buffer-create buf-name))
-         (parent-buf (current-buffer))
          (safe-dir (if (and dir (stringp dir)) dir (or default-directory "~/")))
-         (has-dir (not (string-empty-p safe-dir)))
-         (full-dir (when has-dir (file-name-as-directory (expand-file-name safe-dir)))))
+         (full-dir (file-name-as-directory (expand-file-name safe-dir))))
 
-    ;; Track the sub-agent in the parent's explicit scope list
-    (add-to-list 'macher-agent--scoped-buffers buf-name)
-    
     (with-current-buffer buf
-      (when has-dir
-        (setq default-directory full-dir)
-        (setq-local macher-agent--is-workspace t)
-        ;; IDIOMATIC FIX: Use our safe 'agent workspace type, not 'project
-        (setq-local macher--workspace (cons 'agent full-dir)))
+      ;; 1. Internal State (Invisible but critical for tools)
+      (setq default-directory full-dir)
+      (setq-local macher-agent--is-workspace t)
+      (setq-local macher--workspace (cons 'agent full-dir))
 
-      (condition-case err
-          (progn
-            (markdown-mode)
-            (gptel-mode 1)
-            ;; IDIOMATIC FIX: Automatically apply the strict worker preset
-            (macher--apply-preset-locally 'macher-agent-worker))
-        (error (message "Warning: Mode initialization had an error: %s" (error-message-string err))))
+      ;; 2. Clean Mode Initialisation
+      (unless (derived-mode-p 'markdown-mode)
+        (markdown-mode))
+      (unless gptel-mode
+        (gptel-mode 1))
 
-      (insert (format "# Sub-Agent: %s\nWorkspace: %s\n\n" name (if has-dir full-dir "None (Stateless Chat)"))))
+      ;; 3. Apply the worker preset silently in the background
+      (when (assoc "macher-agent-worker" gptel-directives)
+        (setq-local gptel--system-message (alist-get "macher-agent-worker" gptel-directives))
+        (make-local-variable 'gptel-tools)
+        (setq gptel-tools '("read_file_in_workspace" 
+                            "list_directory_in_workspace" 
+                            "search_in_workspace"
+                            "submit_task_result"))))
 
-    ;; Track the active subagent
-    (push (cons name (or full-dir "None")) macher-agent-active-subagents)
-    
-    (unless no-inject
-      (with-current-buffer parent-buf
-        (when (derived-mode-p 'gptel-mode 'markdown-mode 'org-mode 'text-mode)
-          (save-excursion
-            (goto-char (point-max))
-            (let ((start (point)))
-              (insert (format "\n\n[SYSTEM DIRECTIVE: A sub-agent named '%s' has been instantiated%s. You can dispatch tasks to it using 'delegate_task_to_subagent'. The exact buffer_name to use is '%s'.]\n\n" 
-                              name 
-                              (if has-dir (format " and locked to '%s'" full-dir) " for stateless reasoning") 
-                              buf-name))
-              ;; Keep the hidden text properties so it doesn't clutter the user's view
-              (put-text-property start (point) 'invisible t)
-              (put-text-property start (point) 'intangible t)
-              (put-text-property start (point) 'rear-nonsticky t))))))
-    
-    (message "Instantiated sub-agent: %s" buf-name)))
+    ;; 4. Keep the global tracking updated
+    (when (boundp 'macher-agent-active-subagents)
+      (push (cons name full-dir) macher-agent-active-subagents))
+
+    buf))
 
 (provide 'macher-agent-orchestration)
 ;;; macher-agent-orchestration.el ends here

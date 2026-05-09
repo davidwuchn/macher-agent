@@ -32,6 +32,17 @@ If nil, the buffer executes silently in the background."
   (when macher-agent-hide-subagent-fn
     (funcall macher-agent-hide-subagent-fn buf)))
 
+;; --- Cloaking Mechanism ---
+
+(defun macher-agent--insert-hidden (text)
+  "Insert TEXT visually hidden via a display overlay, but fully readable by gptel.
+This overrides font-lock and prevents markdown-mode from revealing the text."
+  (let* ((start (point))
+         (_ (insert text))
+         (ov (make-overlay start (point))))
+    (overlay-put ov 'display "")
+    (overlay-put ov 'insert-behind-hooks '(ignore))))
+
 ;; --- Wait Loops ---
 
 (defun macher-agent--wait-and-return (buf callback &optional attempts)
@@ -128,10 +139,16 @@ If nil, the buffer executes silently in the background."
                        
                        (with-current-buffer buf
                          (goto-char (point-max))
-                         (insert "\n\n=== DELEGATED TASK === @macher-agent-worker\n" 
-                                 (substring-no-properties instructions) 
-                                 "\n\n=== SYSTEM REMINDER ===\n"
-                                 "You MUST use the `submit_task_result` tool to return your answer. Do not just type it as plain text.\n")
+                         
+                         ;; Cloak the pre-task header
+                         (macher-agent--insert-hidden "\n\n=== DELEGATED TASK ===\n")
+                         
+                         ;; Insert the VISIBLE instructions
+                         (insert (substring-no-properties instructions))
+                         
+                         ;; Cloak the post-task rules
+                         (macher-agent--insert-hidden "\n\n@macher-agent-worker\n=== SYSTEM REMINDER ===\nYou MUST use the `submit_task_result` tool to return your answer. Do not just type it as plain text.\n")
+                         
                          (macher-agent--show-ui buf)
                          (gptel-send)
                          (macher-agent--wait-and-return buf callback))))
@@ -177,10 +194,16 @@ If nil, the buffer executes silently in the background."
                          (push buf target-buffers)
                          (with-current-buffer buf
                            (goto-char (point-max))
-                           (insert "\n\n=== DELEGATED TASK === @macher-agent-worker\n" 
-                                   (substring-no-properties instructions) 
-                                   "\n\n=== SYSTEM REMINDER ===\n"
-                                   "You MUST use the `submit_task_result` tool to return your answer. Do not just type it as plain text.\n")
+                           
+                           ;; Cloak the pre-task header
+                           (macher-agent--insert-hidden "\n\n=== DELEGATED TASK ===\n")
+                           
+                           ;; Insert the VISIBLE instructions
+                           (insert (substring-no-properties instructions))
+                           
+                           ;; Cloak the post-task rules
+                           (macher-agent--insert-hidden "\n\n@macher-agent-worker\n=== SYSTEM REMINDER ===\nYou MUST use the `submit_task_result` tool to return your answer. Do not just type it as plain text.\n")
+                           
                            (macher-agent--show-ui buf)
                            (gptel-send))))
                      
@@ -205,7 +228,9 @@ If nil, the buffer executes silently in the background."
                        
                        (with-current-buffer buf
                          (goto-char (point-max))
-                         (insert "\n\n=== SYSTEM REMINDER ===\n@macher-agent-worker You MUST use the `submit_task_result` tool to return your answer. Do not just type it as plain text.\n")
+                         ;; Entirely invisible payload
+                         (macher-agent--insert-hidden "\n\n=== SYSTEM REMINDER ===\n@macher-agent-worker You MUST use the `submit_task_result` tool to return your answer. Do not just type it as plain text.\n")
+                         
                          (macher-agent--show-ui buf)
                          (gptel-send)
                          (macher-agent--wait-and-return buf callback))))

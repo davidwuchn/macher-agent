@@ -7,7 +7,6 @@
 (require 'macher-agent)
 
 ;; 1. The Ghost Typing Simulator
-;; This replaces the missing macher--demo utilities with a reliable text insertion loop.
 (defun demo-macher-agent--type (text &optional speed)
   "Simulate ghost-typing TEXT into the current buffer.
 SPEED is the delay between keystrokes (default 0.04 seconds)."
@@ -17,56 +16,37 @@ SPEED is the delay between keystrokes (default 0.04 seconds)."
       (redisplay)
       (sit-for delay))))
 
-;; 2. The Window Visibility Hook
-(defun demo-macher-agent--display-subagent-advice (name &rest _)
-  "Display the newly created sub-agent buffer in the other window."
-  (let ((buf-name (format "*macher-agent: %s*" name)))
-    (when-let ((buf (get-buffer buf-name)))
-      (with-selected-window (next-window (selected-window) nil nil)
-        (switch-to-buffer buf)))))
-
-(advice-add 'macher-agent-add-subagent :after #'demo-macher-agent--display-subagent-advice)
-
-;; 3. The Demo Execution
+;; 2. The Demo Execution
 (defun demo-macher-agent-run ()
-  "Run the full orchestration demo programmatically."
+  "Run the full orchestration demo programmatically in the current buffer."
   (interactive)
-  ;; Set up a clean 2-window layout
-  (delete-other-windows)
-  (split-window-right)
+  
+  ;; Bulletproof cleanup: Purge any lingering advice from older test runs
+  (advice-remove 'macher-agent-add-subagent #'demo-macher-agent--display-subagent-advice)
 
-  ;; Dynamically resolve the directory this script lives in
-  (let* ((script-file (or load-file-name buffer-file-name))
-         (demo-dir (if script-file (file-name-directory script-file) default-directory))
-         (buf (get-buffer-create "*Planner*")))
-    
-    (with-current-buffer buf
-      ;; 1. Lock the buffer to the demo directory immediately
-      (setq default-directory demo-dir)
-      
-      (markdown-mode)
-      (gptel-mode 1)
+  ;; Setup the current buffer for the demo
+  (markdown-mode)
+  (gptel-mode 1)
 
-      ;; Apply the preset directive and lock in the orchestration tools
-      (when (assoc "macher-agent-plan" gptel-directives)
-        (setq-local gptel--system-message (alist-get "macher-agent-plan" gptel-directives))
-        (make-local-variable 'gptel-tools)
-        (setq gptel-tools '("spawn_subagent" "delegate_task_to_subagent")))
+  ;; Apply the preset directive and lock in the orchestration tools
+  (when (assoc "macher-agent-plan" gptel-directives)
+    (setq-local gptel--system-message (alist-get "macher-agent-plan" gptel-directives))
+    (make-local-variable 'gptel-tools)
+    ;; Expose the fan-out tool so it can handle multiple targets in one turn
+    (setq gptel-tools '("spawn_subagent" "delegate_tasks_to_subagents")))
 
-      (insert "# Macher Agent Orchestrator\n\n"))
+  ;; Ensure we are at the bottom of the buffer on a fresh line
+  (goto-char (point-max))
 
-    ;; Switch to the buffer only after the environment is fully set up
-    (switch-to-buffer buf)
+  ;; Pause for a second so the viewer is ready
+  (sit-for 1.0) 
 
-    ;; Pause for a second so the viewer registers the clean buffer
-    (sit-for 1.0) 
+  ;; Simulate the user typing the objective
+  (demo-macher-agent--type "@macher-agent-plan spawn two sub-agents. Delegate the task 'What is the capital of France?' to the first, and 'What is the capital of Spain?' to the second concurrently. Show both responses.")
 
-    ;; Simulate the user typing the objective
-    (demo-macher-agent--type "@macher-agent-plan spawn a sub agent and delgate the task 'What is the capital of France?' and show response.")
-
-    ;; Pause briefly, then fire the request to the LLM
-    (sit-for 0.5)
-    (gptel-send)))
+  ;; Pause briefly, then fire the request to the LLM
+  (sit-for 0.5)
+  (gptel-send))
 
 (provide 'demo-macher-agent)
 ;;; demo-macher-agent.el ends here
