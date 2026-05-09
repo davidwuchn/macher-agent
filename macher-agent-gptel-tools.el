@@ -2,10 +2,57 @@
 
 (require 'macher)
 
+;; --- Configuration & UI Hooks ---
+
 (defcustom macher-agent-tool-timeout-attempts 1200
   "Maximum number of 0.5s polling attempts before a sub-agent times out."
   :type 'integer
   :group 'macher-agent)
+
+(defcustom macher-agent-display-subagent-fn nil
+  "Function to call with a BUFFER to display it while running.
+If nil, the buffer executes silently in the background."
+  :type '(choice (const :tag "Silent Background Execution" nil)
+                 function)
+  :group 'macher-agent)
+
+(defcustom macher-agent-hide-subagent-fn nil
+  "Function to call with a BUFFER to hide it once finished."
+  :type '(choice (const :tag "Do Nothing" nil)
+                 function)
+  :group 'macher-agent)
+
+(defun macher-agent--show-ui (buf)
+  "Internal wrapper to safely trigger the display function."
+  (when macher-agent-display-subagent-fn
+    (funcall macher-agent-display-subagent-fn buf)))
+
+(defun macher-agent--hide-ui (buf)
+  "Internal wrapper to safely trigger the hide function."
+  (when macher-agent-hide-subagent-fn
+    (funcall macher-agent-hide-subagent-fn buf)))
+
+;; --- Wait Loops ---
+
+(defun macher-agent--wait-and-return (buf callback &optional attempts)
+  "Wait for a single sub-agent to populate its final result variable."
+  (let ((attempts (or attempts 0)))
+    (cond
+     ((> attempts macher-agent-tool-timeout-attempts)
+      (funcall callback "ERROR: Sub-agent timed out before submitting a result."))
+     
+     ((not (buffer-live-p buf))
+      (funcall callback "ERROR: Sub-agent buffer was killed before finishing."))
+     
+     ((buffer-local-value 'macher-agent--final-result buf)
+      (let ((clean-result (buffer-local-value 'macher-agent--final-result buf)))
+        (with-current-buffer buf
+          (setq-local macher-agent--final-result nil))
+        (macher-agent--hide-ui buf)
+        (funcall callback (format "SUCCESS. Sub-agent completed task. Final Output:\n\n%s" clean-result))))
+     
+     (t
+      (run-at-time 0.5 nil #'macher-agent--wait-and-return buf callback (1+ attempts))))))
 
 (defun macher-agent--wait-and-return-multiple (buffers callback &optional attempts)
   "Wait for multiple sub-agents to populate their final result variables."
@@ -14,14 +61,12 @@
         (failed-buffers nil)
         (results nil))
     
-    ;; Poll every target buffer
     (dolist (buf buffers)
       (if (not (buffer-live-p buf))
           (push (format "ERROR: Buffer '%s' was killed before finishing." (buffer-name buf)) failed-buffers)
         (let ((res (buffer-local-value 'macher-agent--final-result buf)))
           (if res
               (push (cons (buffer-name buf) res) results)
-            ;; If even one buffer is missing a result, the batch is not done
             (setq all-done nil)))))
     
     (cond
@@ -32,21 +77,21 @@
       (funcall callback (string-join failed-buffers "\n")))
      
      (all-done
-      ;; 1. Clean up the variables for future turns
       (dolist (buf buffers)
         (with-current-buffer buf
-          (setq-local macher-agent--final-result nil)))
+          (setq-local macher-agent--final-result nil))
+        (macher-agent--hide-ui buf))
       
-      ;; 2. Synthesize all outputs into a single string for the orchestrator
       (let ((final-output 
              (mapconcat (lambda (r) (format "=== Response from %s ===\n%s" (car r) (cdr r)))
-                        (nreverse results) ;; Preserve the original order
+                        (nreverse results)
                         "\n\n")))
         (funcall callback (format "SUCCESS. All sub-agents completed their tasks. Final Outputs:\n\n%s" final-output))))
      
      (t
-      ;; Keep polling
       (run-at-time 0.5 nil #'macher-agent--wait-and-return-multiple buffers callback (1+ attempts))))))
+
+;; --- Tools ---
 
 (defvar macher-agent-spawn-subagent-tool
   (gptel-make-tool
@@ -67,7 +112,7 @@
 (defvar macher-agent-delegate-tool
   (gptel-make-tool
    :name "delegate_task_to_subagent"
-   :description "Write instructions to a sub-agent and wait for its final response."
+   :description "Write instructions to a single sub-agent and wait for its final response."
    :category "macher-agent-plan"
    :async t
    :args (list '(:name "buffer_name" :type string)
@@ -87,6 +132,7 @@
                                  (substring-no-properties instructions) 
                                  "\n\n=== SYSTEM REMINDER ===\n"
                                  "You MUST use the `submit_task_result` tool to return your answer. Do not just type it as plain text.\n")
+                         (macher-agent--show-ui buf)
                          (gptel-send)
                          (macher-agent--wait-and-return buf callback))))
                  (error (funcall callback (error-message-string err)))))))
@@ -95,7 +141,7 @@
   (gptel-make-tool
    :name "delegate_tasks_to_subagents"
    :description "Write instructions to 1-to-many sub-agents concurrently and wait for all their final responses. Used to fan-out work."
-   :category macher-tool-category
+   :category "macher-agent-plan"
    :async t
    :args (list '(:name "tasks" :type array 
                        :description "An array of task objects."
@@ -104,7 +150,6 @@
                                                                :instructions (:type string)) 
                                      :required ["buffer_name" "instructions"])))
    :function (lambda (context callback tasks)
-               ;; 1. Robust JSON parsing for LLM arrays
                (unless (vectorp tasks)
                  (if (stringp tasks)
                      (condition-case nil
@@ -116,20 +161,16 @@
                    (let ((target-pairs nil)
                          (target-buffers nil))
                      
-                     ;; Phase 1: Validate ALL requests before execution (Gatekeeper)
                      (cl-loop for task across tasks do
                               (let* ((buffer-name (plist-get task :buffer_name))
                                      (instructions (plist-get task :instructions))
                                      (actual-name (macher-agent--resolve-buffer-name buffer-name)))
-                                
                                 (macher-agent--ensure-access actual-name)
-                                
                                 (let ((buf (get-buffer actual-name)))
                                   (unless (buffer-live-p buf)
                                     (error "ERROR: Buffer '%s' does not exist." actual-name))
                                   (push (cons buf instructions) target-pairs))))
                      
-                     ;; Phase 2: Execute ALL (Scatter)
                      (dolist (task-pair (nreverse target-pairs))
                        (let ((buf (car task-pair))
                              (instructions (cdr task-pair)))
@@ -140,12 +181,66 @@
                                    (substring-no-properties instructions) 
                                    "\n\n=== SYSTEM REMINDER ===\n"
                                    "You MUST use the `submit_task_result` tool to return your answer. Do not just type it as plain text.\n")
+                           (macher-agent--show-ui buf)
                            (gptel-send))))
                      
-                     ;; Phase 3: Wait for ALL (Gather)
                      (macher-agent--wait-and-return-multiple (nreverse target-buffers) callback))
-                 
                  (error (funcall callback (error-message-string err)))))))
+
+(defvar macher-agent-execute-blocking-tool
+  (gptel-make-tool
+   :name "execute_subagent_buffer_blocking"
+   :description "Trigger a single sub-agent and WAIT for it to finish without giving new instructions."
+   :category "macher-agent-plan"
+   :async t
+   :args (list '(:name "buffer_name" :type string))
+   :function (lambda (context callback buffer_name)
+               (condition-case err
+                   (let ((actual-name (macher-agent--resolve-buffer-name buffer_name)))
+                     (macher-agent--ensure-access actual-name)
+                     
+                     (let ((buf (get-buffer actual-name)))
+                       (unless (buffer-live-p buf)
+                         (error "ERROR: Buffer '%s' does not exist." actual-name))
+                       
+                       (with-current-buffer buf
+                         (goto-char (point-max))
+                         (insert "\n\n=== SYSTEM REMINDER ===\n@macher-agent-worker You MUST use the `submit_task_result` tool to return your answer. Do not just type it as plain text.\n")
+                         (macher-agent--show-ui buf)
+                         (gptel-send)
+                         (macher-agent--wait-and-return buf callback))))
+                 (error (funcall callback (error-message-string err)))))))
+
+(defvar macher-agent-execute-multiple-nonblocking-tool
+  (gptel-make-tool
+   :name "execute_subagents_nonblocking"
+   :description "Trigger 1-to-many sub-agents to begin processing asynchronously in the background. Does NOT provide new instructions and does NOT wait for output."
+   :category "macher-agent-plan"
+   :args (list '(:name "buffer_names" :type array 
+                       :description "List of buffer names to trigger."
+                       :items (:type string)))
+   :function (lambda (context buffer_names)
+               (unless (vectorp buffer_names)
+                 (if (stringp buffer_names)
+                     (setq buffer_names (json-parse-string buffer_names :array-type 'vector))
+                   (error "ERROR: 'buffer_names' parameter must be an array of strings.")))
+               
+               (condition-case err
+                   (progn
+                     (cl-loop for buffer_name across buffer_names do
+                              (let ((actual-name (macher-agent--resolve-buffer-name buffer_name)))
+                                (macher-agent--ensure-access actual-name)
+                                (unless (buffer-live-p (get-buffer actual-name))
+                                  (error "ERROR: Buffer '%s' does not exist." actual-name))))
+                     
+                     (cl-loop for buffer_name across buffer_names do
+                              (let ((buf (get-buffer (macher-agent--resolve-buffer-name buffer_name))))
+                                (with-current-buffer buf
+                                  (goto-char (point-max))
+                                  (gptel-send))))
+                     
+                     (format "SUCCESS: Triggered %d sub-agents asynchronously." (length buffer_names)))
+                 (error (error-message-string err))))))
 
 (defvar macher-agent-write-to-buffer-tool
   (gptel-make-tool
@@ -159,8 +254,6 @@
                    (let ((actual-name (macher-agent--resolve-buffer-name buffer_name)))
                      (unless (get-buffer actual-name)
                        (get-buffer-create actual-name))
-                     
-                     ;; The core context layer will intrinsically check access and throw if denied
                      (macher-agent--update-context-file context actual-name content)
                      (format "SUCCESS: Virtual edit recorded for buffer '%s'. A patch will be generated at the end of the turn." actual-name))
                  (error (error-message-string err))))))
@@ -175,18 +268,14 @@
    :function (lambda (context buffer_name content)
                (condition-case err
                    (let ((actual-name (macher-agent--resolve-buffer-name buffer_name)))
-                     ;; Gatekeeper Check
                      (macher-agent--ensure-access actual-name)
-                     
                      (let ((target-buffer (get-buffer-create actual-name)))
                        (with-current-buffer target-buffer
                          (erase-buffer)
                          (insert content))
-                       
                        (when context
                          (macher-agent--update-context-file context actual-name content)
                          (macher-agent--auto-sync-context context))
-                       
                        (format "SUCCESS: Buffer '%s' has been directly overwritten and synchronised." actual-name)))
                  (error (error-message-string err))))))
 
@@ -237,63 +326,7 @@
    :function (lambda (context buffer_name)
                (condition-case err
                    (let ((actual-name (macher-agent--resolve-buffer-name buffer_name)))
-                     ;; Utilize the abstracted core read function
                      (macher-agent--read-context-file context actual-name))
-                 (error (error-message-string err))))))
-
-(defvar macher-agent-execute-blocking-tool
-  (gptel-make-tool
-   :name "execute_subagent_buffer_blocking"
-   :description "Trigger a sub-agent and WAIT for it to finish. Returns the sub-agent's final output."
-   :category "macher-agent-plan"
-   :async t
-   :args (list '(:name "buffer_name" :type string))
-   :function (lambda (context callback buffer_name)
-               (condition-case err
-                   (let ((actual-name (macher-agent--resolve-buffer-name buffer_name)))
-                     (macher-agent--ensure-access actual-name)
-                     
-                     (let ((buf (get-buffer actual-name)))
-                       (unless (buffer-live-p buf)
-                         (error "ERROR: Buffer '%s' does not exist." actual-name))
-                       
-                       (with-current-buffer buf
-                         (goto-char (point-max))
-                         (insert "\n\n=== SYSTEM REMINDER ===\n@macher-agent-worker You MUST use the `submit_task_result` tool to return your answer. Do not just type it as plain text.\n")
-                         (gptel-send)
-                         (macher-agent--wait-and-return buf callback))))
-                 (error (funcall callback (error-message-string err)))))))
-
-(defvar macher-agent-execute-multiple-nonblocking-tool
-  (gptel-make-tool
-   :name "execute_subagents_nonblocking"
-   :description "Trigger 1-to-many sub-agents to begin processing asynchronously in the background. Does NOT provide new instructions and does NOT wait for output."
-   :category macher-tool-category
-   :args (list '(:name "buffer_names" :type array 
-                       :description "List of buffer names to trigger."
-                       :items (:type string)))
-   :function (lambda (context buffer_names)
-               (unless (vectorp buffer_names)
-                 (if (stringp buffer_names)
-                     (setq buffer_names (json-parse-string buffer_names :array-type 'vector))
-                   (error "ERROR: 'buffer_names' parameter must be an array of strings.")))
-               
-               (condition-case err
-                   (progn
-                     ;; Phase 1: Validate
-                     (cl-loop for buffer_name across buffer_names do
-                              (let ((actual-name (macher-agent--resolve-buffer-name buffer_name)))
-                                (macher-agent--ensure-access actual-name)
-                                (unless (buffer-live-p (get-buffer actual-name))
-                                  (error "ERROR: Buffer '%s' does not exist." actual-name))))
-                     
-                     ;; Phase 2: Fire and Forget
-                     (cl-loop for buffer_name across buffer_names do
-                              (with-current-buffer (get-buffer (macher-agent--resolve-buffer-name buffer_name))
-                                (goto-char (point-max))
-                                (gptel-send)))
-                     
-                     (format "SUCCESS: Triggered %d sub-agents asynchronously." (length buffer_names)))
                  (error (error-message-string err))))))
 
 (defvar-local macher-agent--final-result nil
@@ -309,6 +342,8 @@
                (setq-local macher-agent--final-result final_answer)
                "SUCCESS: Result submitted successfully. You have completed your task.")))
 
+;; --- Presets ---
+
 (with-eval-after-load 'macher
   (gptel-make-preset "macher-agent-plan"
     :description "Project planning, architectural analysis, and sub-agent orchestration"
@@ -316,10 +351,14 @@
              "list_directory_in_workspace" 
              "search_in_workspace"
              "spawn_subagent"
-             "delegate_task_to_subagents"
+             "delegate_task_to_subagent"
+             "delegate_tasks_to_subagents"
              "write_to_buffer"
              "execute_subagent_buffer_blocking"
-             "execute_subagents_buffer_nonblocking")))
+             "execute_subagents_nonblocking"
+             "list_agent_buffers"
+             "search_agent_buffers"
+             "read_buffer")))
 
 (with-eval-after-load 'macher
   (gptel-make-preset "macher-agent-worker"
