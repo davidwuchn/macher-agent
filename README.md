@@ -118,8 +118,10 @@ These are the `gptel` tools exposed to the LLM to facilitate orchestration, file
 | :--- | :--- |
 | `spawn_subagent` | Creates a new, isolated sub-agent in the current project directory and registers it to the parent agent's access scope. |
 | `delegate_task_to_subagent` | Writes instructions to a sub-agent with strict submission reminders and waits for its final synthesised response. |
+| `delegate_task_to_subagents` | Writes instructions to sub-agents with strict submission reminders and waits for its final synthesised response. |
 | `execute_subagent_buffer_blocking` | Triggers a sub-agent to execute autonomously, pausing the parent agent until it finishes its work and generates an output. |
 | `execute_subagent_buffer_nonblocking`| Triggers a sub-agent to execute asynchronously in the background, allowing the parent agent to continue processing immediately. |
+| `execute_subagents_buffer_nonblocking`| Triggers sub-agents to execute asynchronously in the background, allowing the parent agent to continue processing immediately. |
 | `write_to_buffer` | Proposes new content for a live Emacs buffer, creating a virtual patch for review rather than mutating it immediately. |
 | `write_and_commit_buffer` | Directly overwrites an Emacs buffer and fast-forwards the context to synchronise the agent's awareness. |
 | `read_buffer` | Reads a scoped buffer's contents, prioritising proposed virtual edits if modified during the current turn, or the live state otherwise. |
