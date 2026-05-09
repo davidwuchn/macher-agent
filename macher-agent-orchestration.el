@@ -2,8 +2,6 @@
 
 (require 'macher)
 
-(defvar-local macher-agent--scoped-buffers nil
-  "An explicit list of buffer names this specific agent is allowed to access.")
 
 ;;;###autoload
 (defun macher-agent-add-buffer-to-scope (buffer)
@@ -11,14 +9,17 @@
   ;; Change "b" to "B" to allow possibly nonexistent buffer names
   (interactive "BAdd buffer to current agent's scope: ")
   (let ((buf-name (if (stringp buffer) buffer (buffer-name buffer))))
-    ;; Ensure the current buffer has its own local list
-    (unless (local-variable-p 'macher-agent--scoped-buffers)
-      (setq-local macher-agent--scoped-buffers nil))
-    
     ;; Physically create the buffer if it doesn't exist yet
     (get-buffer-create buf-name)
     
-    (add-to-list 'macher-agent--scoped-buffers buf-name)
+    (when macher-agent--persistent-context
+      (let* ((contents (macher-context-contents macher-agent--persistent-context))
+             (entry (assoc buf-name contents)))
+        (unless entry
+          (let ((orig (with-current-buffer buf-name
+                        (buffer-substring-no-properties (point-min) (point-max)))))
+            (setf (macher-context-contents macher-agent--persistent-context)
+                  (cons (cons buf-name (cons orig nil)) contents))))))
     (message "SUCCESS: Added '%s' to the agent's restricted scope." buf-name)))
 
 (defun macher-agent--resolve-buffer-name (name)
@@ -26,9 +27,10 @@
   (substring-no-properties name))
 
 ;;;###autoload
-(defun macher-agent-add-subagent (name dir &optional _display)
+(defun macher-agent-add-subagent (name dir &optional _display context)
   "Create a new sub-agent buffer completely silently.
-No workspace path or system directives are printed to the buffer."
+No workspace path or system directives are printed to the buffer.
+If CONTEXT is provided, the sub-agent inherits the persistent context."
   (let* ((buf-name (format "*macher-agent: %s*" name))
          (buf (get-buffer-create buf-name))
          (safe-dir (if (and dir (stringp dir)) dir (or default-directory "~/")))
@@ -39,6 +41,8 @@ No workspace path or system directives are printed to the buffer."
       (setq default-directory full-dir)
       (setq-local macher-agent--is-workspace t)
       (setq-local macher--workspace (cons 'agent full-dir))
+      (when context
+        (setq-local macher-agent--persistent-context context))
 
       ;; 2. Clean Mode Initialisation
       (unless (derived-mode-p 'markdown-mode)

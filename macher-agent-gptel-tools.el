@@ -113,10 +113,16 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
    :function (lambda (context name)
                (condition-case err
                    (let ((buf-name (format "*macher-agent: %s*" name)))
-                     (macher-agent-add-subagent name default-directory t)
-                     (unless (local-variable-p 'macher-agent--scoped-buffers)
-                       (setq-local macher-agent--scoped-buffers nil))
-                     (add-to-list 'macher-agent--scoped-buffers buf-name)
+                     (macher-agent-add-subagent name default-directory t context)
+                     ;; Add to context explicitly
+                     (when context
+                       (let* ((contents (macher-context-contents context))
+                              (entry (assoc buf-name contents)))
+                         (unless entry
+                           (let ((orig (with-current-buffer buf-name
+                                         (buffer-substring-no-properties (point-min) (point-max)))))
+                             (setf (macher-context-contents context)
+                                   (cons (cons buf-name (cons orig nil)) contents))))))
                      (format "SUCCESS: Sub-agent created. The EXACT buffer name to use is '%s'." buf-name))
                  (error (error-message-string err))))))
 
@@ -131,7 +137,7 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
    :function (lambda (context callback buffer_name instructions)
                (condition-case err
                    (let ((actual-name (macher-agent--resolve-buffer-name buffer_name)))
-                     (macher-agent--ensure-access actual-name)
+                     (macher-agent--ensure-access context actual-name)
                      
                      (let ((buf (get-buffer actual-name)))
                        (unless (buffer-live-p buf)
@@ -182,7 +188,7 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
                               (let* ((buffer-name (plist-get task :buffer_name))
                                      (instructions (plist-get task :instructions))
                                      (actual-name (macher-agent--resolve-buffer-name buffer-name)))
-                                (macher-agent--ensure-access actual-name)
+                                (macher-agent--ensure-access context actual-name)
                                 (let ((buf (get-buffer actual-name)))
                                   (unless (buffer-live-p buf)
                                     (error "ERROR: Buffer '%s' does not exist." actual-name))
@@ -220,7 +226,7 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
    :function (lambda (context callback buffer_name)
                (condition-case err
                    (let ((actual-name (macher-agent--resolve-buffer-name buffer_name)))
-                     (macher-agent--ensure-access actual-name)
+                     (macher-agent--ensure-access context actual-name)
                      
                      (let ((buf (get-buffer actual-name)))
                        (unless (buffer-live-p buf)
@@ -254,7 +260,7 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
                    (progn
                      (cl-loop for buffer_name across buffer_names do
                               (let ((actual-name (macher-agent--resolve-buffer-name buffer_name)))
-                                (macher-agent--ensure-access actual-name)
+                                (macher-agent--ensure-access context actual-name)
                                 (unless (buffer-live-p (get-buffer actual-name))
                                   (error "ERROR: Buffer '%s' does not exist." actual-name))))
                      
@@ -293,7 +299,7 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
    :function (lambda (context buffer_name content)
                (condition-case err
                    (let ((actual-name (macher-agent--resolve-buffer-name buffer_name)))
-                     (macher-agent--ensure-access actual-name)
+                     (macher-agent--ensure-access context actual-name)
                      (let ((target-buffer (get-buffer-create actual-name)))
                        (with-current-buffer target-buffer
                          (erase-buffer)
@@ -311,9 +317,11 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
    :category "macher-agent-plan"
    :function (lambda (context)
                (let ((active-buffers nil))
-                 (dolist (buf-name macher-agent--scoped-buffers)
-                   (when (get-buffer buf-name)
-                     (push buf-name active-buffers)))
+                 (when context
+                   (dolist (entry (macher-context-contents context))
+                     (let ((buf-name (car entry)))
+                       (when (get-buffer buf-name)
+                         (push buf-name active-buffers)))))
                  (if active-buffers
                      (mapconcat #'identity (nreverse active-buffers) "\n")
                    "No buffers are currently in your scope.")))))
@@ -327,16 +335,18 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
    :function (lambda (context pattern)
                (condition-case err
                    (let ((results nil))
-                     (dolist (buf-name macher-agent--scoped-buffers)
-                       (let ((buf (get-buffer buf-name)))
-                         (when buf
-                           (with-current-buffer buf
-                             (save-excursion
-                               (goto-char (point-min))
-                               (while (re-search-forward pattern nil t)
-                                 (let* ((line (line-number-at-pos))
-                                        (content (string-trim (thing-at-point 'line t))))
-                                   (push (format "%s:%d: %s" buf-name line content) results))))))))
+                     (when context
+                       (dolist (entry (macher-context-contents context))
+                         (let* ((buf-name (car entry))
+                                (buf (get-buffer buf-name)))
+                           (when buf
+                             (with-current-buffer buf
+                               (save-excursion
+                                 (goto-char (point-min))
+                                 (while (re-search-forward pattern nil t)
+                                   (let* ((line (line-number-at-pos))
+                                          (content (string-trim (thing-at-point 'line t))))
+                                     (push (format "%s:%d: %s" buf-name line content) results)))))))))
                      (if results
                          (mapconcat #'identity (nreverse results) "\n")
                        (format "No matches found for '%s' in your scoped buffers." pattern)))

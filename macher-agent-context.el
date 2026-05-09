@@ -5,7 +5,7 @@
 (defun macher-agent--update-context-file (context path new-content)
   "Update the virtual NEW-CONTENT for PATH in the macher CONTEXT.
 Can handle both physical file paths and pure Emacs buffer names."
-  (macher-agent--ensure-access path)
+  (macher-agent--ensure-access context path)
   
   (let* ((contents (macher-context-contents context))
          (entry (assoc path contents)))
@@ -29,16 +29,17 @@ Can handle both physical file paths and pure Emacs buffer names."
               (cons (cons path (cons orig new-content)) contents))))
     (setf (macher-context-dirty-p context) t)))
 
-(defun macher-agent--ensure-access (buffer-name)
-  "Halt execution if BUFFER-NAME is outside the agent's explicit scope."
-  (let ((actual-name (substring-no-properties buffer-name)))
-    (unless (member actual-name macher-agent--scoped-buffers)
+(defun macher-agent--ensure-access (context path)
+  "Halt execution if PATH is outside the agent's explicit scope."
+  (let* ((actual-name (substring-no-properties path))
+         (contents (and context (macher-context-contents context))))
+    (unless (assoc actual-name contents)
       ;; Throwing a catchable error is idiomatic Emacs Lisp for access denial
       (error "SECURITY ERROR: You do not have permission to access '%s'. Use list_agent_buffers to see your allowed scope." actual-name))))
 
 (defun macher-agent--read-context-file (context path)
   "Securely read PATH from the virtual CONTEXT or the live Emacs buffer."
-  (macher-agent--ensure-access path)
+  (macher-agent--ensure-access context path)
   
   (let* ((virtual-entry (when context (assoc path (macher-context-contents context))))
          (virtual-content (when virtual-entry (cddr virtual-entry))))
