@@ -5,6 +5,8 @@
 (defun macher-agent--update-context-file (context path new-content)
   "Update the virtual NEW-CONTENT for PATH in the macher CONTEXT.
 Can handle both physical file paths and pure Emacs buffer names."
+  (macher-agent--ensure-access path)
+  
   (let* ((contents (macher-context-contents context))
          (entry (assoc path contents)))
     (if entry
@@ -26,6 +28,26 @@ Can handle both physical file paths and pure Emacs buffer names."
         (setf (macher-context-contents context)
               (cons (cons path (cons orig new-content)) contents))))
     (setf (macher-context-dirty-p context) t)))
+
+(defun macher-agent--ensure-access (buffer-name)
+  "Halt execution if BUFFER-NAME is outside the agent's explicit scope."
+  (let ((actual-name (substring-no-properties buffer-name)))
+    (unless (member actual-name macher-agent--scoped-buffers)
+      ;; Throwing a catchable error is idiomatic Emacs Lisp for access denial
+      (error "SECURITY ERROR: You do not have permission to access '%s'. Use list_agent_buffers to see your allowed scope." actual-name))))
+
+(defun macher-agent--read-context-file (context path)
+  "Securely read PATH from the virtual CONTEXT or the live Emacs buffer."
+  (macher-agent--ensure-access path)
+  
+  (let* ((virtual-entry (when context (assoc path (macher-context-contents context))))
+         (virtual-content (when virtual-entry (cddr virtual-entry))))
+    (cond
+     (virtual-content virtual-content)
+     ((get-buffer path)
+      (with-current-buffer path
+        (buffer-substring-no-properties (point-min) (point-max))))
+     (t (error "ERROR: Buffer '%s' does not exist." path)))))
 
 ;; --- 1. Global Flags & State ---
 
@@ -138,7 +160,8 @@ or update the FSM state.")
              (plist-get (gptel-fsm-info fsm) :macher--context)))))
     (funcall orig-fn fsm wrapped-get-context)))
 
-(add-hook 'macher-agent-context-resolved-functions #'macher-agent-persist-context-hook)
+;; [FIX 1: Restored the missing advice block to attach the simulation to the upstream engine]
+(advice-add 'macher--setup-tools :around #'macher-agent--simulate-resolved-hook-advice)
 
 (defun macher-agent-persist-context-hook (ctx fsm)
   "Maintain a persistent context and synchronise it with the disk."
@@ -155,7 +178,24 @@ or update the FSM state.")
       
       (setq macher--fsm-latest fsm))))
 
-(add-hook 'macher-context-resolved-functions #'macher-agent-persist-context-hook)
+;; [FIX 2: Kept the correctly namespaced hook and removed the redundant legacy (add-hook 'macher-context-resolved-functions ...)]
+(add-hook 'macher-agent-context-resolved-functions #'macher-agent-persist-context-hook)
+
+(defvar macher-agent-extended-tool-categories 
+  '("macher-agent" "macher-agent-plan" "macher-agent-worker")
+  "Custom agent categories that should receive native macher context injection.")
+
+(defun macher-agent--extend-tool-categories-advice (orig-fn fsm get-context)
+  "Run macher--setup-tools multiple times to capture custom agent categories."
+  ;; 1. Run the original function first to process standard "macher" tools
+  (funcall orig-fn fsm get-context)
+  
+  ;; 2. Dynamically rebind the category and re-run the processor for our custom tools
+  (dolist (custom-category macher-agent-extended-tool-categories)
+    (let ((macher-tool-category custom-category))
+      (funcall orig-fn fsm get-context))))
+
+(advice-add 'macher--setup-tools :around #'macher-agent--extend-tool-categories-advice)
 
 ;; --- 4. Interactive Commands ---
 

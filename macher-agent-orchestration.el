@@ -7,12 +7,16 @@
 
 ;;;###autoload
 (defun macher-agent-add-buffer-to-scope (buffer)
-  "Manually add an existing Emacs BUFFER to the current agent's scope."
-  (interactive "bAdd buffer to current agent's scope: ")
-  (let ((buf-name (if (stringp buffer) buffer (buffer-name (get-buffer buffer)))))
+  "Manually add an Emacs BUFFER (existing or new) to the current agent's scope."
+  ;; Change "b" to "B" to allow possibly nonexistent buffer names
+  (interactive "BAdd buffer to current agent's scope: ")
+  (let ((buf-name (if (stringp buffer) buffer (buffer-name buffer))))
     ;; Ensure the current buffer has its own local list
     (unless (local-variable-p 'macher-agent--scoped-buffers)
       (setq-local macher-agent--scoped-buffers nil))
+    
+    ;; Physically create the buffer if it doesn't exist yet
+    (get-buffer-create buf-name)
     
     (add-to-list 'macher-agent--scoped-buffers buf-name)
     (message "SUCCESS: Added '%s' to the agent's restricted scope." buf-name)))
