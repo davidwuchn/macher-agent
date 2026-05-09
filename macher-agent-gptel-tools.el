@@ -102,6 +102,10 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
      (t
       (run-at-time 0.5 nil #'macher-agent--wait-and-return-multiple buffers callback (1+ attempts))))))
 
+(defun macher-agent--set-system-message (msg)
+  "Adapter function to safely set the gptel system message without hardcoding internals."
+  (setq-local gptel--system-message msg))
+
 ;; --- Tools ---
 
 (add-to-list 'macher-agent-extended-tool-categories "macher-agent-plan")
@@ -111,6 +115,32 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
     (if (string-match-p "^\\(ERROR\\|SECURITY ERROR\\):" msg)
         msg
       (format "ERROR: %s" msg))))
+
+(defun macher-agent--parse-tasks-array (tasks callback)
+  "Parse TASKS into a valid vector, executing CALLBACK on error."
+  (unless (vectorp tasks)
+    (if (stringp tasks)
+        (condition-case nil
+            (setq tasks (json-parse-string tasks :array-type 'vector :object-type 'plist))
+          (error (funcall callback "ERROR: 'tasks' parameter was not a valid JSON array.")
+                 (setq tasks nil)))
+      (funcall callback "ERROR: 'tasks' parameter must be an array of objects.")
+      (setq tasks nil)))
+  tasks)
+
+(defun macher-agent--prepare-subagent-instructions (buf instructions)
+  "Insert INSTRUCTIONS into BUF with cloaked system reminders."
+  (with-current-buffer buf
+    (goto-char (point-max))
+    (macher-agent--insert-hidden "\n\n=== DELEGATED TASK ===\n")
+    (insert (substring-no-properties instructions))
+    (macher-agent--insert-hidden "\n\n@macher-agent-worker\n=== SYSTEM REMINDER ===\nYou MUST use the `submit_task_result` tool to return your answer. Do not just type it as plain text.\n")))
+
+(defun macher-agent--dispatch-async (buf)
+  "Trigger gptel-send in BUF and show UI."
+  (with-current-buffer buf
+    (macher-agent--show-ui buf)
+    (gptel-send)))
 
 (defvar macher-agent-spawn-subagent-tool
   (gptel-make-tool
@@ -151,21 +181,9 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
                        (unless (buffer-live-p buf)
                          (error "ERROR: Buffer '%s' does not exist." actual-name))
                        
-                       (with-current-buffer buf
-                         (goto-char (point-max))
-                         
-                         ;; Cloak the pre-task header
-                         (macher-agent--insert-hidden "\n\n=== DELEGATED TASK ===\n")
-                         
-                         ;; Insert the VISIBLE instructions
-                         (insert (substring-no-properties instructions))
-                         
-                         ;; Cloak the post-task rules
-                         (macher-agent--insert-hidden "\n\n@macher-agent-worker\n=== SYSTEM REMINDER ===\nYou MUST use the `submit_task_result` tool to return your answer. Do not just type it as plain text.\n")
-                         
-                         (macher-agent--show-ui buf)
-                         (gptel-send)
-                         (macher-agent--wait-and-return buf callback))))
+                       (macher-agent--prepare-subagent-instructions buf instructions)
+                       (macher-agent--dispatch-async buf)
+                       (macher-agent--wait-and-return buf callback)))
                  (error (funcall callback (macher-agent--format-error err)))))))
 
 (defvar macher-agent-delegate-multiple-tool
@@ -181,48 +199,31 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
                                                                :instructions (:type string)) 
                                      :required ["buffer_name" "instructions"])))
    :function (lambda (context callback tasks)
-               (unless (vectorp tasks)
-                 (if (stringp tasks)
-                     (condition-case nil
-                         (setq tasks (json-parse-string tasks :array-type 'vector :object-type 'plist))
-                       (error (funcall callback "ERROR: 'tasks' parameter was not a valid JSON array.")))
-                   (funcall callback "ERROR: 'tasks' parameter must be an array of objects.")))
-               
-               (condition-case err
-                   (let ((target-pairs nil)
-                         (target-buffers nil))
-                     
-                     (cl-loop for task across tasks do
-                              (let* ((buffer-name (plist-get task :buffer_name))
-                                     (instructions (plist-get task :instructions))
-                                     (actual-name (macher-agent--resolve-buffer-name buffer-name)))
-                                (macher-agent--ensure-access context actual-name)
-                                (let ((buf (get-buffer actual-name)))
-                                  (unless (buffer-live-p buf)
-                                    (error "ERROR: Buffer '%s' does not exist." actual-name))
-                                  (push (cons buf instructions) target-pairs))))
-                     
-                     (dolist (task-pair (nreverse target-pairs))
-                       (let ((buf (car task-pair))
-                             (instructions (cdr task-pair)))
-                         (push buf target-buffers)
-                         (with-current-buffer buf
-                           (goto-char (point-max))
-                           
-                           ;; Cloak the pre-task header
-                           (macher-agent--insert-hidden "\n\n=== DELEGATED TASK ===\n")
-                           
-                           ;; Insert the VISIBLE instructions
-                           (insert (substring-no-properties instructions))
-                           
-                           ;; Cloak the post-task rules
-                           (macher-agent--insert-hidden "\n\n@macher-agent-worker\n=== SYSTEM REMINDER ===\nYou MUST use the `submit_task_result` tool to return your answer. Do not just type it as plain text.\n")
-                           
-                           (macher-agent--show-ui buf)
-                           (gptel-send))))
-                     
-                     (macher-agent--wait-and-return-multiple (nreverse target-buffers) callback))
-                 (error (funcall callback (macher-agent--format-error err)))))))
+               (let ((parsed-tasks (macher-agent--parse-tasks-array tasks callback)))
+                 (when parsed-tasks
+                   (condition-case err
+                       (let ((target-pairs nil)
+                             (target-buffers nil))
+                         
+                         (cl-loop for task across parsed-tasks do
+                                  (let* ((buffer-name (plist-get task :buffer_name))
+                                         (instructions (plist-get task :instructions))
+                                         (actual-name (macher-agent--resolve-buffer-name buffer-name)))
+                                    (macher-agent--ensure-access context actual-name)
+                                    (let ((buf (get-buffer actual-name)))
+                                      (unless (buffer-live-p buf)
+                                        (error "ERROR: Buffer '%s' does not exist." actual-name))
+                                      (push (cons buf instructions) target-pairs))))
+                         
+                         (dolist (task-pair (nreverse target-pairs))
+                           (let ((buf (car task-pair))
+                                 (instructions (cdr task-pair)))
+                             (push buf target-buffers)
+                             (macher-agent--prepare-subagent-instructions buf instructions)
+                             (macher-agent--dispatch-async buf)))
+                         
+                         (macher-agent--wait-and-return-multiple (nreverse target-buffers) callback))
+                     (error (funcall callback (macher-agent--format-error err)))))))))
 
 (defvar macher-agent-execute-blocking-tool
   (gptel-make-tool
@@ -240,14 +241,9 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
                        (unless (buffer-live-p buf)
                          (error "ERROR: Buffer '%s' does not exist." actual-name))
                        
-                       (with-current-buffer buf
-                         (goto-char (point-max))
-                         ;; Entirely invisible payload
-                         (macher-agent--insert-hidden "\n\n=== SYSTEM REMINDER ===\n@macher-agent-worker You MUST use the `submit_task_result` tool to return your answer. Do not just type it as plain text.\n")
-                         
-                         (macher-agent--show-ui buf)
-                         (gptel-send)
-                         (macher-agent--wait-and-return buf callback))))
+                       (macher-agent--prepare-subagent-instructions buf "")
+                       (macher-agent--dispatch-async buf)
+                       (macher-agent--wait-and-return buf callback)))
                  (error (funcall callback (macher-agent--format-error err)))))))
 
 (defvar macher-agent-execute-multiple-nonblocking-tool
@@ -274,9 +270,7 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
                      
                      (cl-loop for buffer_name across buffer_names do
                               (let ((buf (get-buffer (macher-agent--resolve-buffer-name buffer_name))))
-                                (with-current-buffer buf
-                                  (goto-char (point-max))
-                                  (gptel-send))))
+                                (macher-agent--dispatch-async buf)))
                      
                      (format "SUCCESS: Triggered %d sub-agents asynchronously." (length buffer_names)))
                  (error (macher-agent--format-error err))))))

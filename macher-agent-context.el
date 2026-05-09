@@ -1,6 +1,17 @@
 ;;; macher-agent-context.el --- Context and file system handling -*- lexical-binding: t; -*-
 
 (require 'macher)
+(require 'gptel nil t)
+
+(declare-function gptel-fsm-info "gptel" (fsm))
+
+(defun macher-agent--ensure-access (context path)
+  "Halt execution if PATH is outside the agent's explicit scope."
+  (let* ((actual-name (substring-no-properties path))
+         (contents (and context (macher-context-contents context))))
+    (unless (assoc actual-name contents)
+      ;; Throwing a catchable error is idiomatic Emacs Lisp for access denial
+      (error "SECURITY ERROR: You do not have permission to access '%s'. Use list_agent_buffers to see your allowed scope." actual-name))))
 
 (defun macher-agent--update-context-file (context path new-content)
   "Update the virtual NEW-CONTENT for PATH in the macher CONTEXT.
@@ -28,14 +39,6 @@ Can handle both physical file paths and pure Emacs buffer names."
         (setf (macher-context-contents context)
               (cons (cons path (cons orig new-content)) contents))))
     (setf (macher-context-dirty-p context) t)))
-
-(defun macher-agent--ensure-access (context path)
-  "Halt execution if PATH is outside the agent's explicit scope."
-  (let* ((actual-name (substring-no-properties path))
-         (contents (and context (macher-context-contents context))))
-    (unless (assoc actual-name contents)
-      ;; Throwing a catchable error is idiomatic Emacs Lisp for access denial
-      (error "SECURITY ERROR: You do not have permission to access '%s'. Use list_agent_buffers to see your allowed scope." actual-name))))
 
 (defun macher-agent--read-context-file (context path)
   "Securely read PATH from the virtual CONTEXT or the live Emacs buffer."
@@ -97,8 +100,9 @@ Can handle both physical file paths and pure Emacs buffer names."
 
 ;; --- 3. Context Synchronisation & Persistence ---
 
-(defun macher-agent--auto-sync-context (ctx)
-  "Check live buffers and physical disk to fast-forward the agent's memory if needed."
+(defun macher-agent--auto-sync-context (ctx &rest _args)
+  "Check live buffers and physical disk to fast-forward the agent's memory if needed.
+Designed as a decoupled hook function accepting CTX and optional arguments."
   (when ctx
     (let ((contents (macher-context-contents ctx))
           (synced nil))
@@ -145,6 +149,18 @@ Can handle both physical file paths and pure Emacs buffer names."
       (when synced
         (setf (macher-context-dirty-p ctx) nil)))))
 
+;; --- Adapters ---
+
+(defun macher-agent--fsm-put-context (fsm ctx)
+  "Adapter to securely embed the macher context within the gptel FSM."
+  (let ((fsm-info (gptel-fsm-info fsm)))
+    (setf (gptel-fsm-info fsm) 
+          (plist-put fsm-info :macher--context ctx))))
+
+(defun macher-agent--fsm-get-context (fsm)
+  "Adapter to securely retrieve the macher context from the gptel FSM."
+  (plist-get (gptel-fsm-info fsm) :macher--context))
+
 (defvar macher-agent-context-resolved-functions nil
   "Abnormal hook run when a macher context is lazily resolved for a request.
 
@@ -158,7 +174,7 @@ or update the FSM state.")
          (lambda ()
            (let ((ctx (funcall get-context)))
              (run-hook-with-args 'macher-agent-context-resolved-functions ctx fsm)
-             (plist-get (gptel-fsm-info fsm) :macher--context)))))
+             (macher-agent--fsm-get-context fsm)))))
     (funcall orig-fn fsm wrapped-get-context)))
 
 ;; [FIX 1: Restored the missing advice block to attach the simulation to the upstream engine]
@@ -171,16 +187,12 @@ or update the FSM state.")
       (setq macher-agent--persistent-context ctx))
     
     (let ((persistent-ctx macher-agent--persistent-context))
-      (macher-agent--auto-sync-context persistent-ctx)
-      
-      (let ((fsm-info (gptel-fsm-info fsm)))
-        (setf (gptel-fsm-info fsm) 
-              (plist-put fsm-info :macher--context persistent-ctx)))
-      
+      (macher-agent--fsm-put-context fsm persistent-ctx)
       (setq macher--fsm-latest fsm))))
 
 ;; [FIX 2: Kept the correctly namespaced hook and removed the redundant legacy (add-hook 'macher-context-resolved-functions ...)]
 (add-hook 'macher-agent-context-resolved-functions #'macher-agent-persist-context-hook)
+(add-hook 'macher-agent-context-resolved-functions #'macher-agent--auto-sync-context)
 
 (defvar macher-agent-extended-tool-categories nil
   "Custom agent categories that should receive native macher context injection.")
@@ -239,8 +251,7 @@ or update the FSM state.")
 This bypasses external patch utilities, which expect physical files. As an alternative to ediff-patch-buffer"
   (interactive)
   (let* ((fsm macher--fsm-latest)
-         (fsm-info (when fsm (gptel-fsm-info fsm)))
-         (context (when fsm-info (plist-get fsm-info :macher--context)))
+         (context (when fsm (macher-agent--fsm-get-context fsm)))
          (applied-count 0))
     (unless context
       (user-error "No active context found in this session."))

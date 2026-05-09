@@ -105,27 +105,27 @@
         :async t
         ;; Accept the upstream injected context as the very first argument
         :function (lambda (context callback &rest tool-args)
-                (let* ((workspace (macher-context-workspace context))
-                       (project-root (file-name-as-directory (macher--workspace-root workspace)))
-                       (pending-edits (macher-agent--get-context-edits context))
-                       (call-args (if (and tool-args (keywordp (car tool-args)))
-                                      tool-args
-                                    (let ((result nil))
-                                      (cl-loop for arg-def in ,args
-                                               for i from 0
-                                               for arg-name = (intern (concat ":" (plist-get arg-def :name)))
-                                               do (setq result (plist-put result arg-name (nth i tool-args))))
-                                      result)))
-                       (cmd-string (funcall ,command-fn call-args))
-                       (success-override (when ,success-fn (funcall ,success-fn call-args))))
+                    (let* ((workspace (macher-context-workspace context))
+                           (project-root (file-name-as-directory (macher--workspace-root workspace)))
+                           (pending-edits (macher-agent--get-context-edits context))
+                           (call-args (if (and tool-args (keywordp (car tool-args)))
+                                          tool-args
+                                        (let ((result nil))
+                                          (cl-loop for arg-def in ,args
+                                                   for i from 0
+                                                   for arg-name = (intern (concat ":" (plist-get arg-def :name)))
+                                                   do (setq result (plist-put result arg-name (nth i tool-args))))
+                                          result)))
+                           (cmd-string (funcall ,command-fn call-args))
+                           (success-override (when ,success-fn (funcall ,success-fn call-args))))
 
-                  (macher-agent--pure-async-execute
-                   project-root
-                   pending-edits
-                   cmd-string
-                   success-override
-                   (lambda (result)
-                     (funcall callback (if ,output-filter (funcall ,output-filter result) result))))))))
+                      (macher-agent--pure-async-execute
+                       project-root
+                       pending-edits
+                       cmd-string
+                       success-override
+                       (lambda (result)
+                         (funcall callback (if ,output-filter (funcall ,output-filter result) result))))))))))
 
 ;;;###autoload
 (defun macher-agent-clear-context ()

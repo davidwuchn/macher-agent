@@ -1,4 +1,3 @@
-
 # macher-agent
 
 https://github.com/user-attachments/assets/461e695a-1315-4975-bbfb-c3a411819e11
@@ -7,7 +6,7 @@ This is a collection of tools inspired by [gptel-agent](https://github.com/karth
 
 This attempts to avoid working directly on live files and instead operates within the macher context. With the verification gate being the final patch that's output at the end of execution.
 
-This also contains some helpers to make tools that work in the macher ephemeral context using `macher-agent-make-tool`, native sub-agent orchestration with `macher-agent-add-subagent`, and event-loop blocking workarounds to keep the GUI free.
+This also contains some helpers to make tools that work in the macher ephemeral context using `macher-agent-make-tool` and native sub-agent orchestration with `macher-agent-add-subagent`.
 
 ## Why macher-agent?
 
@@ -17,17 +16,17 @@ The auto sync is able to determine if patches were applied, if intermediate edit
 
 You can also adopt a auto-agentic CLI style approach where a planner dynamically spins up, delegates to sub-agents entirely through tool calls. Or you could use a semi-agentic workflow, manually instantiating sub-agents and dispatching instructions yourself while still benefiting from the non-blocking, sandboxed execution.
 
-###  Emacs-native architecture mapping
+### Emacs-native architecture mapping
 
-* Sandboxing and isolation are handled by routing modifications through a virtual memory `macher` context, culminating in a reviewable ediff patch rather than live file mutation.
-* Asynchronous background execution is achieved via non-blocking sub-agent commands, keeping your editor GUI entirely responsive whilst the agent works.
-* Multi-agent orchestration for complex tasks is replicated natively by allowing a planner to dynamically spin up isolated buffers, dispatch instructions, and await synthesised responses via tool calls.
-* System integration and automated testing rely on dynamic tool creation, running filesystem aware tools against in-memory edits to self-correct compilation errors before presenting a final patch.
+* Sandboxing and isolation are handled by routing modifications strictly through a virtual memory `macher` context, culminating in a reviewable ediff patch rather than live file mutation.
+* Pure decoupled execution and strict I/O adherence routing all interactions through the `macher-context` API, completely isolating the UI from underlying LLM and FSM asynchronous loops.
+* Asynchronous background execution is achieved via non-blocking sub-agent commands and Finite State Machine (FSM) driven logic, keeping your editor GUI entirely responsive whilst the agent works.
+* Multi-agent orchestration for complex tasks is replicated natively by allowing a planner to dynamically spin up isolated buffers, safely inherit persistent state, dispatch instructions, and await synthesised responses via tool calls.
+* System integration and automated testing rely on dynamic tool creation (featuring built-in category registration and standardised error handling), running filesystem aware tools against in-memory edits to self-correct compilation errors before presenting a final patch.
 * Contextual integrity in patches and state preservation mirror external versioning by embedding the continuous conversation directly into intermediate patches, ensuring the agent's logic remains tethered to the proposed code.
 * Infinite task loops and token management are sustained using `gptel` episodic sliding memory to compress older transcripts into structured summaries, preventing context degradation whilst retaining the full human-readable history in your buffer.
-* Reverting and branching can be managed manually by clearing a sub-agent's context to wipe the slate clean, or by inspecting the conversational breadcrumbs left in intermediate patches.
 
-## Instatllation
+## Installation
 
 To integrate macher-agent into your workflow, ensure that macher and gptel are already installed and loaded (and your system has rsync installed). Then setup your use-package based on the examples below
 
@@ -74,25 +73,25 @@ This setup assumes you have [context-builder](https://github.com/igorls/context-
                 :command-fn (lambda (_) "rtk cargo test </dev/null 2>&1")
                 :success-fn (lambda (_) "SUCCESS: The tests ran perfectly with no errors."))
                ))
-  ```
+```
 
 ### Agentic workflow
 
-This workflow demonstrates how to use the planner preset to analyse a repository and seamlessly hand off the implementation details to an isolated sub-agent entirely through tool calls. Agents interact with files and buffers via a virtual memory context, allowing changes to be reviewed as patches before being committed.
+This workflow demonstrates how to use the planner preset to analyse a repository and seamlessly hand off the implementation details to an isolated sub-agent entirely through tool calls. Agents interact with files and buffers strictly via the `macher` virtual memory context, allowing changes to be reviewed as patches before being committed.
 
 ### Orchestration
 
-* `spawn_subagent` - Instantiates a new, isolated sub-agent buffer locked to the current project directory.
+* `spawn_subagent` - Instantiates a new, isolated sub-agent buffer locked to the current project directory, inheriting the parent's persistent virtual state.
 * `execute_subagent_buffer_blocking` - Triggers the sub-agent to execute its task autonomously, pausing the parent agent until the sub-agent finishes its work and generates a patch.
 * `execute_subagent_buffer_nonblocking` - Triggers the sub-agent to begin executing asynchronously in the background, allowing the parent agent to immediately continue its own processing without waiting.
 
 ### Emacs Buffer Operations
 
-* `write_to_buffer` - Proposes a change to a live Emacs buffer, creating a virtual patch for review (ie via ediff) rather than mutating the buffer immediately.
+* `write_to_buffer` - Proposes a change to a live Emacs buffer, creating a virtual patch for review via the `macher` context API rather than mutating the buffer immediately.
 
 * `write_and_commit_buffer` - Directly overwrites an Emacs buffer and fast-forwards the context to synchronise the agent's awareness.
 
-* `read_buffer` - Reads the contents of an agent buffer, prioritising proposed virtual edits if modified during the current turn, or returning the live Emacs buffer state otherwise.
+* `read_buffer` - Reads the contents of a buffer directly from the persistent `macher` context, prioritising proposed virtual edits if modified during the current turn, or returning the live Emacs buffer state otherwise.
 
 * `list_agent_buffers` - Scans the current Emacs session and returns a filtered list of all active orchestrator and sub-agent buffers.
 
@@ -100,9 +99,9 @@ This workflow demonstrates how to use the planner preset to analyse a repository
 
 ### Semi-agentic workflow
 
-Human-in-the-loop orchestratio using interactive Emacs commands to manually manage your sub-agents.
+Human-in-the-loop orchestration using interactive Emacs commands to manually manage your sub-agents.
 
-* `M-x macher-agent-add-subagent` - Interactively prompts you for a name and a target directory, then spins up a dedicated, isolated sub-agent buffer locked to that specific workspace. Makes current agent aware of sub agents, for example allowing you to instruct it to `write_to_buffer` with plans, research etc.
+* `M-x macher-agent-add-subagent` - Interactively prompts you for a name and a target directory, then spins up a dedicated, isolated sub-agent buffer locked to that specific workspace, safely inheriting the persistent context of the parent agent. Makes current agent aware of sub agents, for example allowing you to instruct it to `write_to_buffer` with plans, research etc.
 * `M-x macher-agent-clear-context` - Clears the persistent memory and pending edits of the current sub-agent buffer, allowing you to start a completely fresh task without destroying the buffer itself.
 * **Manual Execution** - You can manually type your instructions directly into any sub-agent buffer and trigger `gptel-send` (or `macher-implement`). The agent will still execute its tasks asynchronously in the background and generate a reviewable patch, but you remain in full control of the dispatching.
 
@@ -111,8 +110,8 @@ These are the `M-x` commands designed for human-in-the-loop orchestration and wo
 
 | Command | Description |
 | :--- | :--- |
-| `macher-agent-add-subagent` | Interactively prompts for a name and directory, then spins up a dedicated, isolated sub-agent buffer locked to that workspace. |
-| `macher-agent-add-buffer-to-scope` | Manually injects an existing Emacs buffer into the current agent's allowed access scope, granting it permission to read/edit it. |
+| `macher-agent-add-subagent` | Interactively prompts for a name and directory, then spins up a dedicated, isolated sub-agent buffer locked to that workspace, inheriting the persistent context payload. |
+| `macher-agent-add-buffer-to-scope` | Manually injects an existing Emacs buffer into the current agent's persistent context payload, explicitly granting it permission to read/edit it. |
 | `macher-agent-clear-context` | Clears the persistent virtual memory and pending edits of the current agent or sub-agent buffer, allowing a fresh start. |
 | `macher-agent-apply-patch` | Safely applies the current patch buffer using external diff utilities (like `git apply` or `patch`) to avoid Emacs collision errors. |
 | `macher-agent-insert-patch` | Inserts the proposed patch from the current workspace directly into the chat buffer for review. |
@@ -125,15 +124,15 @@ These are the `gptel` tools exposed to the LLM to facilitate orchestration, file
 
 | Tool Name | Description |
 | :--- | :--- |
-| `spawn_subagent` | Creates a new, isolated sub-agent in the current project directory and registers it to the parent agent's access scope. |
+| `spawn_subagent` | Creates a new, isolated sub-agent in the current project directory, safely inheriting the parent agent's virtual state and persistent context. |
 | `delegate_task_to_subagent` | Writes instructions to a sub-agent with strict submission reminders and waits for its final synthesised response. |
 | `delegate_task_to_subagents` | Writes instructions to sub-agents with strict submission reminders and waits for its final synthesised response. |
 | `execute_subagent_buffer_blocking` | Triggers a sub-agent to execute autonomously, pausing the parent agent until it finishes its work and generates an output. |
 | `execute_subagent_buffer_nonblocking`| Triggers a sub-agent to execute asynchronously in the background, allowing the parent agent to continue processing immediately. |
 | `execute_subagents_buffer_nonblocking`| Triggers sub-agents to execute asynchronously in the background, allowing the parent agent to continue processing immediately. |
-| `write_to_buffer` | Proposes new content for a live Emacs buffer, creating a virtual patch for review rather than mutating it immediately. |
+| `write_to_buffer` | Proposes new content for a live Emacs buffer, routing through the `macher` context API to create a virtual patch for review. |
 | `write_and_commit_buffer` | Directly overwrites an Emacs buffer and fast-forwards the context to synchronise the agent's awareness. |
-| `read_buffer` | Reads a scoped buffer's contents, prioritising proposed virtual edits if modified during the current turn, or the live state otherwise. |
-| `list_agent_buffers` | Returns a filtered list of all active orchestrator and sub-agent buffers within the agent's explicit allowlist. |
+| `read_buffer` | Reads a buffer's contents via the `macher` context, returning proposed virtual edits if modified, or the live state otherwise. |
+| `list_agent_buffers` | Returns a filtered list of all active orchestrator and sub-agent buffers within the agent's explicitly allowed context scope. |
 | `search_agent_buffers` | Performs a regex search across all allowed agent buffers, returning matching text and their line numbers. |
 | `submit_task_result` | Used strictly by worker sub-agents to submit their final, synthesised answer back to the parent orchestrator. |
