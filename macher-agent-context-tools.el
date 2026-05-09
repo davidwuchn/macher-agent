@@ -93,15 +93,18 @@
 
 (cl-defmacro macher-agent-make-tool (&key name description args command-fn success-fn output-filter category)
   "Create a tool that automatically syncs macher's virtual edits into a sandbox before execution."
-  `(gptel-make-tool
-    :name ,name
-    :description ,description
-    :args ,args
-    ;; RESTORED: Pass the custom category through natively!
-    :category ,(or category "macher-agent")
-    :async t
-    ;; Accept the upstream injected context as the very first argument
-    :function (lambda (context callback &rest tool-args)
+  (let ((cat (or category "macher-agent")))
+    `(progn
+       (add-to-list 'macher-agent-extended-tool-categories ,cat)
+       (gptel-make-tool
+        :name ,name
+        :description ,description
+        :args ,args
+        ;; RESTORED: Pass the custom category through natively!
+        :category ,cat
+        :async t
+        ;; Accept the upstream injected context as the very first argument
+        :function (lambda (context callback &rest tool-args)
                 (let* ((workspace (macher-context-workspace context))
                        (project-root (file-name-as-directory (macher--workspace-root workspace)))
                        (pending-edits (macher-agent--get-context-edits context))

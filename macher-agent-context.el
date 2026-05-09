@@ -182,8 +182,7 @@ or update the FSM state.")
 ;; [FIX 2: Kept the correctly namespaced hook and removed the redundant legacy (add-hook 'macher-context-resolved-functions ...)]
 (add-hook 'macher-agent-context-resolved-functions #'macher-agent-persist-context-hook)
 
-(defvar macher-agent-extended-tool-categories 
-  '("macher-agent" "macher-agent-plan" "macher-agent-worker")
+(defvar macher-agent-extended-tool-categories nil
   "Custom agent categories that should receive native macher context injection.")
 
 (defun macher-agent--extend-tool-categories-advice (orig-fn fsm get-context)

@@ -104,6 +104,14 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
 
 ;; --- Tools ---
 
+(add-to-list 'macher-agent-extended-tool-categories "macher-agent-plan")
+(defun macher-agent--format-error (err)
+  "Standardise the error message string for the LLM."
+  (let ((msg (error-message-string err)))
+    (if (string-match-p "^\\(ERROR\\|SECURITY ERROR\\):" msg)
+        msg
+      (format "ERROR: %s" msg))))
+
 (defvar macher-agent-spawn-subagent-tool
   (gptel-make-tool
    :name "spawn_subagent"
@@ -124,7 +132,7 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
                              (setf (macher-context-contents context)
                                    (cons (cons buf-name (cons orig nil)) contents))))))
                      (format "SUCCESS: Sub-agent created. The EXACT buffer name to use is '%s'." buf-name))
-                 (error (error-message-string err))))))
+                 (error (macher-agent--format-error err))))))
 
 (defvar macher-agent-delegate-tool
   (gptel-make-tool
@@ -158,7 +166,7 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
                          (macher-agent--show-ui buf)
                          (gptel-send)
                          (macher-agent--wait-and-return buf callback))))
-                 (error (funcall callback (error-message-string err)))))))
+                 (error (funcall callback (macher-agent--format-error err)))))))
 
 (defvar macher-agent-delegate-multiple-tool
   (gptel-make-tool
@@ -214,7 +222,7 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
                            (gptel-send))))
                      
                      (macher-agent--wait-and-return-multiple (nreverse target-buffers) callback))
-                 (error (funcall callback (error-message-string err)))))))
+                 (error (funcall callback (macher-agent--format-error err)))))))
 
 (defvar macher-agent-execute-blocking-tool
   (gptel-make-tool
@@ -240,7 +248,7 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
                          (macher-agent--show-ui buf)
                          (gptel-send)
                          (macher-agent--wait-and-return buf callback))))
-                 (error (funcall callback (error-message-string err)))))))
+                 (error (funcall callback (macher-agent--format-error err)))))))
 
 (defvar macher-agent-execute-multiple-nonblocking-tool
   (gptel-make-tool
@@ -271,7 +279,7 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
                                   (gptel-send))))
                      
                      (format "SUCCESS: Triggered %d sub-agents asynchronously." (length buffer_names)))
-                 (error (error-message-string err))))))
+                 (error (macher-agent--format-error err))))))
 
 (defvar macher-agent-write-to-buffer-tool
   (gptel-make-tool
@@ -287,7 +295,7 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
                        (get-buffer-create actual-name))
                      (macher-agent--update-context-file context actual-name content)
                      (format "SUCCESS: Virtual edit recorded for buffer '%s'. A patch will be generated at the end of the turn." actual-name))
-                 (error (error-message-string err))))))
+                 (error (macher-agent--format-error err))))))
 
 (defvar macher-agent-commit-buffer-tool
   (gptel-make-tool
@@ -308,7 +316,7 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
                          (macher-agent--update-context-file context actual-name content)
                          (macher-agent--auto-sync-context context))
                        (format "SUCCESS: Buffer '%s' has been directly overwritten and synchronised." actual-name)))
-                 (error (error-message-string err))))))
+                 (error (macher-agent--format-error err))))))
 
 (defvar macher-agent-list-buffers-tool
   (gptel-make-tool
@@ -350,7 +358,7 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
                      (if results
                          (mapconcat #'identity (nreverse results) "\n")
                        (format "No matches found for '%s' in your scoped buffers." pattern)))
-                 (error (error-message-string err))))))
+                 (error (macher-agent--format-error err))))))
 
 (defvar macher-agent-read-buffer-tool
   (gptel-make-tool
@@ -362,11 +370,12 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
                (condition-case err
                    (let ((actual-name (macher-agent--resolve-buffer-name buffer_name)))
                      (macher-agent--read-context-file context actual-name))
-                 (error (error-message-string err))))))
+                 (error (macher-agent--format-error err))))))
 
 (defvar-local macher-agent--final-result nil
   "Stores the clean, synthesised final answer from the sub-agent.")
 
+(add-to-list 'macher-agent-extended-tool-categories "macher-agent-worker")
 (defvar macher-agent-submit-result-tool
   (gptel-make-tool
    :name "submit_task_result"
