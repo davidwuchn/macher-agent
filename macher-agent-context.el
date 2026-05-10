@@ -111,14 +111,11 @@ Designed as a decoupled hook function accepting CTX and optional arguments."
                (content-pair (cdr entry))
                (orig (car content-pair))
                (new (cdr content-pair))
-               ;; Allow 'path' to just be a buffer name for intermediate workflows
                (buf (or (get-file-buffer path) (get-buffer path)))
                (disk-exists (file-exists-p path))
-               ;; 1. Determine the true current state (Buffer > Disk > Deleted)
                (current-state 
                 (cond
-                 ;; If it's a buffer, grab its contents
-                 (buf
+                 ((and buf (buffer-live-p buf))
                   (with-current-buffer buf
                     (buffer-substring-no-properties (point-min) (point-max))))
                  (disk-exists
@@ -128,9 +125,11 @@ Designed as a decoupled hook function accepting CTX and optional arguments."
                  (t nil))))
           
           (cond
-           ;; Case A: File/Buffer was deleted externally
-           ((null current-state)
-            (when (or orig new)
+           ;; FIXED Case A: File/Buffer was deleted externally
+           ;; Only wipe the context if it originally existed (orig is non-nil).
+           ;; If orig is nil, this is a pending virtual creation, NOT an external deletion!
+           ((and (null current-state) orig)
+            (when new
               (setcar content-pair nil)
               (setcdr content-pair nil)
               (setq synced t)))
