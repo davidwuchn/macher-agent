@@ -87,15 +87,19 @@ This workflow demonstrates how to use the planner preset to analyse a repository
 
 ### Emacs Buffer Operations
 
-* `write_to_buffer` - Proposes a change to a live Emacs buffer, creating a virtual patch for review via the `macher` context API rather than mutating the buffer immediately.
+* `write_buffer_in_workspace` - Proposes a change to a live Emacs buffer, creating a virtual patch for review via the `macher` context API rather than mutating the buffer immediately.
 
-* `write_and_commit_buffer` - Directly overwrites an Emacs buffer and fast-forwards the context to synchronise the agent's awareness.
+* `write_and_commit_buffer_in_workspace` - Directly overwrites an Emacs buffer and fast-forwards the context to synchronise the agent's awareness.
 
-* `read_buffer` - Reads the contents of a buffer directly from the persistent `macher` context, prioritising proposed virtual edits if modified during the current turn, or returning the live Emacs buffer state otherwise.
+* `edit_buffer_in_workspace` - Proposes an exact string replacement within a specific buffer without needing to rewrite the entire buffer, creating a virtual patch for review.
 
-* `list_agent_buffers` - Scans the current Emacs session and returns a filtered list of all active orchestrator and sub-agent buffers.
+* `multi_edit_buffer_in_workspace` - Allows the agent to make multiple distinct exact string replacements in a single buffer in one tool call, generating a virtual patch for review.
 
-* `search_agent_buffers` - Performs a regex search across all active agent buffers, returning matching lines and their locations.
+* `read_buffer_in_workspace` - Reads the contents of a buffer directly from the persistent `macher` context, prioritising proposed virtual edits if modified during the current turn, or returning the live Emacs buffer state otherwise.
+
+* `list_buffers_in_workspace` - Scans the current Emacs session and returns a filtered list of all active orchestrator and sub-agent buffers.
+
+* `search_buffers_in_workspace` - Performs a regex search across all active agent buffers, returning matching lines and their locations.
 
 ### Semi-agentic workflow
 
@@ -130,9 +134,11 @@ These are the `gptel` tools exposed to the LLM to facilitate orchestration, file
 | `execute_subagent_buffer_blocking` | Triggers a sub-agent to execute autonomously, pausing the parent agent until it finishes its work and generates an output. |
 | `execute_subagent_buffer_nonblocking`| Triggers a sub-agent to execute asynchronously in the background, allowing the parent agent to continue processing immediately. |
 | `execute_subagents_buffer_nonblocking`| Triggers sub-agents to execute asynchronously in the background, allowing the parent agent to continue processing immediately. |
-| `write_to_buffer` | Proposes new content for a live Emacs buffer, routing through the `macher` context API to create a virtual patch for review. |
-| `write_and_commit_buffer` | Directly overwrites an Emacs buffer and fast-forwards the context to synchronise the agent's awareness. |
-| `read_buffer` | Reads a buffer's contents via the `macher` context, returning proposed virtual edits if modified, or the live state otherwise. |
-| `list_agent_buffers` | Returns a filtered list of all active orchestrator and sub-agent buffers within the agent's explicitly allowed context scope. |
-| `search_agent_buffers` | Performs a regex search across all allowed agent buffers, returning matching text and their line numbers. |
+| `write_buffer_in_workspace` | Proposes new content for a live Emacs buffer, routing through the `macher` context API to create a virtual patch for review. |
+| `write_and_commit_buffer_in_workspace` | Directly overwrites an Emacs buffer and fast-forwards the context to synchronise the agent's awareness. |
+| `edit_buffer_in_workspace` | Proposes an exact string replacement in a live Emacs buffer, routing through the `macher` context API to create a virtual patch for review. |
+| `multi_edit_buffer_in_workspace` | Proposes multiple exact string replacements in a live Emacs buffer sequentially. |
+| `read_buffer_in_workspace` | Reads a buffer's contents via the `macher` context, returning proposed virtual edits if modified, or the live state otherwise. |
+| `list_buffers_in_workspace` | Returns a filtered list of all active orchestrator and sub-agent buffers within the agent's explicitly allowed context scope. |
+| `search_buffers_in_workspace` | Performs a regex search across all allowed agent buffers, returning matching text and their line numbers. |
 | `submit_task_result` | Used strictly by worker sub-agents to submit their final, synthesised answer back to the parent orchestrator. |

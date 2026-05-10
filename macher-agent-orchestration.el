@@ -55,9 +55,14 @@ the inherited CONTEXT."
     (when (assoc "macher-agent-worker" gptel-directives)
       (macher-agent--set-system-message (alist-get "macher-agent-worker" gptel-directives))
       (make-local-variable 'gptel-tools)
-      (setq gptel-tools '("read_file_in_workspace" 
-                          "list_directory_in_workspace" 
-                          "search_in_workspace"
+      (setq gptel-tools '("read_buffer_in_workspace" 
+                          "list_buffers_in_workspace" 
+                          "search_buffers_in_workspace"
+                          "edit_buffer_in_workspace"
+                          "multi_edit_buffer_in_workspace"
+                          "write_buffer_in_workspace"
+                          "write_and_commit_buffer_in_workspace"
+                          ;; Assuming this is your tool to finish the job:
                           "submit_task_result")))))
 
 ;;;###autoload

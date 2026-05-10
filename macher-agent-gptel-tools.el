@@ -146,7 +146,7 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
   (gptel-make-tool
    :name "spawn_subagent"
    :description "Create a new, isolated sub-agent in the current project directory. Use this to spin up a worker for a specific task."
-   :category "macher-agent-plan"
+   :category "macher-agent-orchestrate"
    :args (list '(:name "name" :type string :description "The name of the new sub-agent."))
    :function (lambda (context name)
                (condition-case err
@@ -168,7 +168,7 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
   (gptel-make-tool
    :name "delegate_task_to_subagent"
    :description "Write instructions to a single sub-agent and wait for its final response."
-   :category "macher-agent-plan"
+   :category "macher-agent-orchestrate"
    :async t
    :args (list '(:name "buffer_name" :type string)
                '(:name "instructions" :type string))
@@ -190,7 +190,7 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
   (gptel-make-tool
    :name "delegate_tasks_to_subagents"
    :description "Write instructions to 1-to-many sub-agents concurrently and wait for all their final responses. Used to fan-out work."
-   :category "macher-agent-plan"
+   :category "macher-agent-orchestrate"
    :async t
    :args (list '(:name "tasks" :type array 
                        :description "An array of task objects."
@@ -229,7 +229,7 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
   (gptel-make-tool
    :name "execute_subagent_buffer_blocking"
    :description "Trigger a single sub-agent and WAIT for it to finish without giving new instructions."
-   :category "macher-agent-plan"
+   :category "macher-agent-orchestrate"
    :async t
    :args (list '(:name "buffer_name" :type string))
    :function (lambda (context callback buffer_name)
@@ -250,7 +250,7 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
   (gptel-make-tool
    :name "execute_subagents_nonblocking"
    :description "Trigger 1-to-many sub-agents to begin processing asynchronously in the background. Does NOT provide new instructions and does NOT wait for output."
-   :category "macher-agent-plan"
+   :category "macher-agent-orchestrate"
    :args (list '(:name "buffer_names" :type array 
                        :description "List of buffer names to trigger."
                        :items (:type string)))
@@ -275,11 +275,11 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
                      (format "SUCCESS: Triggered %d sub-agents asynchronously." (length buffer_names)))
                  (error (macher-agent--format-error err))))))
 
-(defvar macher-agent-write-to-buffer-tool
+(defvar macher-agent-write-buffer-tool
   (gptel-make-tool
-   :name "write_to_buffer"
+   :name "write_buffer_in_workspace"
    :description "Propose new content for a live Emacs buffer. This creates a virtual patch that will be presented for review rather than mutating the buffer immediately."
-   :category "macher-agent-plan"
+   :category "macher-agent"
    :args (list '(:name "buffer_name" :type string :description "The name of the target buffer")
                '(:name "content" :type string :description "The proposed new content for the buffer"))
    :function (lambda (context buffer_name content)
@@ -293,9 +293,9 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
 
 (defvar macher-agent-commit-buffer-tool
   (gptel-make-tool
-   :name "write_and_commit_buffer"
+   :name "write_and_commit_buffer_in_workspace"
    :description "Directly overwrite an Emacs buffer and synchronise the agent's memory immediately, bypassing the patch review step."
-   :category "macher-agent-plan"
+   :category "macher-agent-commit"
    :args (list '(:name "buffer_name" :type string)
                '(:name "content" :type string))
    :function (lambda (context buffer_name content)
@@ -314,9 +314,9 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
 
 (defvar macher-agent-list-buffers-tool
   (gptel-make-tool
-   :name "list_agent_buffers"
+   :name "list_buffers_in_workspace"
    :description "List all buffers you currently have explicit access to. You cannot access buffers outside this list."
-   :category "macher-agent-plan"
+   :category "macher-agent-ro"
    :function (lambda (context)
                (let ((active-buffers nil))
                  (when context
@@ -330,9 +330,9 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
 
 (defvar macher-agent-search-buffers-tool
   (gptel-make-tool
-   :name "search_agent_buffers"
+   :name "search_buffers_in_workspace"
    :description "Search for a regular expression pattern across the buffers in your restricted scope."
-   :category "macher-agent-plan"
+   :category "macher-agent-ro"
    :args (list '(:name "pattern" :type string :description "The Emacs regex pattern to search for"))
    :function (lambda (context pattern)
                (condition-case err
@@ -356,20 +356,81 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
 
 (defvar macher-agent-read-buffer-tool
   (gptel-make-tool
-   :name "read_buffer"
+   :name "read_buffer_in_workspace"
    :description "Read the contents of a scoped buffer (ie a buffer in your allowed list)."
-   :category "macher-agent-plan"
-   :args (list '(:name "buffer_name" :type string :description "The name of the buffer to read"))
-   :function (lambda (context buffer_name)
+   :category "macher-agent-ro"
+   :args (list '(:name "buffer_name" :type string :description "The name of the buffer to read")
+               '(:name "offset" :type number :optional t :description "Line number to start reading from (1-based)")
+               '(:name "limit" :type number :optional t :description "Number of lines to read")
+               '(:name "show_line_numbers" :type boolean :optional t :description "Include line numbers in output"))
+   :function (lambda (context buffer_name &optional offset limit show_line_numbers)
                (condition-case err
-                   (let ((actual-name (macher-agent--resolve-buffer-name buffer_name)))
-                     (macher-agent--read-context-file context actual-name))
+                   (let* ((actual-name (macher-agent--resolve-buffer-name buffer_name))
+                          (content (macher-agent--read-context-file context actual-name))
+                          (parsed-offset (when offset (round offset)))
+                          (parsed-limit (when limit (round limit))))
+                     (macher--read-string content parsed-offset parsed-limit show_line_numbers))
+                 (error (macher-agent--format-error err))))))
+
+(defvar macher-agent-edit-buffer-tool
+  (gptel-make-tool
+   :name "edit_buffer_in_workspace"
+   :description "Replace exact text in a scoped buffer in your workspace. old_text must match precisely (whitespace, newlines, indentation). Use actual buffer content only - NO line numbers.\n\nIf replace_all=false and multiple matches exist: ERROR. Add more context to old_text to make the match unique."
+   :category "macher-agent"
+   :args (list '(:name "buffer_name" :type string :description "The name of the target buffer")
+               '(:name "old_text" :type string :description "Exact text to find and replace. Must match precisely including whitespace and newlines. Do NOT include line numbers.")
+               '(:name "new_text" :type string :description "Text to replace the old_text with")
+               '(:name "replace_all" :type boolean :optional t :description "If true, replace all occurrences. If false (default), error if multiple matches exist"))
+   :function (lambda (context buffer_name old_text new_text &optional replace_all)
+               (condition-case err
+                   (let* ((actual-name (macher-agent--resolve-buffer-name buffer_name))
+                          (content (macher-agent--read-context-file context actual-name))
+                          (replace-all-bool (and replace-all (not (eq replace-all :json-false))))
+                          (new-content (macher--edit-string content old_text new_text replace-all-bool)))
+                     (macher-agent--update-context-file context actual-name new-content)
+                     (format "SUCCESS: Virtual edit recorded for buffer '%s'. A patch will be generated at the end of the turn." actual-name))
+                 (error (macher-agent--format-error err))))))
+
+(defvar macher-agent-multi-edit-buffer-tool
+  (gptel-make-tool
+   :name "multi_edit_buffer_in_workspace"
+   :description "Apply multiple replacements to one scoped buffer in your workspace sequentially. All edits use exact text matching (whitespace, newlines, indentation). Use actual content - NO line numbers.\n\nEdits apply in array order. If ANY edit fails, ALL changes are rolled back."
+   :category "macher-agent"
+   :args (list '(:name "buffer_name" :type string :description "The name of the target buffer")
+               '(:name "edits" :type array :description "Array of edit operations to apply in sequence"
+                       :items (:type object
+                                     :properties (:old_text (:type string :description "Exact text to find and replace.")
+                                                            :new_text (:type string :description "Text to replace the old_text with")
+                                                            :replace_all (:type boolean :description "If true, replace all occurrences."))
+                                     :required ["old_text" "new_text"])))
+   :function (lambda (context buffer_name edits)
+               (condition-case err
+                   (let* ((actual-name (macher-agent--resolve-buffer-name buffer_name))
+                          (content (macher-agent--read-context-file context actual-name)))
+                     (unless (vectorp edits)
+                       (if (stringp edits)
+                           (setq edits (json-parse-string edits :array-type 'vector :object-type 'plist))
+                         (error "The 'edits' parameter must be an array of objects")))
+                     (cl-loop for edit across edits do
+                              (let* ((old-text (plist-get edit :old_text))
+                                     (new-text (plist-get edit :new_text))
+                                     (replace-all (plist-get edit :replace_all))
+                                     (replace-all-bool (and replace-all (not (eq replace-all :json-false)))))
+                                (unless (and old-text new-text)
+                                  (error "Each edit must contain old_text and new_text properties"))
+                                (setq content (macher--edit-string content old-text new_text replace-all-bool))))
+                     (macher-agent--update-context-file context actual-name content)
+                     (format "SUCCESS: Virtual multi-edit recorded for buffer '%s'. A patch will be generated at the end of the turn." actual-name))
                  (error (macher-agent--format-error err))))))
 
 (defvar-local macher-agent--final-result nil
   "Stores the clean, synthesised final answer from the sub-agent.")
 
+(add-to-list 'macher-agent-extended-tool-categories "macher-agent-ro")
+(add-to-list 'macher-agent-extended-tool-categories "macher-agent-commit")
+(add-to-list 'macher-agent-extended-tool-categories "macher-agent-orchestrate")
 (add-to-list 'macher-agent-extended-tool-categories "macher-agent-worker")
+
 (defvar macher-agent-submit-result-tool
   (gptel-make-tool
    :name "submit_task_result"
@@ -382,23 +443,44 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
 
 ;; --- Presets ---
 
-(with-eval-after-load 'macher
-  (gptel-make-preset "macher-agent-plan"
-    :description "Project planning, architectural analysis, and sub-agent orchestration"
-    :tools '("read_file_in_workspace" 
-             "list_directory_in_workspace" 
-             "search_in_workspace"
-             "spawn_subagent"
-             "delegate_task_to_subagent"
-             "delegate_tasks_to_subagents"
-             "write_to_buffer"
-             "execute_subagent_buffer_blocking"
-             "execute_subagents_nonblocking"
-             "list_agent_buffers"
-             "search_agent_buffers"
-             "read_buffer")))
+(defconst macher-agent-base-read-tools
+  '("read_file_in_workspace" 
+    "list_directory_in_workspace" 
+    "search_in_workspace")
+  "Base filesystem reading tools provided by macher.el.")
+
+(defconst macher-agent-ro-tools
+  '("read_buffer_in_workspace"
+    "list_buffers_in_workspace"
+    "search_buffers_in_workspace")
+  "Read-only tools for inspecting Emacs buffers.")
+
+(defconst macher-agent-edit-tools
+  '("edit_buffer_in_workspace"
+    "multi_edit_buffer_in_workspace"
+    "write_buffer_in_workspace"
+    "write_and_commit_buffer_in_workspace")
+  "Destructive tools for modifying Emacs buffers.")
+
+(defconst macher-agent-orchestrate-tools
+  '("spawn_subagent"
+    "delegate_task_to_subagent"
+    "delegate_tasks_to_subagents"
+    "execute_subagent_buffer_blocking"
+    "execute_subagents_nonblocking")
+  "Tools for managing and communicating with sub-agents.")
 
 (with-eval-after-load 'macher
+  
+  ;; 1. The Planner Preset
+  (gptel-make-preset "macher-agent-plan"
+    :description "Project planning, architectural analysis, and sub-agent orchestration"
+    ;; Planners get eyes (ro/base) and management powers (orchestrate), but no hands
+    :tools (append macher-agent-base-read-tools
+                   macher-agent-ro-tools
+                   macher-agent-orchestrate-tools))
+
+  ;; 2. The Worker Preset
   (gptel-make-preset "macher-agent-worker"
     :description "Sub-agent worker preset with strict tool-submission rules."
     :system "You are an autonomous sub-agent working on a delegated task within an Emacs environment.
@@ -408,10 +490,11 @@ You MUST use the `submit_task_result` tool to deliver your final answer back to 
 Do NOT output your final answer as conversational plain text.
 If you need to explore the codebase, use your read/search tools. 
 The very last action you take must be invoking `submit_task_result`."
-    :tools '("read_file_in_workspace" 
-             "list_directory_in_workspace" 
-             "search_in_workspace"
-             "submit_task_result")))
+    ;; Workers get eyes (ro/base) and hands (edit), plus their specific submission tool
+    :tools (append macher-agent-base-read-tools
+                   macher-agent-ro-tools
+                   macher-agent-edit-tools
+                   '("submit_task_result"))))
 
 (provide 'macher-agent-gptel-tools)
 ;;; macher-agent-gptel-tools.el ends here
