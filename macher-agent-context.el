@@ -101,8 +101,9 @@ Can handle both physical file paths and pure Emacs buffer names."
 ;; --- 3. Context Synchronisation & Persistence ---
 
 (defun macher-agent--auto-sync-context (ctx &rest _args)
-  "Check live buffers and physical disk to fast-forward the agent's memory if needed.
-Designed as a decoupled hook function accepting CTX and optional arguments."
+  "Check live buffers and physical disk to fast-forward the agent's memory using strict three-way merge logic.
+
+Did we change it? and Did they change it?"
   (when ctx
     (let ((contents (macher-context-contents ctx))
           (synced nil))
@@ -111,40 +112,46 @@ Designed as a decoupled hook function accepting CTX and optional arguments."
                (content-pair (cdr entry))
                (orig (car content-pair))
                (new (cdr content-pair))
-               ;; Allow 'path' to just be a buffer name for intermediate workflows
                (buf (or (get-file-buffer path) (get-buffer path)))
                (disk-exists (file-exists-p path))
-               ;; 1. Determine the true current state (Buffer > Disk > Deleted)
                (current-state 
                 (cond
-                 ;; If it's a buffer, grab its contents
-                 (buf
+                 ((and buf (buffer-live-p buf))
                   (with-current-buffer buf
                     (buffer-substring-no-properties (point-min) (point-max))))
                  (disk-exists
                   (with-temp-buffer
                     (insert-file-contents path)
                     (buffer-string)))
-                 (t nil))))
+                 (t nil)))
+               
+               ;; Establish our truth table booleans
+               (local-changed (not (equal orig new)))
+               (remote-changed (not (equal orig current-state))))
           
           (cond
-           ;; Case A: File/Buffer was deleted externally
-           ((null current-state)
-            (when (or orig new)
-              (setcar content-pair nil)
-              (setcdr content-pair nil)
-              (setq synced t)))
-           
-           ;; Case B: External state caught up to 'new' (ie Patch was applied via ediff)
-           ((and new (equal current-state new) (not (equal orig new)))
+           ;; 1. Clean Convergence: The patch was applied externally
+           ((and local-changed remote-changed (equal new current-state))
             (setcar content-pair current-state)
             (setq synced t))
-           
-           ;; Case C: External state diverged completely (External manual edit)
-           ((and (not (equal current-state orig)) (not (equal current-state new)))
+
+           ;; 2. Fast-Forward: External edit only (or external deletion)
+           ((and remote-changed (not local-changed))
             (setcar content-pair current-state)
             (setcdr content-pair current-state)
-            (setq synced t)))))
+            (setq synced t))
+
+           ;; 3. True Conflict: Both diverged to different states
+           ((and local-changed remote-changed (not (equal new current-state)))
+            ;; The safest autonomous action is cache invalidation (adopt remote)
+            (setcar content-pair current-state)
+            (setcdr content-pair current-state)
+            (setq synced t))
+
+           ;; 4. Safe Local Edit: (local-changed and not remote-changed)
+           ;; We do absolutely nothing here. The virtual edit is safely pending.
+           ;; This inherently protects virtual file creations where orig=nil and remote=nil.
+           )))
       
       (when synced
         (setf (macher-context-dirty-p ctx) nil)))))
