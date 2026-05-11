@@ -75,6 +75,38 @@ This setup assumes you have [context-builder](https://github.com/igorls/context-
                ))
 ```
 
+### Workspace leaking
+
+The context an agent operates in is strictly tied to a single workspace. Using `macher-agent-add-buffer-to-scope` add buffers that could exist in other workspaces into the context.
+
+Here we're using something like [ruskel](https://github.com/cortesi/ruskel) to generate needed insight from a discrete workspace. That it exposes through its buffer being read.
+```
+;; to work with own rust packages
+(macher-agent-make-tool
+ :name "ruskel"
+ :description "Ruskel generates skeletonized outlines of Rust crates."
+ :category "rust-dev"
+ :args (list '(:name "target" :type string :description "The target crate or module to skeletonise"))
+ :command-fn (lambda (args)
+               (let ((target-val (plist-get args :target)))
+                 (format "ruskel %s </dev/null 2>&1" target-val))))
+```
+Or
+```
+;; public crates only
+(gptel-make-tool
+ :name "ruskel"
+ :description "Ruskel generates skeletonized outlines of Rust crates."
+ :category "rust-dev"
+ :args (list '(:name "target" :type string :description "The target crate or module to skeletonise"))
+ :function (lambda (target)
+             (shell-command-to-string (format "ruskel %s </dev/null 2>&1" target))))
+```
+
+### Macher context availability
+
+All tools built with `macher-agent-make-tool` (or `gptel-make-tool` after macher-agent has loaded) will have their category added to the evaluation list used by macher (which by default only loads the macher-tool-category).
+
 ### Agentic workflow
 
 This workflow demonstrates how to use the planner preset to analyse a repository and seamlessly hand off the implementation details to an isolated sub-agent entirely through tool calls. Agents interact with files and buffers strictly via the `macher` virtual memory context, allowing changes to be reviewed as patches before being committed.

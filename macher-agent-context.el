@@ -204,6 +204,15 @@ or update the FSM state.")
 (defvar macher-agent-extended-tool-categories nil
   "Custom agent categories that should receive native macher context injection.")
 
+(defun macher-agent--auto-register-tool-category (orig-fn &rest args)
+  "Automatically harvest the :category from `gptel-make-tool` and add it to the active list."
+  (let ((category (plist-get args :category)))
+    (when category
+      (add-to-list 'macher-agent-extended-tool-categories category)))
+  (apply orig-fn args))
+
+(advice-add 'gptel-make-tool :around #'macher-agent--auto-register-tool-category)
+
 (defun macher-agent--extend-tool-categories-advice (orig-fn fsm get-context)
   "Run macher--setup-tools multiple times to capture custom agent categories."
   ;; 1. Run the original function first to process standard "macher" tools

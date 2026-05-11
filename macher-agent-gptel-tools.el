@@ -32,13 +32,6 @@ If nil, the buffer executes silently in the background."
   (when macher-agent-hide-subagent-fn
     (funcall macher-agent-hide-subagent-fn buf)))
 
-;; cats to be pickup by macher but not created with macher-agent-make-tool
-(add-to-list 'macher-agent-extended-tool-categories "macher-agent-ro")
-(add-to-list 'macher-agent-extended-tool-categories "macher-agent-commit")
-(add-to-list 'macher-agent-extended-tool-categories "macher-agent-orchestrate")
-(add-to-list 'macher-agent-extended-tool-categories "macher-agent-worker")
-(add-to-list 'macher-agent-extended-tool-categories "macher-agent")
-
 ;; --- Cloaking Mechanism ---
 
 (defun macher-agent--insert-hidden (text)
@@ -115,7 +108,6 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
 
 ;; --- Tools ---
 
-(add-to-list 'macher-agent-extended-tool-categories "macher-agent-plan")
 (defun macher-agent--format-error (err)
   "Standardise the error message string for the LLM."
   (let ((msg (error-message-string err)))
