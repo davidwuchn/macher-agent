@@ -105,7 +105,9 @@ Or
 
 ### Macher context availability
 
-All tools built with `macher-agent-make-tool` (or `gptel-make-tool` after macher-agent has loaded) will have their category added to the evaluation list used by macher (which by default only loads the macher-tool-category).
+All tools built with `macher-agent-make-tool` (or `gptel-make-tool` after macher-agent has loaded) will have their category added to the evaluation list used by macher (which by default only loads the macher-tool-category). View the current macher-context real time using `macher-agent-context-tree`
+
+<img width="708" height="727" alt="macher-agent-context-tree" src="https://github.com/user-attachments/assets/38f55b4c-4de9-4382-b87a-0586ccd0306f" />
 
 ### Agentic workflow
 
