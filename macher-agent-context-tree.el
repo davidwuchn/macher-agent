@@ -19,7 +19,8 @@
   type      ; 'header, 'root, 'dir, 'file, or 'buffer
   name      ; Display string for the node
   depth     ; Indentation level for rendering
-  path)     ; Full path or buffer name identifier
+  path      ; Full relative path for files
+  active)   ; Boolean: Is this file currently in the agent's memory?
 
 ;; --- Core Tree Logic ---
 
@@ -34,23 +35,35 @@
       ('dir
        (insert indent (propertize (concat "▾ " (macher-agent-tree-node-name node)) 'face 'font-lock-type-face) "\n"))
       ('file
-       (insert indent "  " (macher-agent-tree-node-name node) "\n"))
+       (let ((display-name (if (macher-agent-tree-node-active node)
+                               (propertize (concat (macher-agent-tree-node-name node) " (loaded)") 'face 'bold)
+                             (macher-agent-tree-node-name node))))
+         (insert indent "  " display-name "\n")))
       ('buffer
-       (insert indent "  " (macher-agent-tree-node-name node) "\n")))))
+       (insert indent "  " (propertize (macher-agent-tree-node-name node) 'face 'bold) "\n")))))
 
-(defun macher-agent-context-tree--flatten-hash (table depth depth-offset)
+(defun macher-agent-context-tree--flatten-hash (table depth depth-offset current-path active-hash)
   "Recursively flatten the prefix TABLE into ordered ewoc nodes."
   (let ((result nil)
         (keys (sort (hash-table-keys table) #'string<)))
     (dolist (k keys)
-      (let ((val (gethash k table)))
+      (let* ((val (gethash k table))
+             (node-path (if (string-empty-p current-path) k (concat current-path "/" k))))
         (if (eq val 'file)
-            (push (make-macher-agent-tree-node :type 'file :name k :depth (+ depth depth-offset)) result)
-          (push (make-macher-agent-tree-node :type 'dir :name k :depth (+ depth depth-offset)) result)
-          (setq result (append (nreverse (macher-agent-context-tree--flatten-hash val (1+ depth) depth-offset)) result)))))
+            (push (make-macher-agent-tree-node :type 'file 
+                                               :name k 
+                                               :depth (+ depth depth-offset) 
+                                               :path node-path
+                                               :active (gethash node-path active-hash)) 
+                  result)
+          (push (make-macher-agent-tree-node :type 'dir 
+                                             :name k 
+                                             :depth (+ depth depth-offset)) 
+                result)
+          (setq result (append (nreverse (macher-agent-context-tree--flatten-hash val (1+ depth) depth-offset node-path active-hash)) result)))))
     (nreverse result)))
 
-(defun macher-agent-context-tree--build-file-nodes (files depth-offset)
+(defun macher-agent-context-tree--build-file-nodes (files depth-offset active-hash)
   "Convert a list of file paths into a flattened list of hierarchical ewoc nodes."
   (let ((tree (make-hash-table :test 'equal)))
     ;; 1. Build the prefix tree
@@ -66,20 +79,25 @@
                         (puthash part node current))
                       (setq current node)))))
     
-    ;; 2. Flatten the tree recursively
-    (macher-agent-context-tree--flatten-hash tree 0 depth-offset)))
+    ;; 2. Flatten the tree recursively, passing down the active context tracker
+    (macher-agent-context-tree--flatten-hash tree 0 depth-offset "" active-hash)))
 
 (defun macher-agent-context-tree--populate (ewoc context)
-  "Extract paths directly from CONTEXT and populate the EWOC tree."
-  (let* ((contents (macher-context-contents context))
-         (workspace (when (fboundp 'macher-context-workspace)
+  "Extract the complete workspace structure and flag items currently in CONTEXT."
+  (let* ((workspace (when (fboundp 'macher-context-workspace)
                       (macher-context-workspace context)))
          (root-dir (when workspace (macher--workspace-root workspace)))
          (project-name (if root-dir
                            (file-name-nondirectory (directory-file-name root-dir))
-                         "Agent Context"))
+                         "Agent Workspace"))
+         
+         ;; Fetch native data
+         (workspace-files (when workspace (macher--workspace-files workspace)))
+         (contents (macher-context-contents context))
+         
          (buffers nil)
-         (files nil))
+         (all-files nil)
+         (active-files-hash (make-hash-table :test 'equal)))
 
     ;; Top Header
     (ewoc-enter-last ewoc (make-macher-agent-tree-node 
@@ -87,7 +105,7 @@
                            :name project-name 
                            :depth 0))
 
-    ;; Categorise entries purely based on their key in the context
+    ;; 1. Determine what is currently "active" in the agent's memory
     (dolist (entry contents)
       (let* ((path-or-buf (car entry))
              (is-absolute (file-name-absolute-p path-or-buf))
@@ -96,27 +114,41 @@
              (is-file-buffer (and live-buf (buffer-file-name live-buf))))
         
         (if (or is-absolute has-slash is-file-buffer (and root-dir (file-exists-p (expand-file-name path-or-buf root-dir))))
-            ;; It's a file: format it relatively if possible
+            ;; It's a file: format it relatively and flag it as active
             (let ((rel-path path-or-buf))
               (when (and root-dir is-absolute)
                 (setq rel-path (file-relative-name path-or-buf root-dir)))
-              (push rel-path files))
-          ;; It's a pure buffer
+              (puthash rel-path t active-files-hash))
+          ;; It's a pure buffer, add it directly to the buffer list
           (push path-or-buf buffers))))
 
-    (setq buffers (sort buffers #'string<))
-    (setq files (sort files #'string<))
+    ;; 2. Gather ALL files natively from the project workspace
+    (dolist (f workspace-files)
+      (let ((rel-path (if (and root-dir (file-name-absolute-p f))
+                          (file-relative-name f root-dir)
+                        f)))
+        (push rel-path all-files)))
 
-    ;; Buffers Parent
+    ;; 3. Ensure virtual files (proposed by the agent but not yet on disk) are included
+    (maphash (lambda (active-file _val)
+               (unless (member active-file all-files)
+                 (push active-file all-files)))
+             active-files-hash)
+
+    ;; Sort our lists cleanly
+    (setq buffers (sort buffers #'string<))
+    (setq all-files (sort all-files #'string<))
+
+    ;; Render Buffers Parent
     (when buffers
-      (ewoc-enter-last ewoc (make-macher-agent-tree-node :type 'root :name "Buffers" :depth 0))
+      (ewoc-enter-last ewoc (make-macher-agent-tree-node :type 'root :name "Active Buffers" :depth 0))
       (dolist (b buffers)
         (ewoc-enter-last ewoc (make-macher-agent-tree-node :type 'buffer :name b :depth 1 :path b))))
 
-    ;; Files Parent
-    (when files
-      (ewoc-enter-last ewoc (make-macher-agent-tree-node :type 'root :name "Files" :depth 0))
-      (dolist (node (macher-agent-context-tree--build-file-nodes files 1))
+    ;; Render Files Parent
+    (when all-files
+      (ewoc-enter-last ewoc (make-macher-agent-tree-node :type 'root :name "Workspace" :depth 0))
+      (dolist (node (macher-agent-context-tree--build-file-nodes all-files 1 active-files-hash))
         (ewoc-enter-last ewoc node)))))
 
 ;; --- State & Modes ---
@@ -137,7 +169,7 @@
 ;;;###autoload
 (defun macher-agent-context-tree ()
   "Toggle the context tree sidebar for the current buffer.
-Displays exactly what is inside the active macher context."
+Displays the full workspace, highlighting items actively in the macher context."
   (interactive)
   (let* ((target-buf (current-buffer))
          (context (buffer-local-value 'macher-agent--persistent-context target-buf))
@@ -155,7 +187,6 @@ Displays exactly what is inside the active macher context."
           (macher-agent-context-tree-mode)
           (setq macher-agent-context-tree--target-buffer target-buf)
           
-          ;; Initialise and populate the tree (Using "" to prevent ewoc's default carriage return)
           (let ((inhibit-read-only t))
             (erase-buffer)
             (setq macher-agent-context-tree--ewoc (ewoc-create #'macher-agent-context-tree--pp "" ""))
