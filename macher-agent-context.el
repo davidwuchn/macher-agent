@@ -16,8 +16,8 @@
 (defun macher-agent--get-buffer-content (path)
   "Get the content of a buffer or file by path."
   (cond
-   ((get-buffer path)
-    (with-current-buffer path
+   ((or (get-file-buffer path) (get-buffer path))
+    (with-current-buffer (or (get-file-buffer path) (get-buffer path))
       (buffer-substring-no-properties (point-min) (point-max))))
    ((file-exists-p path)
     (with-temp-buffer
@@ -72,16 +72,19 @@ Can handle both physical file paths and pure Emacs buffer names."
   (concat "Agent: " (file-name-nondirectory (directory-file-name dir))))
 
 (defun macher-agent--get-files (dir)
-  "Safely return files for the agent workspace, strictly ignoring unreadable directories."
+  "Safely return files for the agent workspace, respecting VC ignores."
   (condition-case nil
-      (directory-files-recursively
-       dir "^[^.]" nil
-       (lambda (d)
-         (let ((base (file-name-nondirectory (directory-file-name d))))
-           (and (not (member base '(".git" "target" "node_modules" ".Trash" "Library")))
-                (condition-case nil
-                    (progn (directory-files d) t)
-                  (error nil))))))
+      (if-let ((proj (project-current nil dir)))
+          (project-files proj)
+        ;; Fallback if not in a recognized project
+        (directory-files-recursively
+         dir "^[^.]" nil
+         (lambda (d)
+           (let ((base (file-name-nondirectory (directory-file-name d))))
+             (and (not (member base '(".git" "target" "node_modules" ".Trash" "Library")))
+                  (condition-case nil
+                      (progn (directory-files d) t)
+                    (error nil)))))))
     (error nil)))
 
 ;; Register the new agent workspace type
