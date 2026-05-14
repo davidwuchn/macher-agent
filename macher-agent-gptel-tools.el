@@ -45,14 +45,14 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
 
 ;; --- Wait Loops ---
 
-(defun macher-agent--wait-and-return (buf callback &optional attempts)
+(defun macher-agent--wait-and-return (buf callback &optional attempts old-fsm)
   "Wait for a single sub-agent to populate its final result variable using FSM termination."
   (let* ((attempts (or attempts 0))
          (fsm (buffer-local-value 'macher--fsm-latest buf)))
-    (if (not fsm)
-        (if (> attempts 10)
+    (if (or (not fsm) (eq fsm old-fsm))
+        (if (> attempts macher-agent-tool-timeout-attempts)
             (funcall callback "ERROR: Sub-agent failed to start (timeout).")
-          (run-at-time 0.1 nil #'macher-agent--wait-and-return buf callback (1+ attempts)))
+          (run-at-time 0.1 nil #'macher-agent--wait-and-return buf callback (1+ attempts) old-fsm))
       (macher--add-termination-handler 
        fsm 
        (lambda (_terminated-fsm)
@@ -70,10 +70,10 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
                             (lambda ()
                               (let ((new-fsm (buffer-local-value 'macher--fsm-latest buf)))
                                 (if (and new-fsm (not (eq new-fsm fsm)))
-                                    (macher-agent--wait-and-return buf callback)
+                                    (macher-agent--wait-and-return buf callback 0 fsm)
                                   (funcall callback "ERROR: Sub-agent stopped without submitting a result.")))))))))))))
 
-(defun macher-agent--wait-and-return-multiple (buffers callback &optional attempts)
+(defun macher-agent--wait-and-return-multiple (buffers callback &optional attempts old-fsms)
   "Wait for multiple sub-agents to populate their final result variables using FSM termination."
   (let ((results nil)
         (failed-buffers nil)
@@ -82,14 +82,17 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
         (all-started t))
     ;; First check if all buffers have started.
     (dolist (buf buffers)
-      (unless (buffer-local-value 'macher--fsm-latest buf)
-        (setq all-started nil)))
+      (let ((fsm (buffer-local-value 'macher--fsm-latest buf))
+            (old-fsm (cdr (assq buf old-fsms))))
+        (when (or (not fsm) (eq fsm old-fsm))
+          (setq all-started nil))))
     
-    (if (and (not all-started) (< attempts 10))
-        (run-at-time 0.1 nil #'macher-agent--wait-and-return-multiple buffers callback (1+ attempts))
+    (if (and (not all-started) (< attempts macher-agent-tool-timeout-attempts))
+        (run-at-time 0.1 nil #'macher-agent--wait-and-return-multiple buffers callback (1+ attempts) old-fsms)
       (dolist (buf buffers)
-        (let ((fsm (buffer-local-value 'macher--fsm-latest buf)))
-          (if (not fsm)
+        (let* ((fsm (buffer-local-value 'macher--fsm-latest buf))
+               (old-fsm (cdr (assq buf old-fsms))))
+          (if (or (not fsm) (eq fsm old-fsm))
               (progn
                 (push (format "ERROR: Buffer '%s' failed to start." (buffer-name buf)) failed-buffers)
                 (setq pending-count (1- pending-count))
@@ -140,7 +143,8 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
                                                                                       (mapconcat (lambda (r) (format "=== Response from %s ===\n%s" (car r) (cdr r)))
                                                                                                  (nreverse results)
                                                                                                  "\n\n")))
-                                                                                 (funcall callback (format "SUCCESS. All sub-agents completed their tasks. Final Outputs:\n\n%s" final-output)))))))
+                                                                                 (funcall callback (format "SUCCESS. All sub-agents completed their tasks. Final Outputs:\n\n%s" final-output))))))
+                                                                         0 fsm)
                                         (push (format "ERROR: Buffer '%s' stopped without submitting a result." (buffer-name buf)) failed-buffers)
                                         (setq pending-count (1- pending-count))
                                         (when (= pending-count 0)
@@ -224,9 +228,10 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
                        (unless (buffer-live-p buf)
                          (error "ERROR: Buffer '%s' does not exist." actual-name))
                        
-                       (macher-agent--prepare-subagent-instructions buf instructions)
-                       (macher-agent--dispatch-async buf)
-                       (macher-agent--wait-and-return buf callback)))
+                       (let ((old-fsm (buffer-local-value 'macher--fsm-latest buf)))
+                         (macher-agent--prepare-subagent-instructions buf instructions)
+                         (macher-agent--dispatch-async buf)
+                         (macher-agent--wait-and-return buf callback 0 old-fsm))))
                  (error (funcall callback (macher-agent--format-error err)))))))
 
 (defvar macher-agent-delegate-multiple-tool
@@ -246,7 +251,8 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
                  (when parsed-tasks
                    (condition-case err
                        (let ((target-pairs nil)
-                             (target-buffers nil))
+                             (target-buffers nil)
+                             (old-fsms nil))
                          
                          (cl-loop for task across parsed-tasks do
                                   (let* ((buffer-name (plist-get task :buffer_name))
@@ -262,10 +268,11 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
                            (let ((buf (car task-pair))
                                  (instructions (cdr task-pair)))
                              (push buf target-buffers)
+                             (push (cons buf (buffer-local-value 'macher--fsm-latest buf)) old-fsms)
                              (macher-agent--prepare-subagent-instructions buf instructions)
                              (macher-agent--dispatch-async buf)))
                          
-                         (macher-agent--wait-and-return-multiple (nreverse target-buffers) callback))
+                         (macher-agent--wait-and-return-multiple (nreverse target-buffers) callback 0 old-fsms))
                      (error (funcall callback (macher-agent--format-error err)))))))))
 
 (defvar macher-agent-execute-blocking-tool
@@ -284,9 +291,10 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
                        (unless (buffer-live-p buf)
                          (error "ERROR: Buffer '%s' does not exist." actual-name))
                        
-                       (macher-agent--prepare-subagent-instructions buf "")
-                       (macher-agent--dispatch-async buf)
-                       (macher-agent--wait-and-return buf callback)))
+                       (let ((old-fsm (buffer-local-value 'macher--fsm-latest buf)))
+                         (macher-agent--prepare-subagent-instructions buf "")
+                         (macher-agent--dispatch-async buf)
+                         (macher-agent--wait-and-return buf callback 0 old-fsm))))
                  (error (funcall callback (macher-agent--format-error err)))))))
 
 (defvar macher-agent-execute-multiple-nonblocking-tool
