@@ -76,11 +76,11 @@ This setup assumes you have [context-builder](https://github.com/igorls/context-
 The context an agent operates in is strictly tied to a single workspace. Using `macher-agent-add-buffer-to-scope` add buffers that could exist in other workspaces into the context.
 
 Here we're using something like [ruskel](https://github.com/cortesi/ruskel) to generate needed insight from a discrete workspace. That it exposes through its buffer being read.
-```
+```elisp
 ;; to work with own rust packages
 (macher-agent-make-tool
  :name "ruskel"
- :description "Ruskel generates skeletonized outlines of Rust crates."
+ :description "Ruskel generates skeletonised outlines of Rust crates."
  :category "rust-dev"
  :args (list '(:name "target" :type string :description "The target crate or module to skeletonise"))
  :command-fn (lambda (args)
@@ -88,11 +88,11 @@ Here we're using something like [ruskel](https://github.com/cortesi/ruskel) to g
                  (format "ruskel %s </dev/null 2>&1" target-val))))
 ```
 Or
-```
+```elisp
 ;; public crates only
 (gptel-make-tool
  :name "ruskel"
- :description "Ruskel generates skeletonized outlines of Rust crates."
+ :description "Ruskel generates skeletonised outlines of Rust crates."
  :category "rust-dev"
  :args (list '(:name "target" :type string :description "The target crate or module to skeletonise"))
  :function (lambda (target)
