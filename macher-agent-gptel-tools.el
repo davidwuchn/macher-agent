@@ -46,61 +46,105 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
 ;; --- Wait Loops ---
 
 (defun macher-agent--wait-and-return (buf callback &optional attempts)
-  "Wait for a single sub-agent to populate its final result variable."
-  (let ((attempts (or attempts 0)))
-    (cond
-     ((> attempts macher-agent-tool-timeout-attempts)
-      (funcall callback "ERROR: Sub-agent timed out before submitting a result."))
-     
-     ((not (buffer-live-p buf))
-      (funcall callback "ERROR: Sub-agent buffer was killed before finishing."))
-     
-     ((buffer-local-value 'macher-agent--final-result buf)
-      (let ((clean-result (buffer-local-value 'macher-agent--final-result buf)))
-        (with-current-buffer buf
-          (setq-local macher-agent--final-result nil))
-        (macher-agent--hide-ui buf)
-        (funcall callback (format "SUCCESS. Sub-agent completed task. Final Output:\n\n%s" clean-result))))
-     
-     (t
-      (run-at-time 0.5 nil #'macher-agent--wait-and-return buf callback (1+ attempts))))))
+  "Wait for a single sub-agent to populate its final result variable using FSM termination."
+  (let* ((attempts (or attempts 0))
+         (fsm (buffer-local-value 'macher--fsm-latest buf)))
+    (if (not fsm)
+        (if (> attempts 10)
+            (funcall callback "ERROR: Sub-agent failed to start (timeout).")
+          (run-at-time 0.1 nil #'macher-agent--wait-and-return buf callback (1+ attempts)))
+      (macher--add-termination-handler 
+       fsm 
+       (lambda (_terminated-fsm)
+         (if (not (buffer-live-p buf))
+             (funcall callback "ERROR: Sub-agent buffer was killed before finishing.")
+           (let ((clean-result (buffer-local-value 'macher-agent--final-result buf)))
+             (if clean-result
+                 (progn
+                   (with-current-buffer buf
+                     (setq-local macher-agent--final-result nil))
+                   (macher-agent--hide-ui buf)
+                   (funcall callback (format "SUCCESS. Sub-agent completed task. Final Output:\n\n%s" clean-result)))
+               ;; No result. Check if a continuation happened.
+               (run-at-time 0.5 nil 
+                            (lambda ()
+                              (let ((new-fsm (buffer-local-value 'macher--fsm-latest buf)))
+                                (if (and new-fsm (not (eq new-fsm fsm)))
+                                    (macher-agent--wait-and-return buf callback)
+                                  (funcall callback "ERROR: Sub-agent stopped without submitting a result.")))))))))))))
 
 (defun macher-agent--wait-and-return-multiple (buffers callback &optional attempts)
-  "Wait for multiple sub-agents to populate their final result variables."
-  (let ((attempts (or attempts 0))
-        (all-done t)
+  "Wait for multiple sub-agents to populate their final result variables using FSM termination."
+  (let ((results nil)
         (failed-buffers nil)
-        (results nil))
-    
+        (pending-count (length buffers))
+        (attempts (or attempts 0))
+        (all-started t))
+    ;; First check if all buffers have started.
     (dolist (buf buffers)
-      (if (not (buffer-live-p buf))
-          (push (format "ERROR: Buffer '%s' was killed before finishing." (buffer-name buf)) failed-buffers)
-        (let ((res (buffer-local-value 'macher-agent--final-result buf)))
-          (if res
-              (push (cons (buffer-name buf) res) results)
-            (setq all-done nil)))))
+      (unless (buffer-local-value 'macher--fsm-latest buf)
+        (setq all-started nil)))
     
-    (cond
-     ((> attempts macher-agent-tool-timeout-attempts)
-      (funcall callback "ERROR: One or more sub-agents timed out before submitting a result."))
-     
-     (failed-buffers
-      (funcall callback (string-join failed-buffers "\n")))
-     
-     (all-done
+    (if (and (not all-started) (< attempts 10))
+        (run-at-time 0.1 nil #'macher-agent--wait-and-return-multiple buffers callback (1+ attempts))
       (dolist (buf buffers)
-        (with-current-buffer buf
-          (setq-local macher-agent--final-result nil))
-        (macher-agent--hide-ui buf))
-      
-      (let ((final-output 
-             (mapconcat (lambda (r) (format "=== Response from %s ===\n%s" (car r) (cdr r)))
-                        (nreverse results)
-                        "\n\n")))
-        (funcall callback (format "SUCCESS. All sub-agents completed their tasks. Final Outputs:\n\n%s" final-output))))
-     
-     (t
-      (run-at-time 0.5 nil #'macher-agent--wait-and-return-multiple buffers callback (1+ attempts))))))
+        (let ((fsm (buffer-local-value 'macher--fsm-latest buf)))
+          (if (not fsm)
+              (progn
+                (push (format "ERROR: Buffer '%s' failed to start." (buffer-name buf)) failed-buffers)
+                (setq pending-count (1- pending-count))
+                (when (= pending-count 0)
+                  (funcall callback (string-join failed-buffers "\n"))))
+            (macher--add-termination-handler 
+             fsm 
+             (lambda (_terminated-fsm)
+               (if (not (buffer-live-p buf))
+                   (progn
+                     (push (format "ERROR: Buffer '%s' was killed before finishing." (buffer-name buf)) failed-buffers)
+                     (setq pending-count (1- pending-count))
+                     (when (= pending-count 0)
+                       (funcall callback (string-join failed-buffers "\n"))))
+                 (let ((res (buffer-local-value 'macher-agent--final-result buf)))
+                   (if res
+                       (progn
+                         (push (cons (buffer-name buf) res) results)
+                         (setq pending-count (1- pending-count))
+                         (when (= pending-count 0)
+                           (if failed-buffers
+                               (funcall callback (string-join failed-buffers "\n"))
+                             (dolist (b buffers)
+                               (with-current-buffer b (setq-local macher-agent--final-result nil))
+                               (macher-agent--hide-ui b))
+                             (let ((final-output 
+                                    (mapconcat (lambda (r) (format "=== Response from %s ===\n%s" (car r) (cdr r)))
+                                               (nreverse results)
+                                               "\n\n")))
+                               (funcall callback (format "SUCCESS. All sub-agents completed their tasks. Final Outputs:\n\n%s" final-output))))))
+                     ;; No result. Check for continuation.
+                     (run-at-time 0.5 nil 
+                                  (lambda ()
+                                    (let ((new-fsm (buffer-local-value 'macher--fsm-latest buf)))
+                                      (if (and new-fsm (not (eq new-fsm fsm)))
+                                          ;; If continuing, we substitute ourselves back in
+                                          (macher-agent--wait-and-return buf 
+                                                                         (lambda (msg)
+                                                                           (if (string-match-p "^SUCCESS" msg)
+                                                                               (let ((clean-result (replace-regexp-in-string "^SUCCESS.*Final Output:\n\n" "" msg)))
+                                                                                 (push (cons (buffer-name buf) clean-result) results))
+                                                                             (push (format "ERROR: Buffer '%s' failed: %s" (buffer-name buf) msg) failed-buffers))
+                                                                           (setq pending-count (1- pending-count))
+                                                                           (when (= pending-count 0)
+                                                                             (if failed-buffers
+                                                                                 (funcall callback (string-join failed-buffers "\n"))
+                                                                               (let ((final-output 
+                                                                                      (mapconcat (lambda (r) (format "=== Response from %s ===\n%s" (car r) (cdr r)))
+                                                                                                 (nreverse results)
+                                                                                                 "\n\n")))
+                                                                                 (funcall callback (format "SUCCESS. All sub-agents completed their tasks. Final Outputs:\n\n%s" final-output)))))))
+                                        (push (format "ERROR: Buffer '%s' stopped without submitting a result." (buffer-name buf)) failed-buffers)
+                                        (setq pending-count (1- pending-count))
+                                        (when (= pending-count 0)
+                                          (funcall callback (string-join failed-buffers "\n"))))))))))))))))))
 
 (defun macher-agent--set-system-message (msg)
   "Adapter function to safely set the gptel system message without hardcoding internals."

@@ -31,10 +31,6 @@ You can also adopt a auto-agentic CLI style approach where a planner dynamically
 To integrate macher-agent into your workflow, ensure that macher and gptel are already installed and loaded (and your system has rsync installed). Then setup your use-package based on the examples below
 
 
-## Known Limitations
-
-If a modified file in a subfolder shares a base filename with a file in the root directory, a warning is injected into the patch buffer advising you to apply the changes via an external utility (patch, git apply etc.) to ensure filesystem integrity.
-
 ## Example
 
 ### macher-agent-make-tool
@@ -151,7 +147,7 @@ These are the `M-x` commands designed for human-in-the-loop orchestration and wo
 | `macher-agent-add-subagent` | Interactively prompts for a name and directory, then spins up a dedicated, isolated sub-agent buffer locked to that workspace, inheriting the persistent context payload. |
 | `macher-agent-add-buffer-to-scope` | Manually injects an existing Emacs buffer into the current agent's persistent context payload, explicitly granting it permission to read/edit it. |
 | `macher-agent-clear-context` | Clears the persistent virtual memory and pending edits of the current agent or sub-agent buffer, allowing a fresh start. |
-| `macher-agent-apply-patch` | Safely applies the current patch buffer using external diff utilities (like `git apply` or `patch`) to avoid Emacs collision errors. |
+| `macher-agent-apply-patch` | Safely applies the current patch buffer using Emacs's native `diff-mode` utilities (e.g. `diff-apply-buffer`). |
 | `macher-agent-insert-patch` | Inserts the proposed patch from the current workspace directly into the chat buffer for review. |
 | `macher-agent-apply-virtual-buffers` | Alternative buffer patching function to ediff-patch-buffer |
 

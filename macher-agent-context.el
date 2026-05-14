@@ -11,7 +11,19 @@
          (contents (and context (macher-context-contents context))))
     (unless (assoc actual-name contents)
       ;; Throwing a catchable error is idiomatic Emacs Lisp for access denial
-      (error "SECURITY ERROR: You do not have permission to access '%s'. Use list_agent_buffers to see your allowed scope." actual-name))))
+      (error "SECURITY ERROR: You do not have permission to access '%s'. Use list_buffers_in_workspace to see your allowed scope." actual-name))))
+
+(defun macher-agent--get-buffer-content (path)
+  "Get the content of a buffer or file by path."
+  (cond
+   ((get-buffer path)
+    (with-current-buffer path
+      (buffer-substring-no-properties (point-min) (point-max))))
+   ((file-exists-p path)
+    (with-temp-buffer
+      (insert-file-contents path)
+      (buffer-string)))
+   (t nil)))
 
 (defun macher-agent--update-context-file (context path new-content)
   "Update the virtual NEW-CONTENT for PATH in the macher CONTEXT.
@@ -24,18 +36,7 @@ Can handle both physical file paths and pure Emacs buffer names."
         ;; Update the existing virtual 'new' state
         (setcdr (cdr entry) new-content)
       ;; Create a new entry, reading the original from buffer or disk if it exists
-      (let ((orig (cond
-                   ;; 1. Check if it's a live buffer first
-                   ((get-buffer path)
-                    (with-current-buffer path
-                      (buffer-substring-no-properties (point-min) (point-max))))
-                   ;; 2. Fallback to checking the physical disk
-                   ((file-exists-p path)
-                    (with-temp-buffer
-                      (insert-file-contents path)
-                      (buffer-string)))
-                   ;; 3. It's a completely new file/buffer
-                   (t nil))))
+      (let ((orig (macher-agent--get-buffer-content path)))
         (setf (macher-context-contents context)
               (cons (cons path (cons orig new-content)) contents))))
     (setf (macher-context-dirty-p context) t)))
@@ -49,8 +50,7 @@ Can handle both physical file paths and pure Emacs buffer names."
     (cond
      (virtual-content virtual-content)
      ((get-buffer path)
-      (with-current-buffer path
-        (buffer-substring-no-properties (point-min) (point-max))))
+      (macher-agent--get-buffer-content path))
      (t (error "ERROR: Buffer '%s' does not exist." path)))))
 
 ;; --- 1. Global Flags & State ---
@@ -100,61 +100,62 @@ Can handle both physical file paths and pure Emacs buffer names."
 
 ;; --- 3. Context Synchronisation & Persistence ---
 
-(defun macher-agent--auto-sync-context (ctx &rest _args)
+(defun macher-agent--auto-sync-context (ctx &optional fsm &rest _args)
   "Check live buffers and physical disk to fast-forward the agent's memory using strict three-way merge logic.
 
 Did we change it? and Did they change it?"
-  (when ctx
-    (let ((contents (macher-context-contents ctx))
-          (synced nil))
-      (dolist (entry contents)
-        (let* ((path (car entry))
-               (content-pair (cdr entry))
-               (orig (car content-pair))
-               (new (cdr content-pair))
-               (buf (or (get-file-buffer path) (get-buffer path)))
-               (disk-exists (file-exists-p path))
-               (current-state 
-                (cond
-                 ((and buf (buffer-live-p buf))
-                  (with-current-buffer buf
-                    (buffer-substring-no-properties (point-min) (point-max))))
-                 (disk-exists
-                  (with-temp-buffer
-                    (insert-file-contents path)
-                    (buffer-string)))
-                 (t nil)))
-               
-               ;; Establish our truth table booleans
-               (local-changed (not (equal orig new)))
-               (remote-changed (not (equal orig current-state))))
-          
-          (cond
-           ;; 1. Clean Convergence: The patch was applied externally
-           ((and local-changed remote-changed (equal new current-state))
-            (setcar content-pair current-state)
-            (setq synced t))
+  (let ((actual-ctx (if fsm (macher-agent--fsm-get-context fsm) ctx)))
+    (when actual-ctx
+      (let ((contents (macher-context-contents actual-ctx))
+            (synced nil))
+        (dolist (entry contents)
+          (let* ((path (car entry))
+                 (content-pair (cdr entry))
+                 (orig (car content-pair))
+                 (new (cdr content-pair))
+                 (buf (or (get-file-buffer path) (get-buffer path)))
+                 (disk-exists (file-exists-p path))
+                 (current-state 
+                  (cond
+                   ((and buf (buffer-live-p buf))
+                    (with-current-buffer buf
+                      (buffer-substring-no-properties (point-min) (point-max))))
+                   (disk-exists
+                    (with-temp-buffer
+                      (insert-file-contents path)
+                      (buffer-string)))
+                   (t nil)))
+                 
+                 ;; Establish our truth table booleans
+                 (local-changed (not (equal orig new)))
+                 (remote-changed (not (equal orig current-state))))
+            
+            (cond
+             ;; 1. Clean Convergence: The patch was applied externally
+             ((and local-changed remote-changed (equal new current-state))
+              (setcar content-pair current-state)
+              (setq synced t))
 
-           ;; 2. Fast-Forward: External edit only (or external deletion)
-           ((and remote-changed (not local-changed))
-            (setcar content-pair current-state)
-            (setcdr content-pair current-state)
-            (setq synced t))
+             ;; 2. Fast-Forward: External edit only (or external deletion)
+             ((and remote-changed (not local-changed))
+              (setcar content-pair current-state)
+              (setcdr content-pair current-state)
+              (setq synced t))
 
-           ;; 3. True Conflict: Both diverged to different states
-           ((and local-changed remote-changed (not (equal new current-state)))
-            ;; The safest autonomous action is cache invalidation (adopt remote)
-            (setcar content-pair current-state)
-            (setcdr content-pair current-state)
-            (setq synced t))
+             ;; 3. True Conflict: Both diverged to different states
+             ((and local-changed remote-changed (not (equal new current-state)))
+              ;; The safest autonomous action is cache invalidation (adopt remote)
+              (setcar content-pair current-state)
+              (setcdr content-pair current-state)
+              (setq synced t))
 
-           ;; 4. Safe Local Edit: (local-changed and not remote-changed)
-           ;; We do absolutely nothing here. The virtual edit is safely pending.
-           ;; This inherently protects virtual file creations where orig=nil and remote=nil.
-           )))
-      
-      (when synced
-        (setf (macher-context-dirty-p ctx) nil)))))
+             ;; 4. Safe Local Edit: (local-changed and not remote-changed)
+             ;; We do absolutely nothing here. The virtual edit is safely pending.
+             ;; This inherently protects virtual file creations where orig=nil and remote=nil.
+             )))
+        
+        (when synced
+          (setf (macher-context-dirty-p actual-ctx) nil))))))
 
 ;; --- Adapters ---
 
@@ -199,7 +200,7 @@ or update the FSM state.")
 
 ;; [FIX 2: Kept the correctly namespaced hook and removed the redundant legacy (add-hook 'macher-context-resolved-functions ...)]
 (add-hook 'macher-agent-context-resolved-functions #'macher-agent-persist-context-hook)
-(add-hook 'macher-agent-context-resolved-functions #'macher-agent--auto-sync-context)
+(add-hook 'macher-agent-context-resolved-functions #'macher-agent--auto-sync-context t)
 
 (defvar macher-agent-extended-tool-categories nil
   "Custom agent categories that should receive native macher context injection.")
@@ -228,28 +229,16 @@ or update the FSM state.")
 ;; --- 4. Interactive Commands ---
 
 (defun macher-agent-apply-patch ()
-  "Apply the current patch buffer using external diff utilities to avoid collisions."
+  "Apply the current patch buffer using Emacs's native diff-mode."
   (interactive)
   (unless (derived-mode-p 'diff-mode)
     (user-error "Not in a patch/diff buffer"))
-  (let* ((patch-content (buffer-substring-no-properties (point-min) (point-max)))
-         (root (or (locate-dominating-file default-directory ".git") 
-                   default-directory))
-         (default-directory root)
-         (use-git (file-exists-p (expand-file-name ".git" root)))
-         (cmd (if use-git "git" "patch"))
-         (args (if use-git '("apply" "-") '("-p1"))))
-    (with-temp-buffer
-      (insert patch-content)
-      (let ((exit-code (apply #'call-process-region 
-                              (point-min) (point-max) 
-                              cmd nil "*macher-patch-out*" nil args)))
-        (if (= exit-code 0)
-            (progn
-              (message "SUCCESS: Patch applied safely via %s." cmd)
-              (kill-buffer (get-buffer "*macher-patch-out*")))
-          (pop-to-buffer "*macher-patch-out*")
-          (message "ERROR: Failed to apply patch safely."))))))
+  (condition-case err
+      (progn
+        (diff-apply-buffer)
+        (message "SUCCESS: Patch applied safely via diff-mode."))
+    (error
+     (message "ERROR: Failed to apply patch safely: %s" (error-message-string err)))))
 
 (defun macher-agent-insert-patch ()
   "Insert the current workspace's patch into the chat buffer to continue working."

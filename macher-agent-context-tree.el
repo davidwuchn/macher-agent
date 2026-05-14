@@ -28,8 +28,6 @@
   "Pretty-printer for the ewoc tree nodes."
   (let ((indent (make-string (* 2 (macher-agent-tree-node-depth node)) ?\s)))
     (pcase (macher-agent-tree-node-type node)
-      ('header
-       (insert (propertize (macher-agent-tree-node-name node) 'face 'bold) "\n\n"))
       ('root
        (insert indent (propertize (concat "▾ " (macher-agent-tree-node-name node)) 'face 'font-lock-keyword-face) "\n"))
       ('dir
@@ -100,10 +98,7 @@
          (active-files-hash (make-hash-table :test 'equal)))
 
     ;; Top Header
-    (ewoc-enter-last ewoc (make-macher-agent-tree-node 
-                           :type 'header 
-                           :name project-name 
-                           :depth 0))
+    (ewoc-set-hf ewoc (propertize project-name 'face 'bold) "")
 
     ;; 1. Determine what is currently "active" in the agent's memory
     (dolist (entry contents)
@@ -111,15 +106,21 @@
              (is-absolute (file-name-absolute-p path-or-buf))
              (has-slash (string-match-p "/" path-or-buf))
              (live-buf (get-buffer path-or-buf))
-             (is-file-buffer (and live-buf (buffer-file-name live-buf))))
+             (is-file-buffer (and live-buf (buffer-file-name live-buf)))
+             (file-path (or (when is-file-buffer (buffer-file-name live-buf))
+                            (when is-absolute path-or-buf)))
+             (is-external-file (and file-path root-dir
+                                    (not (string-prefix-p (file-name-as-directory (expand-file-name root-dir))
+                                                          (expand-file-name file-path))))))
         
-        (if (or is-absolute has-slash is-file-buffer (and root-dir (file-exists-p (expand-file-name path-or-buf root-dir))))
-            ;; It's a file: format it relatively and flag it as active
+        (if (and (or is-absolute has-slash is-file-buffer (and root-dir (file-exists-p (expand-file-name path-or-buf root-dir))))
+                 (not is-external-file))
+            ;; It's a file in the workspace: format it relatively and flag it as active
             (let ((rel-path path-or-buf))
               (when (and root-dir is-absolute)
                 (setq rel-path (file-relative-name path-or-buf root-dir)))
               (puthash rel-path t active-files-hash))
-          ;; It's a pure buffer, add it directly to the buffer list
+          ;; It's a pure buffer or external file, add it directly to the buffer list
           (push path-or-buf buffers))))
 
     ;; 2. Gather ALL files natively from the project workspace
@@ -162,7 +163,9 @@
 (define-derived-mode macher-agent-context-tree-mode special-mode "MacherTree"
   "Major mode for displaying the macher agent context hierarchy."
   (setq truncate-lines t)
-  (setq buffer-read-only t))
+  (setq buffer-read-only t)
+  (setq-local cursor-type nil)
+  (setq-local cursor-in-non-selected-windows nil))
 
 ;; --- Interactive Commands ---
 
@@ -195,7 +198,8 @@ Displays the full workspace, highlighting items actively in the macher context."
         (display-buffer tree-buf
                         `((display-buffer-in-side-window)
                           (side . left)
-                          (window-width . ,macher-agent-context-tree-width)))))))
+                          (window-width . ,macher-agent-context-tree-width)
+                          (window-parameters . ((no-other-window . t)))))))))
 
 ;; --- Synchronisation Hook ---
 
