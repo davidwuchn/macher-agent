@@ -201,9 +201,7 @@ or update the FSM state.")
       (macher-agent--fsm-put-context fsm persistent-ctx)
       (setq macher--fsm-latest fsm))))
 
-;; [FIX 2: Kept the correctly namespaced hook and removed the redundant legacy (add-hook 'macher-context-resolved-functions ...)]
 (add-hook 'macher-agent-context-resolved-functions #'macher-agent-persist-context-hook)
-(add-hook 'macher-agent-context-resolved-functions #'macher-agent--auto-sync-context t)
 
 (defvar macher-agent-extended-tool-categories nil
   "Custom agent categories that should receive native macher context injection.")
