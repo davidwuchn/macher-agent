@@ -45,36 +45,8 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
 
 ;; --- Wait Loops ---
 
-(defun macher-agent--wait-and-return (buf callback &optional attempts old-fsm)
-  "Wait for a single sub-agent to populate its final result variable using FSM termination."
-  (let* ((attempts (or attempts 0))
-         (fsm (buffer-local-value 'macher--fsm-latest buf)))
-    (if (or (not fsm) (eq fsm old-fsm))
-        (if (> attempts macher-agent-tool-timeout-attempts)
-            (funcall callback "ERROR: Sub-agent failed to start (timeout).")
-          (run-at-time 0.1 nil #'macher-agent--wait-and-return buf callback (1+ attempts) old-fsm))
-      (macher--add-termination-handler 
-       fsm 
-       (lambda (_terminated-fsm)
-         (if (not (buffer-live-p buf))
-             (funcall callback "ERROR: Sub-agent buffer was killed before finishing.")
-           (let ((clean-result (buffer-local-value 'macher-agent--final-result buf)))
-             (if clean-result
-                 (progn
-                   (with-current-buffer buf
-                     (setq-local macher-agent--final-result nil))
-                   (macher-agent--hide-ui buf)
-                   (funcall callback (format "SUCCESS. Sub-agent completed task. Final Output:\n\n%s" clean-result)))
-               ;; No result. Check if a continuation happened.
-               (run-at-time 0.5 nil 
-                            (lambda ()
-                              (let ((new-fsm (buffer-local-value 'macher--fsm-latest buf)))
-                                (if (and new-fsm (not (eq new-fsm fsm)))
-                                    (macher-agent--wait-and-return buf callback 0 fsm)
-                                  (funcall callback "ERROR: Sub-agent stopped without submitting a result.")))))))))))))
-
-(defun macher-agent--wait-and-return-multiple (buffers callback &optional attempts old-fsms)
-  "Wait for multiple sub-agents to populate their final result variables using FSM termination."
+(defun macher-agent--wait-and-return (buffers callback &optional attempts old-fsms)
+  "Wait for 1-to-many sub-agents to populate their final result variables using FSM termination."
   (let ((results nil)
         (failed-buffers nil)
         (pending-count (length buffers))
@@ -88,7 +60,7 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
           (setq all-started nil))))
     
     (if (and (not all-started) (< attempts macher-agent-tool-timeout-attempts))
-        (run-at-time 0.1 nil #'macher-agent--wait-and-return-multiple buffers callback (1+ attempts) old-fsms)
+        (run-at-time 0.1 nil #'macher-agent--wait-and-return buffers callback (1+ attempts) old-fsms)
       (dolist (buf buffers)
         (let* ((fsm (buffer-local-value 'macher--fsm-latest buf))
                (old-fsm (cdr (assq buf old-fsms))))
@@ -128,11 +100,11 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
                                   (lambda ()
                                     (let ((new-fsm (buffer-local-value 'macher--fsm-latest buf)))
                                       (if (and new-fsm (not (eq new-fsm fsm)))
-                                          ;; If continuing, we substitute ourselves back in
-                                          (macher-agent--wait-and-return buf 
+                                          ;; If continuing, we substitute ourselves back in wrapping it as a single element list
+                                          (macher-agent--wait-and-return (list buf) 
                                                                          (lambda (msg)
                                                                            (if (string-match-p "^SUCCESS" msg)
-                                                                               (let ((clean-result (replace-regexp-in-string "^SUCCESS.*Final Output:\n\n" "" msg)))
+                                                                               (let ((clean-result (replace-regexp-in-string "^SUCCESS.*Final Output[s]?:\n\n=== Response from .* ===\n" "" msg)))
                                                                                  (push (cons (buffer-name buf) clean-result) results))
                                                                              (push (format "ERROR: Buffer '%s' failed: %s" (buffer-name buf) msg) failed-buffers))
                                                                            (setq pending-count (1- pending-count))
@@ -144,7 +116,7 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
                                                                                                  (nreverse results)
                                                                                                  "\n\n")))
                                                                                  (funcall callback (format "SUCCESS. All sub-agents completed their tasks. Final Outputs:\n\n%s" final-output))))))
-                                                                         0 fsm)
+                                                                         0 (list (cons buf fsm)))
                                         (push (format "ERROR: Buffer '%s' stopped without submitting a result." (buffer-name buf)) failed-buffers)
                                         (setq pending-count (1- pending-count))
                                         (when (= pending-count 0)
@@ -179,8 +151,9 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
   "Insert INSTRUCTIONS into BUF with cloaked system reminders."
   (with-current-buffer buf
     (goto-char (point-max))
-    (macher-agent--insert-hidden "\n\n=== DELEGATED TASK ===\n")
-    (insert (substring-no-properties instructions))
+    (when (not (string-empty-p instructions))
+      (macher-agent--insert-hidden "\n\n=== DELEGATED TASK ===\n")
+      (insert (substring-no-properties instructions)))
     (macher-agent--insert-hidden "\n\n@macher-agent-worker\n=== SYSTEM REMINDER ===\nYou MUST use the `submit_task_result` tool to return your answer. Do not just type it as plain text.\n")))
 
 (defun macher-agent--dispatch-async (buf)
@@ -199,7 +172,6 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
                (condition-case err
                    (let ((buf-name (format "*macher-agent: %s*" name)))
                      (macher-agent-add-subagent name default-directory t context)
-                     ;; Add to context explicitly
                      (when context
                        (let* ((contents (macher-context-contents context))
                               (entry (assoc buf-name contents)))
@@ -210,29 +182,6 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
                                    (cons (cons buf-name (cons orig nil)) contents))))))
                      (format "SUCCESS: Sub-agent created. The EXACT buffer name to use is '%s'." buf-name))
                  (error (macher-agent--format-error err))))))
-
-(defvar macher-agent-delegate-tool
-  (gptel-make-tool
-   :name "delegate_task_to_subagent"
-   :description "Write instructions to a single sub-agent and wait for its final response."
-   :category "macher-agent-orchestrate"
-   :async t
-   :args (list '(:name "buffer_name" :type string)
-               '(:name "instructions" :type string))
-   :function (lambda (context callback buffer_name instructions)
-               (condition-case err
-                   (let ((actual-name (macher-agent--resolve-buffer-name buffer_name)))
-                     (macher-agent--ensure-access context actual-name)
-                     
-                     (let ((buf (get-buffer actual-name)))
-                       (unless (buffer-live-p buf)
-                         (error "ERROR: Buffer '%s' does not exist." actual-name))
-                       
-                       (let ((old-fsm (buffer-local-value 'macher--fsm-latest buf)))
-                         (macher-agent--prepare-subagent-instructions buf instructions)
-                         (macher-agent--dispatch-async buf)
-                         (macher-agent--wait-and-return buf callback 0 old-fsm))))
-                 (error (funcall callback (macher-agent--format-error err)))))))
 
 (defvar macher-agent-delegate-multiple-tool
   (gptel-make-tool
@@ -272,59 +221,52 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
                              (macher-agent--prepare-subagent-instructions buf instructions)
                              (macher-agent--dispatch-async buf)))
                          
-                         (macher-agent--wait-and-return-multiple (nreverse target-buffers) callback 0 old-fsms))
+                         (macher-agent--wait-and-return (nreverse target-buffers) callback 0 old-fsms))
                      (error (funcall callback (macher-agent--format-error err)))))))))
 
-(defvar macher-agent-execute-blocking-tool
+(defvar macher-agent-execute-subagents-tool
   (gptel-make-tool
-   :name "execute_subagent_buffer_blocking"
-   :description "Trigger a single sub-agent and WAIT for it to finish without giving new instructions."
+   :name "execute_subagents"
+   :description "Trigger 1-to-many sub-agents to begin processing. Does NOT provide new instructions. Supports an optional blocking flag to wait for their final output."
    :category "macher-agent-orchestrate"
    :async t
-   :args (list '(:name "buffer_name" :type string))
-   :function (lambda (context callback buffer_name)
-               (condition-case err
-                   (let ((actual-name (macher-agent--resolve-buffer-name buffer_name)))
-                     (macher-agent--ensure-access context actual-name)
-                     
-                     (let ((buf (get-buffer actual-name)))
-                       (unless (buffer-live-p buf)
-                         (error "ERROR: Buffer '%s' does not exist." actual-name))
-                       
-                       (let ((old-fsm (buffer-local-value 'macher--fsm-latest buf)))
-                         (macher-agent--prepare-subagent-instructions buf "")
-                         (macher-agent--dispatch-async buf)
-                         (macher-agent--wait-and-return buf callback 0 old-fsm))))
-                 (error (funcall callback (macher-agent--format-error err)))))))
-
-(defvar macher-agent-execute-multiple-nonblocking-tool
-  (gptel-make-tool
-   :name "execute_subagents_nonblocking"
-   :description "Trigger 1-to-many sub-agents to begin processing asynchronously in the background. Does NOT provide new instructions and does NOT wait for output."
-   :category "macher-agent-orchestrate"
    :args (list '(:name "buffer_names" :type array 
                        :description "List of buffer names to trigger."
-                       :items (:type string)))
-   :function (lambda (context buffer_names)
+                       :items (:type string))
+               '(:name "blocking" :type boolean :optional t
+                       :description "If true, pause the parent agent and wait for all triggered agents to complete. If false (default), run asynchronously in the background."))
+   :function (lambda (context callback buffer_names &optional blocking)
                (unless (vectorp buffer_names)
                  (if (stringp buffer_names)
-                     (setq buffer_names (json-parse-string buffer_names :array-type 'vector))
-                   (error "ERROR: 'buffer_names' parameter must be an array of strings.")))
+                     (condition-case nil
+                         (setq buffer_names (json-parse-string buffer_names :array-type 'vector))
+                       (error (funcall callback "ERROR: 'buffer_names' parameter must be an array of strings.")
+                              (setq buffer_names nil)))
+                   (funcall callback "ERROR: 'buffer_names' parameter must be an array of strings.")
+                   (setq buffer_names nil)))
                
-               (condition-case err
-                   (progn
-                     (cl-loop for buffer_name across buffer_names do
-                              (let ((actual-name (macher-agent--resolve-buffer-name buffer_name)))
-                                (macher-agent--ensure-access context actual-name)
-                                (unless (buffer-live-p (get-buffer actual-name))
-                                  (error "ERROR: Buffer '%s' does not exist." actual-name))))
-                     
-                     (cl-loop for buffer_name across buffer_names do
-                              (let ((buf (get-buffer (macher-agent--resolve-buffer-name buffer_name))))
-                                (macher-agent--dispatch-async buf)))
-                     
-                     (format "SUCCESS: Triggered %d sub-agents asynchronously." (length buffer_names)))
-                 (error (macher-agent--format-error err))))))
+               (when buffer_names
+                 (condition-case err
+                     (let ((target-buffers nil)
+                           (old-fsms nil))
+                       
+                       (cl-loop for buffer_name across buffer_names do
+                                (let ((actual-name (macher-agent--resolve-buffer-name buffer_name)))
+                                  (macher-agent--ensure-access context actual-name)
+                                  (let ((buf (get-buffer actual-name)))
+                                    (unless (buffer-live-p buf)
+                                      (error "ERROR: Buffer '%s' does not exist." actual-name))
+                                    (push buf target-buffers)
+                                    (push (cons buf (buffer-local-value 'macher--fsm-latest buf)) old-fsms))))
+                       
+                       (dolist (buf target-buffers)
+                         (macher-agent--prepare-subagent-instructions buf "")
+                         (macher-agent--dispatch-async buf))
+                       
+                       (if (and blocking (not (eq blocking :json-false)))
+                           (macher-agent--wait-and-return (nreverse target-buffers) callback 0 old-fsms)
+                         (funcall callback (format "SUCCESS: Triggered %d sub-agents asynchronously." (length target-buffers)))))
+                   (error (funcall callback (macher-agent--format-error err))))))))
 
 (defvar macher-agent-write-buffer-tool
   (gptel-make-tool
@@ -423,29 +365,10 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
                      (macher--read-string content parsed-offset parsed-limit show_line_numbers))
                  (error (macher-agent--format-error err))))))
 
-(defvar macher-agent-edit-buffer-tool
-  (gptel-make-tool
-   :name "edit_buffer_in_workspace"
-   :description "Replace exact text in a scoped buffer in your workspace. old_text must match precisely (whitespace, newlines, indentation). Use actual buffer content only - NO line numbers.\n\nIf replace_all=false and multiple matches exist: ERROR. Add more context to old_text to make the match unique."
-   :category "macher-agent"
-   :args (list '(:name "buffer_name" :type string :description "The name of the target buffer")
-               '(:name "old_text" :type string :description "Exact text to find and replace. Must match precisely including whitespace and newlines. Do NOT include line numbers.")
-               '(:name "new_text" :type string :description "Text to replace the old_text with")
-               '(:name "replace_all" :type boolean :optional t :description "If true, replace all occurrences. If false (default), error if multiple matches exist"))
-   :function (lambda (context buffer_name old_text new_text &optional replace_all)
-               (condition-case err
-                   (let* ((actual-name (macher-agent--resolve-buffer-name buffer_name))
-                          (content (macher-agent--read-context-file context actual-name))
-                          (replace-all-bool (and replace-all (not (eq replace-all :json-false))))
-                          (new-content (macher--edit-string content old_text new_text replace-all-bool)))
-                     (macher-agent--update-context-file context actual-name new-content)
-                     (format "SUCCESS: Virtual edit recorded for buffer '%s'. A patch will be generated at the end of the turn." actual-name))
-                 (error (macher-agent--format-error err))))))
-
 (defvar macher-agent-multi-edit-buffer-tool
   (gptel-make-tool
    :name "multi_edit_buffer_in_workspace"
-   :description "Apply multiple replacements to one scoped buffer in your workspace sequentially. All edits use exact text matching (whitespace, newlines, indentation). Use actual content - NO line numbers.\n\nEdits apply in array order. If ANY edit fails, ALL changes are rolled back."
+   :description "Apply 1-to-many replacements to one scoped buffer in your workspace sequentially. All edits use exact text matching (whitespace, newlines, indentation). Use actual content - NO line numbers.\n\nEdits apply in array order. If ANY edit fails, ALL changes are rolled back."
    :category "macher-agent"
    :args (list '(:name "buffer_name" :type string :description "The name of the target buffer")
                '(:name "edits" :type array :description "Array of edit operations to apply in sequence"
@@ -502,18 +425,15 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
   "Read-only tools for inspecting Emacs buffers.")
 
 (defconst macher-agent-edit-tools
-  '("edit_buffer_in_workspace"
-    "multi_edit_buffer_in_workspace"
+  '("multi_edit_buffer_in_workspace"
     "write_buffer_in_workspace"
     "write_and_commit_buffer_in_workspace")
   "Destructive tools for modifying Emacs buffers.")
 
 (defconst macher-agent-orchestrate-tools
   '("spawn_subagent"
-    "delegate_task_to_subagent"
     "delegate_tasks_to_subagents"
-    "execute_subagent_buffer_blocking"
-    "execute_subagents_nonblocking")
+    "execute_subagents")
   "Tools for managing and communicating with sub-agents.")
 
 (with-eval-after-load 'macher

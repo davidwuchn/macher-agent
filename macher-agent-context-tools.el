@@ -27,11 +27,6 @@
            (kill-buffer out-buf)
            (funcall callback exit-code output)))))))
 
-(defgroup macher-agent nil
-  "Sandboxed, Language-Agnostic AI Workflows."
-  :group 'gptel
-  :prefix "macher-agent-")
-
 (defcustom macher-agent-sandbox-excludes 
   '(".git/" "target/" "node_modules/" ".Trash/" "Library/" ".venv/" "__pycache__/")
   "List of directories to exclude when syncing the workspace to a sandbox."

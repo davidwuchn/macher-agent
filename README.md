@@ -112,23 +112,16 @@ This workflow demonstrates how to use the planner preset to analyse a repository
 ### Orchestration
 
 * `spawn_subagent` - Instantiates a new, isolated sub-agent buffer locked to the current project directory, inheriting the parent's persistent virtual state.
-* `execute_subagent_buffer_blocking` - Triggers the sub-agent to execute its task autonomously, pausing the parent agent until the sub-agent finishes its work and generates a patch.
-* `execute_subagent_buffer_nonblocking` - Triggers the sub-agent to begin executing asynchronously in the background, allowing the parent agent to immediately continue its own processing without waiting.
+* `delegate_tasks_to_subagents` - Writes instructions to one or more sub-agents with strict submission reminders and waits for their final synthesised responses.
+* `execute_subagents` - Triggers an array of sub-agents to begin processing. Accepts an optional parameter to dictate whether the orchestrator should block and wait for completion or run them asynchronously in the background.
 
 ### Emacs Buffer Operations
 
 * `write_buffer_in_workspace` - Proposes a change to a live Emacs buffer, creating a virtual patch for review via the `macher` context API rather than mutating the buffer immediately.
-
 * `write_and_commit_buffer_in_workspace` - Directly overwrites an Emacs buffer and fast-forwards the context to synchronise the agent's awareness.
-
-* `edit_buffer_in_workspace` - Proposes an exact string replacement within a specific buffer without needing to rewrite the entire buffer, creating a virtual patch for review.
-
 * `multi_edit_buffer_in_workspace` - Allows the agent to make multiple distinct exact string replacements in a single buffer in one tool call, generating a virtual patch for review.
-
 * `read_buffer_in_workspace` - Reads the contents of a buffer directly from the persistent `macher` context, prioritising proposed virtual edits if modified during the current turn, or returning the live Emacs buffer state otherwise.
-
 * `list_buffers_in_workspace` - Scans the current Emacs session and returns a filtered list of all active orchestrator and sub-agent buffers.
-
 * `search_buffers_in_workspace` - Performs a regex search across all active agent buffers, returning matching lines and their locations.
 
 ### Semi-agentic workflow
@@ -142,33 +135,29 @@ Human-in-the-loop orchestration using interactive Emacs commands to manually man
 ### 1. Interactive User Commands
 These are the `M-x` commands designed for human-in-the-loop orchestration and workspace management.
 
-| Command | Description |
-| :--- | :--- |
-| `macher-agent-add-subagent` | Interactively prompts for a name and directory, then spins up a dedicated, isolated sub-agent buffer locked to that workspace, inheriting the persistent context payload. |
-| `macher-agent-add-buffer-to-scope` | Manually injects an existing Emacs buffer into the current agent's persistent context payload, explicitly granting it permission to read/edit it. |
-| `macher-agent-clear-context` | Clears the persistent virtual memory and pending edits of the current agent or sub-agent buffer, allowing a fresh start. |
-| `macher-agent-apply-patch` | Safely applies the current patch buffer using Emacs's native `diff-mode` utilities (e.g. `diff-apply-buffer`). |
-| `macher-agent-insert-patch` | Inserts the proposed patch from the current workspace directly into the chat buffer for review. |
-| `macher-agent-apply-virtual-buffers` | Alternative buffer patching function to ediff-patch-buffer |
+| Command                              | Description                                                                                                                                                               |
+|:-------------------------------------|:--------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `macher-agent-add-subagent`          | Interactively prompts for a name and directory, then spins up a dedicated, isolated sub-agent buffer locked to that workspace, inheriting the persistent context payload. |
+| `macher-agent-add-buffer-to-scope`   | Manually injects an existing Emacs buffer into the current agent's persistent context payload, explicitly granting it permission to read/edit it.                         |
+| `macher-agent-clear-context`         | Clears the persistent virtual memory and pending edits of the current agent or sub-agent buffer, allowing a fresh start.                                                  |
+| `macher-agent-apply-patch`           | Safely applies the current patch buffer using Emacs's native `diff-mode` utilities (e.g. `diff-apply-buffer`).                                                            |
+| `macher-agent-insert-patch`          | Inserts the proposed patch from the current workspace directly into the chat buffer for review.                                                                           |
+| `macher-agent-apply-virtual-buffers` | Alternative buffer patching function to ediff-patch-buffer                                                                                                                |
 
 ---
 
 ### 2. Agent Tools
 These are the `gptel` tools exposed to the LLM to facilitate orchestration, file operations, and buffer manipulation.
 
-| Tool Name | Description |
-| :--- | :--- |
-| `spawn_subagent` | Creates a new, isolated sub-agent in the current project directory, safely inheriting the parent agent's virtual state and persistent context. |
-| `delegate_task_to_subagent` | Writes instructions to a sub-agent with strict submission reminders and waits for its final synthesised response. |
-| `delegate_task_to_subagents` | Writes instructions to sub-agents with strict submission reminders and waits for its final synthesised response. |
-| `execute_subagent_buffer_blocking` | Triggers a sub-agent to execute autonomously, pausing the parent agent until it finishes its work and generates an output. |
-| `execute_subagent_buffer_nonblocking`| Triggers a sub-agent to execute asynchronously in the background, allowing the parent agent to continue processing immediately. |
-| `execute_subagents_buffer_nonblocking`| Triggers sub-agents to execute asynchronously in the background, allowing the parent agent to continue processing immediately. |
-| `write_buffer_in_workspace` | Proposes new content for a live Emacs buffer, routing through the `macher` context API to create a virtual patch for review. |
-| `write_and_commit_buffer_in_workspace` | Directly overwrites an Emacs buffer and fast-forwards the context to synchronise the agent's awareness. |
-| `edit_buffer_in_workspace` | Proposes an exact string replacement in a live Emacs buffer, routing through the `macher` context API to create a virtual patch for review. |
-| `multi_edit_buffer_in_workspace` | Proposes multiple exact string replacements in a live Emacs buffer sequentially. |
-| `read_buffer_in_workspace` | Reads a buffer's contents via the `macher` context, returning proposed virtual edits if modified, or the live state otherwise. |
-| `list_buffers_in_workspace` | Returns a filtered list of all active orchestrator and sub-agent buffers within the agent's explicitly allowed context scope. |
-| `search_buffers_in_workspace` | Performs a regex search across all allowed agent buffers, returning matching text and their line numbers. |
-| `submit_task_result` | Used strictly by worker sub-agents to submit their final, synthesised answer back to the parent orchestrator. |
+| Tool Name                              | Description                                                                                                                                                |
+|:---------------------------------------|:-----------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `spawn_subagent`                       | Creates a new, isolated sub-agent in the current project directory, safely inheriting the parent agent's virtual state and persistent context.             |
+| `delegate_task_to_subagents`           | Writes instructions to sub-agents with strict submission reminders and waits for its final synthesised response.                                           |
+| `execute_subagents`                    | Triggers an array of sub-agents to execute. Supports an optional flag to toggle between blocking the parent agent or running completely in the background. |
+| `write_buffer_in_workspace`            | Proposes new content for a live Emacs buffer, routing through the `macher` context API to create a virtual patch for review.                               |
+| `write_and_commit_buffer_in_workspace` | Directly overwrites an Emacs buffer and fast-forwards the context to synchronise the agent's awareness.                                                    |
+| `multi_edit_buffer_in_workspace`       | Proposes multiple exact string replacements in a live Emacs buffer sequentially.                                                                           |
+| `read_buffer_in_workspace`             | Reads a buffer's contents via the `macher` context, returning proposed virtual edits if modified, or the live state otherwise.                             |
+| `list_buffers_in_workspace`            | Returns a filtered list of all active orchestrator and sub-agent buffers within the agent's explicitly allowed context scope.                              |
+| `search_buffers_in_workspace`          | Performs a regex search across all allowed agent buffers, returning matching text and their line numbers.                                                  |
+| `submit_task_result`                   | Used strictly by worker sub-agents to submit their final, synthesised answer back to the parent orchestrator.                                              |
