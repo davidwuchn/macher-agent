@@ -51,22 +51,18 @@
 (defun macher-agent--update-context-file (context path new-content)
   "Update the virtual NEW-CONTENT for PATH in the macher CONTEXT.
 Can handle both physical file paths and pure Emacs buffer names."
-  (message "DEBUG [update-context]: Beginning memory update for '%s'" path)
   
   (let* ((contents (macher-context-contents context))
          (entry (assoc path contents)))
     (if entry
         (progn
-          (message "DEBUG [update-context]: Found existing context entry. Updating virtual state.")
           (setcdr (cdr entry) new-content))
       (progn
-        (message "DEBUG [update-context]: No existing entry found. Creating new memory record.")
         (let ((orig (macher-agent--get-buffer-content path)))
           (setf (macher-context-contents context)
                 (cons (cons path (cons orig new-content)) contents)))))
     
     (setf (macher-context-dirty-p context) t)
-    (message "DEBUG [update-context]: Context marked as dirty. Firing mutation hooks.")
     (run-hooks 'macher-agent-context-mutated-hook)))
 
 (defun macher-agent--read-context-file (context path)

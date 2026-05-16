@@ -271,21 +271,14 @@ Restores FSM binding so the macher patch engine can read the virtual edits."
                                    (:name "content" :type string :description "The proposed new content for the buffer")))
                           (buffer_name content)
                           
-                          (message "DEBUG [write-tool]: Invoked with raw buffer_name: '%s'" buffer_name)
                           
                           (let* ((actual-name (macher-agent--resolve-buffer-name buffer_name)))
-                            (message "DEBUG [write-tool]: Resolved actual-name to: '%s'" actual-name)
                             
                             (let ((buf (get-buffer actual-name)))
                               (if buf
-                                  (message "DEBUG [write-tool]: Target buffer '%s' already exists in Emacs memory." actual-name)
-                                (message "DEBUG [write-tool]: Target buffer '%s' missing. Calling get-buffer-create..." actual-name)
-                                (get-buffer-create actual-name)))
+                                  (get-buffer-create actual-name)))
                             
-                            (message "DEBUG [write-tool]: Proceeding to update virtual context...")
                             (macher-agent--update-context-file (macher-agent-current-context) actual-name content)
-                            (message "DEBUG [write-tool]: Context update complete.")
-                            
                             (format "SUCCESS: Virtual edit recorded for buffer '%s'. A patch will be generated at the end of the turn." actual-name)))
 
 (macher-agent-define-tool macher-agent-list-buffers-in-workspace-tool
