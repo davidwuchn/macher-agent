@@ -68,7 +68,85 @@
                                       (expect (car pair) :to-equal "v2-remote")
                                       (expect (cdr pair) :to-equal "v2-remote"))
                                     
-                                    (delete-directory test-dir t)))))
+                                    (delete-directory test-dir t)))
+
+                              (it "discards unapplied buffer patches to prevent ghost diffs"
+                                  (let* ((ctx (macher--make-context))
+                                         (buf-name "ghost-buffer")
+                                         (buf (get-buffer-create buf-name)))
+                                    (with-current-buffer buf 
+                                      (erase-buffer)
+                                      (insert "original state"))
+                                    
+                                    ;; 1. Simulate the agent proposing a change that hasn't been applied yet
+                                    (push (cons buf-name (cons "original state" "proposed ghost state")) 
+                                          (macher-context-contents ctx))
+                                    (setf (macher-context-dirty-p ctx) t)
+                                    
+                                    ;; 2. Run the sync (simulating the start of a new turn where the user ignored the patch)
+                                    (macher-agent--auto-sync-context ctx)
+                                    
+                                    ;; 3. Verify the edit was wiped from memory
+                                    (let* ((entry (assoc buf-name (macher-context-contents ctx)))
+                                           (new-content (cddr entry)))
+                                      (expect new-content :to-equal "original state")
+                                      (expect (macher-context-dirty-p ctx) :to-be nil))
+                                    
+                                    (kill-buffer buf))))
+
+                    (it "splits pure buffers from physical files for independent diff generation"
+                        (let* ((ctx (macher--make-context))
+                               (file-path (expand-file-name "dummy-file.txt" temporary-file-directory))
+                               (pure-name "*macher-dummy-buf*")
+                               (file-buf (find-file-noselect file-path))
+                               (pure-buf (get-buffer-create pure-name)))
+                          
+                          ;; 1. Add one physical file and one pure buffer to the context
+                          (push (cons file-path (cons "a" "b")) (macher-context-contents ctx))
+                          (push (cons pure-name (cons "x" "y")) (macher-context-contents ctx))
+                          
+                          ;; 2. Run the splitter
+                          (let* ((split (macher-agent--split-context ctx))
+                                 (file-ctx (car split))
+                                 (buf-ctx (cdr split)))
+                            
+                            ;; 3. Verify physical files went to the left (car)
+                            (expect (assoc file-path (macher-context-contents file-ctx)) :to-be-truthy)
+                            (expect (assoc pure-name (macher-context-contents file-ctx)) :to-be nil)
+                            
+                            ;; 4. Verify pure buffers went to the right (cdr)
+                            (expect (assoc pure-name (macher-context-contents buf-ctx)) :to-be-truthy)
+                            (expect (assoc file-path (macher-context-contents buf-ctx)) :to-be nil))
+                          
+                          (kill-buffer file-buf)
+                          (kill-buffer pure-buf)))
+
+                    (it "forcefully injects :macher--context into the FSM info plist to awaken the native UI"
+                        (let* ((fsm (gptel-make-fsm))
+                               (ctx (macher--make-context :dirty-p t))
+                               (get-context (lambda () ctx)))
+                          
+                          (spy-on 'macher-process-request)
+                          
+                          ;; 1. Run our Proxy Bridge
+                          (macher-agent--bridge-context-advice 
+                           (lambda (f get) nil) ; Mock the native orig-fun
+                           fsm 
+                           get-context)
+                          
+                          ;; 2. Extract the termination handler safely from the spy records.
+                          ;; FIX: spy-calls-args-for requires the exact call index (0)
+                          (let* ((args (spy-calls-args-for 'macher--add-termination-handler 0))
+                                 (term-handler (cadr args)))
+                            
+                            (funcall term-handler fsm)
+                            
+                            ;; 3. Verify the bridge successfully injected the context into the precise native slot
+                            (let ((info (gptel-fsm-info fsm)))
+                              (expect (plist-get info :macher--context) :to-be ctx))
+                            
+                            ;; 4. Verify the native UI engine was called
+                            (expect 'macher-process-request :to-have-been-called-with 'complete fsm)))))
 
           (describe "Orchestration Tools (macher-agent-gptel-tools.el)"
                     (it "guarantees list_buffers_in_workspace output perfectly matches context-tree buffer categorisation"
@@ -116,8 +194,6 @@
                           (spy-on 'gptel-send :and-call-fake
                                   (lambda ()
                                     (with-current-buffer buf
-                                      ;; FIX: Pass actual buffer positions instead of nil to prevent
-                                      ;; native gptel listeners from crashing with type errors.
                                       (run-hook-with-args 'gptel-post-response-functions (point-min) (point-max)))))
 
                           (macher-agent--dispatch-and-wait buf callback)
@@ -149,17 +225,19 @@
                     (it "ensures target buffer exists when using write_buffer_in_workspace to support patch UI"
                         (let* ((ctx (macher--make-context :contents nil))
                                (tool-fn (gptel-tool-function macher-agent-write-buffer-in-workspace-tool)))
-                          (let ((macher-agent--persistent-context ctx))
-                            (funcall tool-fn "*new-virtual-asset*" "Ghost content"))
+                          (spy-on 'macher-agent-current-context :and-return-value ctx)
+                          
+                          (funcall tool-fn "*new-virtual-asset*" "Ghost content")
                           
                           (expect (assoc "*new-virtual-asset*" (macher-context-contents ctx)) :not :to-be nil)
                           ;; Assert that the buffer WAS created so the patch engine can diff against it
                           (expect (buffer-live-p (get-buffer "*new-virtual-asset*")) :to-be t)))
+                    
                     (it "rejects fuzzy security matching in read_buffer_in_workspace"
                         (let* ((ctx (macher--make-context :contents '(("*scratch*" . ("" . "content")))))
                                (tool-fn (gptel-tool-function macher-agent-read-buffer-in-workspace-tool)))
-                          (let ((macher-agent--persistent-context ctx)
-                                (threw nil))
+                          (spy-on 'macher-agent-current-context :and-return-value ctx)
+                          (let ((threw nil))
                             (condition-case err
                                 (funcall tool-fn "scratch")
                               (error (setq threw t)
@@ -177,8 +255,9 @@
                     (it "write_buffer_in_workspace registers a virtual edit safely"
                         (let* ((ctx (macher--make-context :contents '(("test-buf" . ("orig" . "orig")))))
                                (tool-fn (gptel-tool-function macher-agent-write-buffer-in-workspace-tool)))
-                          (let* ((macher-agent--persistent-context ctx)
-                                 (response (funcall tool-fn "test-buf" "New virtual content")))
+                          (spy-on 'macher-agent-current-context :and-return-value ctx)
+                          
+                          (let* ((response (funcall tool-fn "test-buf" "New virtual content")))
                             (expect response :to-match "SUCCESS")
                             (expect (macher-context-dirty-p ctx) :to-be t)
                             (expect (cdr (cdr (assoc "test-buf" (macher-context-contents ctx)))) :to-equal "New virtual content")))))

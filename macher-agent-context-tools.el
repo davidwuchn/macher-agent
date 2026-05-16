@@ -5,6 +5,10 @@
 (require 'macher)
 (require 'macher-agent-vfs)
 
+;; Forward declaration to avoid byte-compiler warnings, as this function
+;; is defined in macher-agent-context.el
+(declare-function macher-agent-current-context "macher-agent-context")
+
 (defun macher-agent--get-context-edits (context)
   "Extract file paths and virtual contents from the macher CONTEXT."
   (when context
@@ -80,8 +84,11 @@
       :args ,args
       :category ,cat
       :async t
-      :function (lambda (context callback &rest tool-args)
-                  (let* ((workspace (macher-context-workspace context))
+      ;; Dropped the explicit `context` parameter here to align with standard gptel async signatures
+      :function (lambda (callback &rest tool-args)
+                  ;; Dynamically resolve the context here rather than relying on native injection
+                  (let* ((context (macher-agent-current-context))
+                         (workspace (macher-context-workspace context))
                          (project-root (file-name-as-directory (macher--workspace-root workspace)))
                          (pending-edits (macher-agent--get-context-edits context))
                          (call-args (if (and tool-args (keywordp (car tool-args)))

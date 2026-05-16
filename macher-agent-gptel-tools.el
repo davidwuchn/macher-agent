@@ -83,26 +83,23 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
 
 (defun macher-agent--dispatch-and-wait (buf callback)
   "Trigger gptel-send and handle response via native lifecycle hooks.
-Restores FSM binding so the macher patch engine can read the virtual edits."
+Relies on macher-agent--bridge-context-advice to safely bind virtual memory."
   (with-current-buffer buf
     (macher-agent--show-ui buf)
     (let ((response-hook nil)
           (transform-hook nil))
       
-      ;; 1. Catch the FSM upon creation to bind our context (CRITICAL FOR PATCH UI)
+      ;; 1. Catch the FSM upon creation just to track the latest state
       (setq transform-hook
             (lambda (async-fn fsm)
-              (remove-hook 'gptel-prompt-transform-functions transform-hook :local)
               (setq-local macher--fsm-latest fsm)
-              ;; Bind the virtual memory so the patch UI can read what was written
-              (macher-agent--fsm-put-context fsm (macher-agent-current-context))
+              ;; REMOVED: Manual context stapling. The Advice bridge handles this safely now.
               (funcall async-fn)))
       (add-hook 'gptel-prompt-transform-functions transform-hook nil t)
       
       ;; 2. Handle completion naturally
       (setq response-hook
             (lambda (response info)
-              (remove-hook 'gptel-post-response-functions response-hook :local)
               (let ((res (buffer-local-value 'macher-agent--final-result buf)))
                 (if res
                     (progn
@@ -271,12 +268,10 @@ Restores FSM binding so the macher patch engine can read the virtual edits."
                                    (:name "content" :type string :description "The proposed new content for the buffer")))
                           (buffer_name content)
                           
-                          
                           (let* ((actual-name (macher-agent--resolve-buffer-name buffer_name)))
                             
-                            (let ((buf (get-buffer actual-name)))
-                              (if buf
-                                  (get-buffer-create actual-name)))
+                            ;; Unconditionally ensure the buffer exists in Emacs memory
+                            (get-buffer-create actual-name)
                             
                             (macher-agent--update-context-file (macher-agent-current-context) actual-name content)
                             (format "SUCCESS: Virtual edit recorded for buffer '%s'. A patch will be generated at the end of the turn." actual-name)))

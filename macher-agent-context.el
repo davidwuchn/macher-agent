@@ -235,28 +235,141 @@ Optional ROOT-DIR is used to determine if a file resides within the workspace."
   "Adapter to securely retrieve the macher context from the gptel FSM."
   (plist-get (gptel-fsm-info fsm) :macher--context))
 
-(defvar macher-agent-context-resolved-functions nil
-  "Abnormal hook run when a macher context is lazily resolved for a request.
+(defun macher-agent-current-context ()
+  "Dynamically resolve the active agent context for tool execution."
+  (let* ((fsm (bound-and-true-p macher--fsm-latest))
+         (fsm-ctx (when fsm (macher-agent--fsm-get-context fsm)))
+         (pers-ctx (bound-and-true-p macher-agent--persistent-context)))
+    (cond
+     (pers-ctx pers-ctx)
+     (fsm-ctx
+      (setq-local macher-agent--persistent-context fsm-ctx)
+      fsm-ctx)
+     (t
+      (let ((new-ctx (macher--make-context
+                      :workspace (when (fboundp 'macher-workspace) (macher-workspace))
+                      :process-request-function (when (boundp 'macher-process-request-function) 
+                                                  macher-process-request-function))))
+        (setq-local macher-agent--persistent-context new-ctx)
+        new-ctx)))))
 
-Functions are called with two arguments: (CONTEXT FSM).
-Functions can be used to modify the CONTEXT object, trigger side-effects,
-or update the FSM state.")
+;; --- Bridge to Native Macher Patch Engine ---
 
+(defun macher-agent--bridge-context-advice (orig-fun fsm get-context)
+  "Bridge the native macher setup with the agent's persistent memory by proxying the context generator."
+  (let* ((info (gptel-fsm-info fsm))
+         (buf (plist-get info :buffer))
+         (pers-ctx (when (buffer-live-p buf)
+                     (buffer-local-value 'macher-agent--persistent-context buf)))
+         (resolved-ctx nil))
+    
+    (when pers-ctx
+      (macher-agent--auto-sync-context pers-ctx))
+    
+    (let ((proxy-get-context
+           (lambda ()
+             (or resolved-ctx
+                 (setq resolved-ctx
+                       (or pers-ctx
+                           (let ((new-ctx (funcall get-context)))
+                             (when (buffer-live-p buf)
+                               (with-current-buffer buf
+                                 (setq-local macher-agent--persistent-context new-ctx)))
+                             new-ctx)))))))
+      
+      (funcall orig-fun fsm proxy-get-context)
+      
+      (let ((final-ctx (funcall proxy-get-context)))
+        (when final-ctx
+          (macher-agent--fsm-put-context fsm final-ctx)
+          
+          (macher--add-termination-handler
+           fsm
+           (lambda (terminated-fsm)
+             (let ((ctx (macher-agent--fsm-get-context terminated-fsm)))
+               (when (and ctx (macher-context-dirty-p ctx))
+                 (setf (gptel-fsm-info terminated-fsm)
+                       (plist-put (gptel-fsm-info terminated-fsm) :macher--context ctx))
+                 (macher-process-request 'complete terminated-fsm))))))))))
 
+;; Apply the new secure internal bridge
+(advice-add 'macher--setup-tools :around #'macher-agent--bridge-context-advice)
+
+;; --- Virtual Buffer Splitter ---
+
+(defun macher-agent--split-context (context)
+  "Splits the context into (file-context . buffer-context)."
+  (let ((files nil)
+        (buffers nil))
+    (dolist (entry (macher-context-contents context))
+      (let* ((path-or-name (car entry))
+             (buf (get-buffer path-or-name)))
+        (if (and buf (not (buffer-file-name buf)))
+            (push entry buffers)
+          (push entry files))))
+    (cons
+     (when files
+       (let ((c (copy-macher-context context)))
+         (setf (macher-context-contents c) (nreverse files))
+         c))
+     (when buffers
+       (let ((c (copy-macher-context context)))
+         (setf (macher-context-contents c) (nreverse buffers))
+         c)))))
+
+(defun macher-agent-process-request-split (reason context fsm)
+  "Processes the request by splitting file edits and pure buffer edits into two patch screens."
+  (when context
+    (when (macher-context-dirty-p context)
+      (let* ((split (macher-agent--split-context context))
+             (file-ctx (car split))
+             (buf-ctx (cdr split)))
+        
+        (when file-ctx
+          (macher--build-patch file-ctx fsm))
+        
+        (when buf-ctx
+          (cl-letf (((symbol-function 'macher-patch-buffer)
+                     (lambda (&optional workspace create)
+                       (let ((result (macher--get-buffer "virtual-buffers-patch" workspace create)))
+                         (when result
+                           (let ((target-buffer (car result))
+                                 (created-p (cdr result)))
+                             (when created-p
+                               (with-current-buffer target-buffer
+                                 (macher--patch-buffer-setup)
+                                 (run-hooks 'macher-patch-buffer-setup-hook)))
+                             target-buffer))))))
+            (macher--build-patch buf-ctx fsm)))))))
+
+;; Override the native default processor with our splitting processor
+(setq macher-process-request-function #'macher-agent-process-request-split)
 
 ;; --- 4. Interactive Commands ---
 
 (defun macher-agent-apply-patch ()
-  "Apply the current patch buffer using Emacs's native diff-mode."
+  "Apply the current patch buffer using external diff utilities to avoid collisions."
   (interactive)
   (unless (derived-mode-p 'diff-mode)
     (user-error "Not in a patch/diff buffer"))
-  (condition-case err
-      (progn
-        (diff-apply-buffer)
-        (message "SUCCESS: Patch applied safely via diff-mode."))
-    (error
-     (message "ERROR: Failed to apply patch safely: %s" (error-message-string err)))))
+  (let* ((patch-content (buffer-substring-no-properties (point-min) (point-max)))
+         (root (or (locate-dominating-file default-directory ".git") 
+                   default-directory))
+         (default-directory root)
+         (use-git (file-exists-p (expand-file-name ".git" root)))
+         (cmd (if use-git "git" "patch"))
+         (args (if use-git '("apply" "-") '("-p1"))))
+    (with-temp-buffer
+      (insert patch-content)
+      (let ((exit-code (apply #'call-process-region 
+                              (point-min) (point-max) 
+                              cmd nil "*macher-patch-out*" nil args)))
+        (if (= exit-code 0)
+            (progn
+              (message "SUCCESS: Patch applied safely via %s." cmd)
+              (kill-buffer (get-buffer "*macher-patch-out*")))
+          (pop-to-buffer "*macher-patch-out*")
+          (message "ERROR: Failed to apply patch safely."))))))
 
 (defun macher-agent-insert-patch ()
   "Insert the current workspace's patch into the chat buffer to continue working."
@@ -270,12 +383,9 @@ or update the FSM state.")
       (insert "\nHere is your proposed patch:\n```diff\n" content "\n```\n"))))
 
 (defun macher-agent-apply-virtual-buffers ()
-  "Apply proposed virtual edits directly to live Emacs buffers.
-This bypasses external patch utilities, which expect physical files. As an alternative to ediff-patch-buffer"
+  "Apply proposed virtual edits directly to live Emacs buffers."
   (interactive)
   (let* ((workspace (when (fboundp 'macher-workspace) (macher-workspace)))
-         ;; 1. Look for memory in the current buffer
-         ;; 2. Fallback: Search all live buffers for one sharing the same workspace that HAS memory
          (context (or (bound-and-true-p macher-agent--persistent-context)
                       (when (bound-and-true-p macher--fsm-latest)
                         (macher-agent--fsm-get-context macher--fsm-latest))
@@ -291,7 +401,6 @@ This bypasses external patch utilities, which expect physical files. As an alter
     (dolist (entry (macher-context-contents context))
       (let* ((path-or-name (car entry))
              (new-content (cddr entry)))
-        ;; Check if it's a pure buffer that isn't visiting a file
         (let ((buf (get-buffer path-or-name)))
           (when (and buf new-content (not (buffer-file-name buf)))
             (with-current-buffer buf
@@ -299,35 +408,8 @@ This bypasses external patch utilities, which expect physical files. As an alter
               (insert new-content))
             (cl-incf applied-count)))))
     
-    ;; Sync context so the agent knows it was applied
     (macher-agent--auto-sync-context context)
     (message "SUCCESS: Applied virtual changes to %d Emacs buffer(s)." applied-count)))
-
-;; --- Bridge to Native Macher Patch Engine ---
-
-(defun macher-agent--bridge-context-advice (orig-fun fsm get-context)
-  "Bridge the native macher setup with the agent's persistent memory."
-  ;; 1. Run native setup
-  (funcall orig-fun fsm get-context)
-  
-  ;; 2. Force macher.el to initialize its internal state (awakens the native UI handler)
-  (let* ((info (gptel-fsm-info fsm))
-         (buf (plist-get info :buffer))
-         (pers-ctx (when (buffer-live-p buf)
-                     (buffer-local-value 'macher-agent--persistent-context buf)))
-         (new-ctx (funcall get-context)))
-    
-    (when new-ctx
-      (if pers-ctx
-          ;; 3a. Multi-turn: Overwrite macher's blank slate with our persistent memory
-          (macher-agent--fsm-put-context fsm pers-ctx)
-        ;; 3b. Turn 1: Save the initial blank slate as our persistent memory
-        (when (buffer-live-p buf)
-          (with-current-buffer buf
-            (setq-local macher-agent--persistent-context new-ctx)))))))
-
-;; Apply the new secure internal bridge
-(advice-add 'macher--setup-tools :around #'macher-agent--bridge-context-advice)
 
 (provide 'macher-agent-context)
 ;;; macher-agent-context.el ends here
