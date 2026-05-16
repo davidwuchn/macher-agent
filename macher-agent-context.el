@@ -123,6 +123,23 @@ Can handle both physical file paths and pure Emacs buffer names."
 
 ;; --- 3. Context Synchronisation & Persistence ---
 
+(defun macher-agent--clone-context (ctx)
+  "Return a deep copy of the context object."
+  (copy-tree ctx))
+
+(defun macher-agent--merge-contexts (parent-ctx child-ctx)
+  "Append all dirty file pairs from CHILD-CTX back into PARENT-CTX."
+  (let ((parent-contents (macher-context-contents parent-ctx))
+        (child-contents (macher-context-contents child-ctx)))
+    (dolist (child-entry child-contents)
+      (let* ((path (car child-entry))
+             (orig-new (cdr child-entry))
+             (orig (car orig-new))
+             (new (cdr orig-new)))
+        ;; Only merge if content is dirty (or was modified)
+        (unless (equal orig new)
+          (macher-agent--update-context-file parent-ctx path new))))))
+
 (defun macher-agent--auto-sync-context (ctx &optional fsm &rest _args)
   "Check live buffers and physical disk to fast-forward the agent's memory using strict three-way merge logic.
 

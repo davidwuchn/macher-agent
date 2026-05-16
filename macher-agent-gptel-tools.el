@@ -47,17 +47,31 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
   "Execute multiple sub-agents concurrently using event-driven callbacks."
   (let ((pending-count (length buffers))
         (results nil)
-        (errors nil))
+        (errors nil)
+        (master-ctx (macher-agent-current-context)))
     (cl-labels
         ((check-done ()
            (when (= pending-count 0)
              (if errors
                  (funcall callback (list :status 'error :error (string-join errors "\n")))
+               ;; Map over results and merge shadow contexts back
                (let ((final-output
-                      (mapconcat (lambda (r) (format "=== Response from %s ===\n%s" (car r) (cdr r)))
+                      (mapconcat (lambda (r) 
+                                   (let ((buf-name (car r))
+                                         (res (cdr r)))
+                                     ;; Merge back the shadow context if it exists
+                                     (when-let ((buf (get-buffer buf-name))
+                                                (shadow-ctx (buffer-local-value 'macher-agent--persistent-context buf)))
+                                       (macher-agent--merge-contexts master-ctx shadow-ctx))
+                                     (format "=== Response from %s ===\n%s" buf-name res)))
                                  (nreverse results) "\n\n")))
                  (funcall callback (list :status 'success :data (format "All sub-agents completed. Outputs:\n\n%s" final-output))))))))
       (dolist (buf buffers)
+        ;; Clone context and assign buffer-locally
+        (let ((shadow-ctx (macher-agent--clone-context master-ctx)))
+          (with-current-buffer buf
+            (setq-local macher-agent--persistent-context shadow-ctx)))
+        
         (macher-agent--dispatch-and-wait
          buf
          (lambda (result)
@@ -68,65 +82,24 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
            (check-done)))))))
 
 (defun macher-agent--dispatch-and-wait (buf callback)
-  "Trigger gptel-send and securely capture the FSM via a transient transform."
+  "Trigger gptel-send and handle response via gptel-post-response-functions."
   (with-current-buffer buf
     (macher-agent--show-ui buf)
-    (let ((capture-transform nil))
-      (setq capture-transform
-            (lambda (transform-cb fsm)
-              ;; 1. Remove ourselves immediately so we only run for this specific request
-              (setq-local gptel-prompt-transform-functions
-                          (remove capture-transform gptel-prompt-transform-functions))
+    (let ((response-hook nil))
+      (setq response-hook
+            (lambda (response info)
+              ;; 1. Remove ourselves immediately
+              (remove-hook 'gptel-post-response-functions response-hook :local)
               
-              ;; 2. Attach the termination handler directly to the FSM before the network request starts
-              (macher--add-termination-handler
-               fsm
-               (lambda (_term-fsm)
-                 (let ((res (buffer-local-value 'macher-agent--final-result buf)))
-                   (if res
-                       (progn
-                         (macher-agent--hide-ui buf)
-                         (funcall callback (list :status 'success :data res)))
-                     ;; Handle continuation or abort
-                     (run-at-time 0.5 nil
-                                  (lambda ()
-                                    (let ((new-fsm (buffer-local-value 'macher--fsm-latest buf)))
-                                      (if (and new-fsm (not (eq new-fsm fsm)))
-                                          (progn
-                                            ;; Forward context across continuations
-                                            (let ((ctx (macher-agent--fsm-get-context fsm)))
-                                              (when ctx (macher-agent--fsm-put-context new-fsm ctx)))
-                                            (macher-agent--wait-for-fsm buf new-fsm callback))
-                                        (funcall callback (list :status 'error :error (format "ERROR: Buffer '%s' stopped silently without calling submit_task_result (Check if process was aborted)." (buffer-name buf))))))))))))
-              
-              ;; 3. Proceed with the standard transform chain
-              (funcall transform-cb)))
-      
-      ;; Prepend the transient transform
-      (add-hook 'gptel-prompt-transform-functions capture-transform nil t)
-      
-      ;; Fire!
-      (gptel-send))))
-
-(defun macher-agent--wait-for-fsm (buf fsm callback)
-  "Securely wait for a continuation FSM to terminate."
-  (macher--add-termination-handler
-   fsm
-   (lambda (_term-fsm)
-     (let ((res (buffer-local-value 'macher-agent--final-result buf)))
-       (if res
-           (progn
-             (macher-agent--hide-ui buf)
-             (funcall callback (list :status 'success :data res)))
-         (run-at-time 0.5 nil
-                      (lambda ()
-                        (let ((new-fsm (buffer-local-value 'macher--fsm-latest buf)))
-                          (if (and new-fsm (not (eq new-fsm fsm)))
-                              (progn
-                                (let ((ctx (macher-agent--fsm-get-context fsm)))
-                                  (when ctx (macher-agent--fsm-put-context new-fsm ctx)))
-                                (macher-agent--wait-for-fsm buf new-fsm callback))
-                            (funcall callback (list :status 'error :error (format "ERROR: Buffer '%s' stopped silently." (buffer-name buf)))))))))))))
+              ;; 2. Handle completion
+              (let ((res (buffer-local-value 'macher-agent--final-result buf)))
+                (if res
+                    (progn
+                      (macher-agent--hide-ui buf)
+                      (funcall callback (list :status 'success :data res)))
+                  (funcall callback (list :status 'error :error (format "ERROR: Buffer '%s' stopped silently without calling submit_task_result." (buffer-name buf))))))))
+      (add-hook 'gptel-post-response-functions response-hook nil t))
+    (gptel-send)))
 
 (defun macher-agent--set-system-message (msg)
   "Adapter function to safely set the gptel system message without hardcoding internals."
@@ -152,6 +125,16 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
         (lambda ,all-lambda-args
           ,docstring
           (let ((context (macher-agent-current-context)))
+            ;; Middleware: Security check for buffer arguments
+            (dolist (arg-name '("buffer_name" "buffer_names"))
+              (let ((arg-sym (intern arg-name)))
+                (when (memq arg-sym ',clean-args)
+                  (let ((val (symbol-value arg-sym)))
+                    (when val
+                      (if (listp val)
+                          (dolist (item val) (macher-agent--ensure-access context item))
+                        (macher-agent--ensure-access context val)))))))
+
             (let ((parsed-args
                    (mapcar (lambda (arg)
                              (if (and (stringp arg)
@@ -279,12 +262,10 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
                            :args '((:name "buffer_name" :type string :description "The name of the target buffer")
                                    (:name "content" :type string :description "The proposed new content for the buffer")))
                           (buffer_name content)
-                          (let* ((context (macher-agent-current-context))
-                                 (actual-name (macher-agent--resolve-buffer-name buffer_name)))
-                            (macher-agent--ensure-access context actual-name)
+                          (let* ((actual-name (macher-agent--resolve-buffer-name buffer_name)))
                             (unless (get-buffer actual-name)
                               (get-buffer-create actual-name))
-                            (macher-agent--update-context-file context actual-name content)
+                            (macher-agent--update-context-file (macher-agent-current-context) actual-name content)
                             (format "SUCCESS: Virtual edit recorded for buffer '%s'. A patch will be generated at the end of the turn." actual-name)))
 
 (macher-agent-define-tool macher-agent-write-and-commit-buffer-in-workspace-tool
