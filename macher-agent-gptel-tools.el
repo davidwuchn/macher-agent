@@ -125,16 +125,6 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
         (lambda ,all-lambda-args
           ,docstring
           (let ((context (macher-agent-current-context)))
-            ;; Middleware: Security check for buffer arguments
-            (dolist (arg-name '("buffer_name" "buffer_names"))
-              (let ((arg-sym (intern arg-name)))
-                (when (memq arg-sym ',clean-args)
-                  (let ((val (symbol-value arg-sym)))
-                    (when val
-                      (if (listp val)
-                          (dolist (item val) (macher-agent--ensure-access context item))
-                        (macher-agent--ensure-access context val)))))))
-
             (let ((parsed-args
                    (mapcar (lambda (arg)
                              (if (and (stringp arg)
@@ -145,6 +135,17 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
                                    (error arg))
                                arg))
                            (list ,@clean-args))))
+
+              ;; Middleware: Security check for buffer arguments after JSON parsing
+              (let ((arg-alist (cl-mapcar #'cons ',clean-args parsed-args)))
+                (dolist (arg-name '("buffer_name" "buffer_names"))
+                  (let* ((arg-sym (intern arg-name))
+                         (val (cdr (assq arg-sym arg-alist))))
+                    (when val
+                      (if (or (listp val) (vectorp val))
+                          (cl-loop for item being the elements of val do
+                                   (macher-agent--ensure-access context item))
+                        (macher-agent--ensure-access context val))))))
 
               ,(if async
                    `(let ((callback (lambda (plist-result)
@@ -209,10 +210,6 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
                             
                             (cl-loop for task across tasks
                                      for buf-name = (plist-get task :buffer_name)
-                                     do (macher-agent--ensure-access ctx buf-name))
-                            
-                            (cl-loop for task across tasks
-                                     for buf-name = (plist-get task :buffer_name)
                                      for instructions = (plist-get task :instructions)
                                      for buf = (get-buffer buf-name)
                                      do (if (buffer-live-p buf)
@@ -234,11 +231,9 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
                                           :description "If true, pause the parent agent and wait for all triggered agents to complete. If false (default), run asynchronously in the background.")))
                           (buffer_names &optional blocking)
                           (unless (vectorp buffer_names) (error "ERROR: 'buffer_names' parameter must be an array of strings."))
-                          (let ((ctx (macher-agent-current-context))
-                                (target-buffers nil))
+                          (let ((target-buffers nil))
                             (cl-loop for buffer_name across buffer_names do
                                      (let ((actual-name (macher-agent--resolve-buffer-name buffer_name)))
-                                       (macher-agent--ensure-access ctx actual-name)
                                        (let ((buf (get-buffer actual-name)))
                                          (unless (buffer-live-p buf)
                                            (error "ERROR: Buffer '%s' does not exist." actual-name))
@@ -268,24 +263,6 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
                             (macher-agent--update-context-file (macher-agent-current-context) actual-name content)
                             (format "SUCCESS: Virtual edit recorded for buffer '%s'. A patch will be generated at the end of the turn." actual-name)))
 
-(macher-agent-define-tool macher-agent-write-and-commit-buffer-in-workspace-tool
-                          ("Directly overwrite an Emacs buffer and synchronise the agent's memory immediately, bypassing the patch review step."
-                           "commit"
-                           :args '((:name "buffer_name" :type string)
-                                   (:name "content" :type string)))
-                          (buffer_name content)
-                          (let* ((context (macher-agent-current-context))
-                                 (actual-name (macher-agent--resolve-buffer-name buffer_name)))
-                            (macher-agent--ensure-access context actual-name)
-                            (let ((target-buffer (get-buffer-create actual-name)))
-                              (with-current-buffer target-buffer
-                                (erase-buffer)
-                                (insert content))
-                              (when context
-                                (macher-agent--update-context-file context actual-name content)
-                                (macher-agent--auto-sync-context context))
-                              (format "SUCCESS: Buffer '%s' has been directly overwritten and synchronised." actual-name))))
-
 (macher-agent-define-tool macher-agent-list-buffers-in-workspace-tool
                           ("List all buffers you currently have explicit access to. You cannot access buffers outside this list."
                            "ro")
@@ -294,8 +271,13 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
                                 (active-buffers nil))
                             (when context
                               (dolist (entry (macher-context-contents context))
-                                (let ((buf-name (car entry)))
-                                  (when (get-buffer buf-name)
+                                (let* ((buf-name (car entry))
+                                       (is-absolute (file-name-absolute-p buf-name))
+                                       (has-slash (string-match-p "/" buf-name))
+                                       (live-buf (get-buffer buf-name))
+                                       (is-file-buffer (and live-buf (buffer-file-name live-buf))))
+                                  ;; Filter out anything that matches the signature of a file path
+                                  (unless (or is-absolute has-slash is-file-buffer)
                                     (push buf-name active-buffers)))))
                             (if active-buffers
                                 (mapconcat #'identity (nreverse active-buffers) "\n")
@@ -311,15 +293,25 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
                             (when context
                               (dolist (entry (macher-context-contents context))
                                 (let* ((buf-name (car entry))
-                                       (buf (get-buffer buf-name)))
-                                  (when buf
-                                    (with-current-buffer buf
-                                      (save-excursion
-                                        (goto-char (point-min))
-                                        (while (re-search-forward pattern nil t)
-                                          (let* ((line (line-number-at-pos))
-                                                 (content (string-trim (thing-at-point 'line t))))
-                                            (push (format "%s:%d: %s" buf-name line content) results)))))))))
+                                       (is-absolute (file-name-absolute-p buf-name))
+                                       (has-slash (string-match-p "/" buf-name))
+                                       (live-buf (get-buffer buf-name))
+                                       (is-file-buffer (and live-buf (buffer-file-name live-buf))))
+                                  ;; Only search non-file buffers
+                                  (unless (or is-absolute has-slash is-file-buffer)
+                                    ;; Read from virtual memory if present, fallback to live buffer
+                                    (let ((content (or (cddr entry)
+                                                       (when live-buf 
+                                                         (with-current-buffer live-buf 
+                                                           (buffer-substring-no-properties (point-min) (point-max)))))))
+                                      (when content
+                                        (with-temp-buffer
+                                          (insert content)
+                                          (goto-char (point-min))
+                                          (while (re-search-forward pattern nil t)
+                                            (let* ((line (line-number-at-pos))
+                                                   (match-content (string-trim (thing-at-point 'line t))))
+                                              (push (format "%s:%d: %s" buf-name line match-content) results))))))))))
                             (if results
                                 (mapconcat #'identity (nreverse results) "\n")
                               (format "No matches found for '%s' in your scoped buffers." pattern))))
@@ -399,8 +391,7 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
 (defconst macher-agent-orchestrate-tools
   (list (gptel-tool-name macher-agent-spawn-subagent-tool)
         (gptel-tool-name macher-agent-delegate-tasks-to-subagents-tool)
-        (gptel-tool-name macher-agent-execute-subagents-tool)
-        (gptel-tool-name macher-agent-write-and-commit-buffer-in-workspace-tool))
+        (gptel-tool-name macher-agent-execute-subagents-tool))
   "Tools for managing and communicating with sub-agents.")
 
 (with-eval-after-load 'macher

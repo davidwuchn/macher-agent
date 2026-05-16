@@ -92,26 +92,15 @@
                     (it "reports an error if gptel-send aborts or fails silently"
                         (let* ((buf (generate-new-buffer "worker"))
                                (callback-called nil)
-                               (callback (lambda (msg) (setq callback-called msg)))
-                               (dummy-fsm (make-mock-fsm)))
-                          
-                          ;; 1. Fast-forward time so the 0.5s abort-check evaluates immediately
-                          (spy-on 'run-at-time :and-call-fake
-                                  (lambda (_time _repeat fn &rest args)
-                                    (apply fn args)))
+                               (callback (lambda (msg) (setq callback-called msg))))
 
-                          ;; 2. Simulate gptel-send firing and instantly running our transient transform hook
+                          ;; Simulate gptel-send firing and instantly triggering the post-response hook
                           (spy-on 'gptel-send :and-call-fake
                                   (lambda ()
                                     (with-current-buffer buf
-                                      (let ((transform (car gptel-prompt-transform-functions)))
-                                        (when transform
-                                          (funcall transform (lambda () nil) dummy-fsm))))))
-
-                          ;; 3. Simulate the network process dying (FSM terminates but no final result was set)
-                          (spy-on 'macher--add-termination-handler :and-call-fake
-                                  (lambda (_fsm handler)
-                                    (funcall handler dummy-fsm)))
+                                      ;; FIX: Pass actual buffer positions instead of nil to prevent
+                                      ;; native gptel listeners from crashing with type errors.
+                                      (run-hook-with-args 'gptel-post-response-functions (point-min) (point-max)))))
 
                           (macher-agent--dispatch-and-wait buf callback)
                           
@@ -139,6 +128,34 @@
                           (kill-buffer buf1)
                           (kill-buffer buf2)))
 
+                    (it "lists and searches virtual buffers even if they are not currently live in Emacs"
+                        (let* ((ctx (macher--make-context :contents '(("*virtual-agent*" . ("old" . "secret virtual content"))
+                                                                      ("/absolute/file.txt" . ("old" . "file content"))
+                                                                      ("relative/file.rs" . ("old" . "file content")))))
+                               (list-tool-fn (gptel-tool-function macher-agent-list-buffers-in-workspace-tool))
+                               (search-tool-fn (gptel-tool-function macher-agent-search-buffers-in-workspace-tool)))
+                          
+                          ;; Mock the context getter to return our custom context
+                          (spy-on 'macher-agent-current-context :and-return-value ctx)
+                          
+                          ;; Ensure the target buffer does NOT exist in live Emacs memory
+                          (when (get-buffer "*virtual-agent*")
+                            (kill-buffer "*virtual-agent*"))
+
+                          ;; Action 1: List Buffers
+                          (let ((list-result (funcall list-tool-fn)))
+                            ;; Should include pure buffers
+                            (expect list-result :to-match "\\*virtual-agent\\*")
+                            ;; Should NOT include paths with slashes or absolute paths
+                            (expect list-result :not :to-match "file\\.txt")
+                            (expect list-result :not :to-match "file\\.rs"))
+
+                          ;; Action 2: Search Buffers
+                          (let ((search-result (funcall search-tool-fn "secret")))
+                            ;; Should be able to search the virtual content directly
+                            (expect search-result :to-match "\\*virtual-agent\\*:1: secret virtual content")
+                            (expect search-result :not :to-match "file\\.txt"))))
+
                     (it "submit_task_result sets the final result buffer-locally"
                         (let* ((buf (generate-new-buffer "worker-buf"))
                                (tool-fn (gptel-tool-function macher-agent-submit-task-result-tool)))
@@ -164,7 +181,6 @@
                           (expect cmd :to-match "^rsync -a")
                           (expect cmd :to-match "--exclude=\\.git/")
                           (expect cmd :to-match "--exclude=node_modules/"))))
-
 
           (describe "Interactive Commands & State (macher-agent-orchestration.el)"
                     (it "macher-agent-add-subagent creates a buffer and tracks it globally"
