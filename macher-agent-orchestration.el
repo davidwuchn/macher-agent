@@ -25,8 +25,10 @@ from the UI, strictly mutating the payload context."
 Acts as the interactive wrapper that passes the user's selected buffer
 to the headless execution layer and reports success via message."
   (interactive "BAdd buffer to current agent's scope: ")
-  (let ((buf-name (if (stringp buffer) buffer (buffer-name buffer))))
-    (macher-agent--add-buffer-to-scope-headless buf-name macher-agent--persistent-context)
+  (let* ((buf-name (if (stringp buffer) buffer (buffer-name buffer)))
+         ;; Lazily initialise the context if it doesn't exist yet
+         (ctx (macher-agent-current-context)))
+    (macher-agent--add-buffer-to-scope-headless buf-name ctx)
     (message "SUCCESS: Added '%s' to the agent's restricted scope." buf-name)))
 
 (defun macher-agent--resolve-buffer-name (name)
@@ -83,6 +85,11 @@ sub-agent to `macher-agent-active-subagents`."
     (when (boundp 'macher-agent-active-subagents)
       (push (cons name full-dir) macher-agent-active-subagents))
     buf))
+
+(add-hook 'gptel-pre-response-functions
+          (lambda (&rest _)
+            (let ((ctx (macher-agent-current-context)))
+              (when ctx (macher-agent--auto-sync-context ctx)))))
 
 (provide 'macher-agent-orchestration)
 ;;; macher-agent-orchestration.el ends here

@@ -82,24 +82,36 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
            (check-done)))))))
 
 (defun macher-agent--dispatch-and-wait (buf callback)
-  "Trigger gptel-send and handle response via gptel-post-response-functions."
+  "Trigger gptel-send and handle response via native lifecycle hooks.
+Restores FSM binding so the macher patch engine can read the virtual edits."
   (with-current-buffer buf
     (macher-agent--show-ui buf)
-    (let ((response-hook nil))
+    (let ((response-hook nil)
+          (transform-hook nil))
+      
+      ;; 1. Catch the FSM upon creation to bind our context (CRITICAL FOR PATCH UI)
+      (setq transform-hook
+            (lambda (async-fn fsm)
+              (remove-hook 'gptel-prompt-transform-functions transform-hook :local)
+              (setq-local macher--fsm-latest fsm)
+              ;; Bind the virtual memory so the patch UI can read what was written
+              (macher-agent--fsm-put-context fsm (macher-agent-current-context))
+              (funcall async-fn)))
+      (add-hook 'gptel-prompt-transform-functions transform-hook nil t)
+      
+      ;; 2. Handle completion naturally
       (setq response-hook
             (lambda (response info)
-              ;; 1. Remove ourselves immediately
               (remove-hook 'gptel-post-response-functions response-hook :local)
-              
-              ;; 2. Handle completion
               (let ((res (buffer-local-value 'macher-agent--final-result buf)))
                 (if res
                     (progn
                       (macher-agent--hide-ui buf)
                       (funcall callback (list :status 'success :data res)))
                   (funcall callback (list :status 'error :error (format "ERROR: Buffer '%s' stopped silently without calling submit_task_result." (buffer-name buf))))))))
-      (add-hook 'gptel-post-response-functions response-hook nil t))
-    (gptel-send)))
+      (add-hook 'gptel-post-response-functions response-hook nil t)
+      
+      (gptel-send))))
 
 (defun macher-agent--set-system-message (msg)
   "Adapter function to safely set the gptel system message without hardcoding internals."
@@ -138,14 +150,15 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
 
               ;; Middleware: Security check for buffer arguments after JSON parsing
               (let ((arg-alist (cl-mapcar #'cons ',clean-args parsed-args)))
-                (dolist (arg-name '("buffer_name" "buffer_names"))
-                  (let* ((arg-sym (intern arg-name))
-                         (val (cdr (assq arg-sym arg-alist))))
-                    (when val
-                      (if (or (listp val) (vectorp val))
-                          (cl-loop for item being the elements of val do
-                                   (macher-agent--ensure-access context item))
-                        (macher-agent--ensure-access context val))))))
+                (unless (eq ',name-symbol 'macher-agent-write-buffer-in-workspace-tool)
+                  (dolist (arg-name '("buffer_name" "buffer_names"))
+                    (let* ((arg-sym (intern arg-name))
+                           (val (cdr (assq arg-sym arg-alist))))
+                      (when val
+                        (if (or (listp val) (vectorp val))
+                            (cl-loop for item being the elements of val do
+                                     (macher-agent--ensure-access context item))
+                          (macher-agent--ensure-access context val)))))))
 
               ,(if async
                    `(let ((callback (lambda (plist-result)
@@ -257,27 +270,38 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
                            :args '((:name "buffer_name" :type string :description "The name of the target buffer")
                                    (:name "content" :type string :description "The proposed new content for the buffer")))
                           (buffer_name content)
+                          
+                          (message "DEBUG [write-tool]: Invoked with raw buffer_name: '%s'" buffer_name)
+                          
                           (let* ((actual-name (macher-agent--resolve-buffer-name buffer_name)))
-                            (unless (get-buffer actual-name)
-                              (get-buffer-create actual-name))
+                            (message "DEBUG [write-tool]: Resolved actual-name to: '%s'" actual-name)
+                            
+                            (let ((buf (get-buffer actual-name)))
+                              (if buf
+                                  (message "DEBUG [write-tool]: Target buffer '%s' already exists in Emacs memory." actual-name)
+                                (message "DEBUG [write-tool]: Target buffer '%s' missing. Calling get-buffer-create..." actual-name)
+                                (get-buffer-create actual-name)))
+                            
+                            (message "DEBUG [write-tool]: Proceeding to update virtual context...")
                             (macher-agent--update-context-file (macher-agent-current-context) actual-name content)
+                            (message "DEBUG [write-tool]: Context update complete.")
+                            
                             (format "SUCCESS: Virtual edit recorded for buffer '%s'. A patch will be generated at the end of the turn." actual-name)))
 
 (macher-agent-define-tool macher-agent-list-buffers-in-workspace-tool
                           ("List all buffers you currently have explicit access to. You cannot access buffers outside this list."
                            "ro")
                           ()
-                          (let ((context (macher-agent-current-context))
-                                (active-buffers nil))
+                          (let* ((context (macher-agent-current-context))
+                                 (workspace (when context (macher-context-workspace context)))
+                                 (root-dir (when workspace (macher--workspace-root workspace)))
+                                 (active-buffers nil))
                             (when context
                               (dolist (entry (macher-context-contents context))
                                 (let* ((buf-name (car entry))
-                                       (is-absolute (file-name-absolute-p buf-name))
-                                       (has-slash (string-match-p "/" buf-name))
-                                       (live-buf (get-buffer buf-name))
-                                       (is-file-buffer (and live-buf (buffer-file-name live-buf))))
-                                  ;; Filter out anything that matches the signature of a file path
-                                  (unless (or is-absolute has-slash is-file-buffer)
+                                       (classification (macher-agent-context-classify-entry buf-name root-dir)))
+                                  ;; Include both pure buffers and external files
+                                  (when (memq classification '(buffer external))
                                     (push buf-name active-buffers)))))
                             (if active-buffers
                                 (mapconcat #'identity (nreverse active-buffers) "\n")
@@ -288,22 +312,19 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
                            "ro"
                            :args '((:name "pattern" :type string :description "The Emacs regex pattern to search for")))
                           (pattern)
-                          (let ((context (macher-agent-current-context))
-                                (results nil))
+                          (let* ((context (macher-agent-current-context))
+                                 (workspace (when context (macher-context-workspace context)))
+                                 (root-dir (when workspace (macher--workspace-root workspace)))
+                                 (results nil))
                             (when context
                               (dolist (entry (macher-context-contents context))
                                 (let* ((buf-name (car entry))
-                                       (is-absolute (file-name-absolute-p buf-name))
-                                       (has-slash (string-match-p "/" buf-name))
-                                       (live-buf (get-buffer buf-name))
-                                       (is-file-buffer (and live-buf (buffer-file-name live-buf))))
-                                  ;; Only search non-file buffers
-                                  (unless (or is-absolute has-slash is-file-buffer)
-                                    ;; Read from virtual memory if present, fallback to live buffer
+                                       (classification (macher-agent-context-classify-entry buf-name root-dir)))
+                                  ;; Include both pure buffers and external files
+                                  (when (memq classification '(buffer external))
+                                    ;; Read from virtual memory if present, fallback to live content
                                     (let ((content (or (cddr entry)
-                                                       (when live-buf 
-                                                         (with-current-buffer live-buf 
-                                                           (buffer-substring-no-properties (point-min) (point-max)))))))
+                                                       (macher-agent--get-buffer-content buf-name))))
                                       (when content
                                         (with-temp-buffer
                                           (insert content)

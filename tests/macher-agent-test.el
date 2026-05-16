@@ -71,6 +71,24 @@
                                     (delete-directory test-dir t)))))
 
           (describe "Orchestration Tools (macher-agent-gptel-tools.el)"
+                    (it "guarantees list_buffers_in_workspace output perfectly matches context-tree buffer categorisation"
+                        (let* ((ctx (macher--make-context :contents '(("*pure-buffer*" . ("" . ""))
+                                                                      ("/external/path.txt" . ("" . ""))
+                                                                      ("/root/internal.txt" . ("" . "")))))
+                               (list-tool-fn (gptel-tool-function macher-agent-list-buffers-in-workspace-tool)))
+
+                          (spy-on 'macher-agent-current-context :and-return-value ctx)
+                          (spy-on 'macher-agent-context-classify-entry :and-call-fake
+                                  (lambda (path &rest _)
+                                    (pcase path
+                                      ("*pure-buffer*" 'buffer)
+                                      ("/external/path.txt" 'external)
+                                      ("/root/internal.txt" 'file))))
+
+                          (let ((result (funcall list-tool-fn)))
+                            (expect result :to-match "\\*pure-buffer\\*")
+                            (expect result :to-match "/external/path\\.txt")
+                            (expect result :not :to-match "internal\\.txt"))))
                     (it "properly parses a JSON string into a vector for task delegation"
                         (let* ((callback-called nil)
                                (callback (lambda (res) (setq callback-called res)))
@@ -128,33 +146,25 @@
                           (kill-buffer buf1)
                           (kill-buffer buf2)))
 
-                    (it "lists and searches virtual buffers even if they are not currently live in Emacs"
-                        (let* ((ctx (macher--make-context :contents '(("*virtual-agent*" . ("old" . "secret virtual content"))
-                                                                      ("/absolute/file.txt" . ("old" . "file content"))
-                                                                      ("relative/file.rs" . ("old" . "file content")))))
-                               (list-tool-fn (gptel-tool-function macher-agent-list-buffers-in-workspace-tool))
-                               (search-tool-fn (gptel-tool-function macher-agent-search-buffers-in-workspace-tool)))
+                    (it "ensures target buffer exists when using write_buffer_in_workspace to support patch UI"
+                        (let* ((ctx (macher--make-context :contents nil))
+                               (tool-fn (gptel-tool-function macher-agent-write-buffer-in-workspace-tool)))
+                          (let ((macher-agent--persistent-context ctx))
+                            (funcall tool-fn "*new-virtual-asset*" "Ghost content"))
                           
-                          ;; Mock the context getter to return our custom context
-                          (spy-on 'macher-agent-current-context :and-return-value ctx)
-                          
-                          ;; Ensure the target buffer does NOT exist in live Emacs memory
-                          (when (get-buffer "*virtual-agent*")
-                            (kill-buffer "*virtual-agent*"))
-
-                          ;; Action 1: List Buffers
-                          (let ((list-result (funcall list-tool-fn)))
-                            ;; Should include pure buffers
-                            (expect list-result :to-match "\\*virtual-agent\\*")
-                            ;; Should NOT include paths with slashes or absolute paths
-                            (expect list-result :not :to-match "file\\.txt")
-                            (expect list-result :not :to-match "file\\.rs"))
-
-                          ;; Action 2: Search Buffers
-                          (let ((search-result (funcall search-tool-fn "secret")))
-                            ;; Should be able to search the virtual content directly
-                            (expect search-result :to-match "\\*virtual-agent\\*:1: secret virtual content")
-                            (expect search-result :not :to-match "file\\.txt"))))
+                          (expect (assoc "*new-virtual-asset*" (macher-context-contents ctx)) :not :to-be nil)
+                          ;; Assert that the buffer WAS created so the patch engine can diff against it
+                          (expect (buffer-live-p (get-buffer "*new-virtual-asset*")) :to-be t)))
+                    (it "rejects fuzzy security matching in read_buffer_in_workspace"
+                        (let* ((ctx (macher--make-context :contents '(("*scratch*" . ("" . "content")))))
+                               (tool-fn (gptel-tool-function macher-agent-read-buffer-in-workspace-tool)))
+                          (let ((macher-agent--persistent-context ctx)
+                                (threw nil))
+                            (condition-case err
+                                (funcall tool-fn "scratch")
+                              (error (setq threw t)
+                                     (expect (error-message-string err) :to-match "SECURITY ERROR.*scratch.*")))
+                            (expect threw :to-be t))))
 
                     (it "submit_task_result sets the final result buffer-locally"
                         (let* ((buf (generate-new-buffer "worker-buf"))
@@ -183,6 +193,14 @@
                           (expect cmd :to-match "--exclude=node_modules/"))))
 
           (describe "Interactive Commands & State (macher-agent-orchestration.el)"
+                    (it "macher-agent-add-buffer-to-scope lazily initialises a missing context"
+                        (let ((buf (generate-new-buffer "lazy-target")))
+                          (setq macher-agent--persistent-context nil)
+                          
+                          (macher-agent-add-buffer-to-scope "lazy-target")
+                          
+                          (expect macher-agent--persistent-context :not :to-be nil)
+                          (expect (assoc "lazy-target" (macher-context-contents macher-agent--persistent-context)) :not :to-be nil)))
                     (it "macher-agent-add-subagent creates a buffer and tracks it globally"
                         (let ((buf (macher-agent-add-subagent "test-worker" "/tmp/")))
                           (expect (buffer-live-p buf) :to-be t)

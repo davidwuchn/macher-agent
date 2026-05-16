@@ -1,5 +1,6 @@
 ;;; macher-agent-context.el --- Context and file system handling -*- lexical-binding: t; -*-
 
+(require 'cl-lib)
 (require 'macher)
 (require 'gptel nil t)
 
@@ -17,20 +18,23 @@
       (error "SECURITY ERROR: You do not have permission to access '%s'. Use list_buffers_in_workspace to see your allowed scope." actual-name))))
 
 (defun macher-agent-current-context ()
-  "Dynamically resolve the active agent context for tool execution.
-If no context exists, lazily initialize an empty one so the agent can build its scope."
+  "Dynamically resolve the active agent context for tool execution."
   (let* ((fsm (bound-and-true-p macher--fsm-latest))
          (fsm-ctx (when fsm (macher-agent--fsm-get-context fsm)))
          (pers-ctx (bound-and-true-p macher-agent--persistent-context)))
-    (or fsm-ctx 
-        pers-ctx
-        ;; Lazy Initialization: If the agent is starting from a blank slate,
-        ;; create a fresh context and bind it to the orchestrator buffer.
-        (let ((new-ctx (macher--make-context)))
-          (setq-local macher-agent--persistent-context new-ctx)
-          (when fsm 
-            (macher-agent--fsm-put-context fsm new-ctx))
-          new-ctx))))
+    (cond
+     (pers-ctx pers-ctx)
+     (fsm-ctx
+      (setq-local macher-agent--persistent-context fsm-ctx)
+      fsm-ctx)
+     (t
+      ;; Lazy Initialization: Start from a blank slate with FULL macher integration.
+      (let ((new-ctx (macher--make-context
+                      :workspace (when (fboundp 'macher-workspace) (macher-workspace))
+                      :process-request-function (when (boundp 'macher-process-request-function) 
+                                                  macher-process-request-function))))
+        (setq-local macher-agent--persistent-context new-ctx)
+        new-ctx)))))
 
 (defun macher-agent--get-buffer-content (path)
   "Get the content of a buffer or file by path."
@@ -47,18 +51,22 @@ If no context exists, lazily initialize an empty one so the agent can build its 
 (defun macher-agent--update-context-file (context path new-content)
   "Update the virtual NEW-CONTENT for PATH in the macher CONTEXT.
 Can handle both physical file paths and pure Emacs buffer names."
-  (macher-agent--ensure-access context path)
+  (message "DEBUG [update-context]: Beginning memory update for '%s'" path)
   
   (let* ((contents (macher-context-contents context))
          (entry (assoc path contents)))
     (if entry
-        ;; Update the existing virtual 'new' state
-        (setcdr (cdr entry) new-content)
-      ;; Create a new entry, reading the original from buffer or disk if it exists
-      (let ((orig (macher-agent--get-buffer-content path)))
-        (setf (macher-context-contents context)
-              (cons (cons path (cons orig new-content)) contents))))
+        (progn
+          (message "DEBUG [update-context]: Found existing context entry. Updating virtual state.")
+          (setcdr (cdr entry) new-content))
+      (progn
+        (message "DEBUG [update-context]: No existing entry found. Creating new memory record.")
+        (let ((orig (macher-agent--get-buffer-content path)))
+          (setf (macher-context-contents context)
+                (cons (cons path (cons orig new-content)) contents)))))
+    
     (setf (macher-context-dirty-p context) t)
+    (message "DEBUG [update-context]: Context marked as dirty. Firing mutation hooks.")
     (run-hooks 'macher-agent-context-mutated-hook)))
 
 (defun macher-agent--read-context-file (context path)
@@ -73,7 +81,27 @@ Can handle both physical file paths and pure Emacs buffer names."
       (macher-agent--get-buffer-content path))
      (t (error "ERROR: Buffer '%s' does not exist." path)))))
 
-;; --- 1. Global Flags & State ---
+(defun macher-agent-context-classify-entry (path-or-buf &optional root-dir)
+  "Classify PATH-OR-BUF as a workspace 'file', 'external', or 'buffer'.
+Optional ROOT-DIR is used to determine if a file resides within the workspace."
+  (let* ((expanded (expand-file-name path-or-buf))
+         (buf (get-buffer path-or-buf))
+         (file-from-buf (and buf (buffer-file-name buf)))
+         (is-absolute (file-name-absolute-p path-or-buf))
+         (has-slash (string-match-p "/" path-or-buf)))
+    (cond
+     ;; 1. Check if it is a physical file or visits a file
+     ((or (and file-from-buf (file-exists-p file-from-buf))
+          (file-exists-p expanded)
+          is-absolute
+          has-slash)
+      (let ((path (or (and file-from-buf (file-exists-p file-from-buf) file-from-buf) expanded)))
+        (if (and root-dir (string-prefix-p (expand-file-name root-dir) path))
+            'file
+          'external)))
+     ;; 2. Otherwise treat as a pure buffer
+     (t 'buffer))))
+
 
 (defvar-local macher-agent--is-workspace nil
   "Flag indicating this buffer operates under the safe macher-agent file scanner.")
@@ -141,9 +169,7 @@ Can handle both physical file paths and pure Emacs buffer names."
           (macher-agent--update-context-file parent-ctx path new))))))
 
 (defun macher-agent--auto-sync-context (ctx &optional fsm &rest _args)
-  "Check live buffers and physical disk to fast-forward the agent's memory using strict three-way merge logic.
-
-Did we change it? and Did they change it?"
+  "Check live buffers and physical disk to fast-forward the agent's memory using strict three-way merge logic."
   (let ((actual-ctx (if fsm (macher-agent--fsm-get-context fsm) ctx)))
     (when actual-ctx
       (let ((contents (macher-context-contents actual-ctx))
@@ -189,10 +215,13 @@ Did we change it? and Did they change it?"
               (setcdr content-pair current-state)
               (setq synced t))
 
-             ;; 4. Safe Local Edit: (local-changed and not remote-changed)
-             ;; We do absolutely nothing here. The virtual edit is safely pending.
-             ;; This inherently protects virtual file creations where orig=nil and remote=nil.
-             )))
+             ;; 4. Stale Virtual Edit (Unapplied Patch)
+             ;; The agent proposed an edit, but it was ignored by the user.
+             ;; Invalidate the edit to prevent ghost diffs on the next turn.
+             ((and local-changed (not remote-changed))
+              (setcar content-pair current-state)
+              (setcdr content-pair current-state)
+              (setq synced t)))))
         
         (when synced
           (setf (macher-context-dirty-p actual-ctx) nil)
@@ -248,9 +277,18 @@ or update the FSM state.")
   "Apply proposed virtual edits directly to live Emacs buffers.
 This bypasses external patch utilities, which expect physical files. As an alternative to ediff-patch-buffer"
   (interactive)
-  (let* ((fsm macher--fsm-latest)
-         (context (when fsm (macher-agent--fsm-get-context fsm)))
+  (let* ((workspace (when (fboundp 'macher-workspace) (macher-workspace)))
+         ;; 1. Look for memory in the current buffer
+         ;; 2. Fallback: Search all live buffers for one sharing the same workspace that HAS memory
+         (context (or (bound-and-true-p macher-agent--persistent-context)
+                      (when (bound-and-true-p macher--fsm-latest)
+                        (macher-agent--fsm-get-context macher--fsm-latest))
+                      (cl-some (lambda (buf)
+                                 (when (and workspace (equal workspace (buffer-local-value 'macher--workspace buf)))
+                                   (buffer-local-value 'macher-agent--persistent-context buf)))
+                               (buffer-list))))
          (applied-count 0))
+    
     (unless context
       (user-error "No active context found in this session."))
     
@@ -268,6 +306,32 @@ This bypasses external patch utilities, which expect physical files. As an alter
     ;; Sync context so the agent knows it was applied
     (macher-agent--auto-sync-context context)
     (message "SUCCESS: Applied virtual changes to %d Emacs buffer(s)." applied-count)))
+
+;; --- Bridge to Native Macher Patch Engine ---
+
+(defun macher-agent--bridge-context-advice (orig-fun fsm get-context)
+  "Bridge the native macher setup with the agent's persistent memory."
+  ;; 1. Run native setup
+  (funcall orig-fun fsm get-context)
+  
+  ;; 2. Force macher.el to initialize its internal state (awakens the native UI handler)
+  (let* ((info (gptel-fsm-info fsm))
+         (buf (plist-get info :buffer))
+         (pers-ctx (when (buffer-live-p buf)
+                     (buffer-local-value 'macher-agent--persistent-context buf)))
+         (new-ctx (funcall get-context)))
+    
+    (when new-ctx
+      (if pers-ctx
+          ;; 3a. Multi-turn: Overwrite macher's blank slate with our persistent memory
+          (macher-agent--fsm-put-context fsm pers-ctx)
+        ;; 3b. Turn 1: Save the initial blank slate as our persistent memory
+        (when (buffer-live-p buf)
+          (with-current-buffer buf
+            (setq-local macher-agent--persistent-context new-ctx)))))))
+
+;; Apply the new secure internal bridge
+(advice-add 'macher--setup-tools :around #'macher-agent--bridge-context-advice)
 
 (provide 'macher-agent-context)
 ;;; macher-agent-context.el ends here

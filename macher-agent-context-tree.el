@@ -101,26 +101,18 @@
     (ewoc-set-hf ewoc (propertize project-name 'face 'bold) "")
 
     ;; 1. Determine what is currently "active" in the agent's memory
+    ;; 1. Determine what is currently "active" in the agent's memory
     (dolist (entry contents)
       (let* ((path-or-buf (car entry))
-             (is-absolute (file-name-absolute-p path-or-buf))
-             (has-slash (string-match-p "/" path-or-buf))
-             (live-buf (get-buffer path-or-buf))
-             (is-file-buffer (and live-buf (buffer-file-name live-buf)))
-             (file-path (or (when is-file-buffer (buffer-file-name live-buf))
-                            (when is-absolute path-or-buf)))
-             (is-external-file (and file-path root-dir
-                                    (not (string-prefix-p (file-name-as-directory (expand-file-name root-dir))
-                                                          (expand-file-name file-path))))))
+             (classification (macher-agent-context-classify-entry path-or-buf root-dir)))
         
-        (if (and (or is-absolute has-slash is-file-buffer (and root-dir (file-exists-p (expand-file-name path-or-buf root-dir))))
-                 (not is-external-file))
+        (if (eq classification 'file)
             ;; It's a file in the workspace: format it relatively and flag it as active
             (let ((rel-path path-or-buf))
-              (when (and root-dir is-absolute)
+              (when (and root-dir (file-name-absolute-p path-or-buf))
                 (setq rel-path (file-relative-name path-or-buf root-dir)))
               (puthash rel-path t active-files-hash))
-          ;; It's a pure buffer or external file, add it directly to the buffer list
+          ;; It's a buffer or external file, add it directly to the buffer list
           (push path-or-buf buffers))))
 
     ;; 2. Gather ALL files natively from the project workspace
