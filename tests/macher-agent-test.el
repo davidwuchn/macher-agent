@@ -1,5 +1,6 @@
 ;;; macher-agent-test.el --- Comprehensive BDD tests for Macher-Agent -*- lexical-binding: t; -*-
 
+(require 'subr-x)
 (require 'buttercup)
 (require 'macher-agent)
 (require 'macher-agent-async)
@@ -8,11 +9,8 @@
 (require 'macher-agent-gptel-tools)
 (require 'macher-agent-orchestration)
 
-;; --- Mock structures to satisfy internal requirements ---
-
 (cl-defstruct mock-fsm info)
 
-;; Intercept gptel/macher calls to bypass real LLM and I/O dependencies
 (defun gptel-fsm-info (fsm) (mock-fsm-info fsm))
 (gv-define-setter gptel-fsm-info (val fsm) `(setf (mock-fsm-info ,fsm) ,val))
 
@@ -59,17 +57,13 @@
                                          (test-file (expand-file-name "test.txt" test-dir))
                                          (ctx (macher--make-context :dirty-p t)))
                                     
-                                    ;; Setup context with a local divergence (v1 -> v2-local)
                                     (setf (macher-context-contents ctx) 
                                           (list (cons test-file (cons "v1" "v2-local"))))
                                     
-                                    ;; Setup remote/disk file with a remote divergence (v1 -> v2-remote)
                                     (with-temp-file test-file (insert "v2-remote"))
                                     
-                                    ;; Perform sync
                                     (macher-agent--auto-sync-context ctx)
                                     
-                                    ;; Expect context to adopt remote state to prevent unsafe conflicts
                                     (let ((pair (cdr (assoc test-file (macher-context-contents ctx)))))
                                       (expect (car pair) :to-equal "v2-remote")
                                       (expect (cdr pair) :to-equal "v2-remote"))
@@ -79,38 +73,88 @@
           (describe "Orchestration Tools (macher-agent-gptel-tools.el)"
                     (it "properly parses a JSON string into a vector for task delegation"
                         (let* ((callback-called nil)
-                               (callback (lambda (msg) (setq callback-called msg)))
-                               (json-tasks "[{\"buffer_name\": \"test\", \"instructions\": \"do work\"}]")
-                               (expected-vector (vector (list :buffer_name "test" :instructions "do work"))))
+                               (callback (lambda (res) (setq callback-called res)))
+                               (json-tasks "[{\"buffer_name\": \"test-sub\", \"instructions\": \"do work\"}]")
+                               (expected-vector (vector (list :buffer_name "test-sub" :instructions "do work")))
+                               (tool-fn (gptel-tool-function macher-agent-delegate-tasks-to-subagents-tool))
+                               (buf (get-buffer-create "test-sub")))
+                          
                           (spy-on 'json-parse-string :and-return-value expected-vector)
-                          (let ((parsed (macher-agent--parse-tasks-array json-tasks callback)))
-                            (expect (or (vectorp parsed) (listp parsed)) :to-be t)
-                            (expect (length parsed) :to-equal 1))))
+                          (spy-on 'macher-agent--execute-parallel)
+                          (spy-on 'macher-agent--prepare-subagent-instructions)
+                          (spy-on 'macher-agent--ensure-access)
+                          
+                          (funcall tool-fn callback json-tasks)
+                          
+                          (expect 'macher-agent--execute-parallel :to-have-been-called)
+                          (kill-buffer buf)))
 
-                    (it "triggers a timeout if sub-agents never update their final result"
-                        (let* ((buf (generate-new-buffer "stuck-agent"))
+                    (it "reports an error if gptel-send aborts or fails silently"
+                        (let* ((buf (generate-new-buffer "worker"))
+                               (callback-called nil)
+                               (callback (lambda (msg) (setq callback-called msg)))
+                               (dummy-fsm (make-mock-fsm)))
+                          
+                          ;; 1. Fast-forward time so the 0.5s abort-check evaluates immediately
+                          (spy-on 'run-at-time :and-call-fake
+                                  (lambda (_time _repeat fn &rest args)
+                                    (apply fn args)))
+
+                          ;; 2. Simulate gptel-send firing and instantly running our transient transform hook
+                          (spy-on 'gptel-send :and-call-fake
+                                  (lambda ()
+                                    (with-current-buffer buf
+                                      (let ((transform (car gptel-prompt-transform-functions)))
+                                        (when transform
+                                          (funcall transform (lambda () nil) dummy-fsm))))))
+
+                          ;; 3. Simulate the network process dying (FSM terminates but no final result was set)
+                          (spy-on 'macher--add-termination-handler :and-call-fake
+                                  (lambda (_fsm handler)
+                                    (funcall handler dummy-fsm)))
+
+                          (macher-agent--dispatch-and-wait buf callback)
+                          
+                          (expect (plist-get callback-called :status) :to-equal 'error)
+                          (expect (plist-get callback-called :error) :to-match "stopped silently")
+                          (kill-buffer buf)))
+
+                    (it "correctly aggregates results from multiple event-driven sub-agents"
+                        (let* ((buf1 (generate-new-buffer "worker1"))
+                               (buf2 (generate-new-buffer "worker2"))
                                (callback-called nil)
                                (callback (lambda (msg) (setq callback-called msg))))
-                          (macher-agent--wait-and-return (list buf) callback macher-agent-tool-timeout-attempts nil)
-                          (expect callback-called :to-match "ERROR: Buffer 'stuck-agent' failed to start.")
-                          (kill-buffer buf)))
+                          
+                          ;; Mock the dispatcher to instantly return a success payload rather than firing the network
+                          (spy-on 'macher-agent--dispatch-and-wait :and-call-fake
+                                  (lambda (b cb)
+                                    (funcall cb (list :status 'success :data (format "Output from %s" (buffer-name b))))))
+                          
+                          (macher-agent--execute-parallel (list buf1 buf2) callback)
+                          
+                          (expect (plist-get callback-called :status) :to-equal 'success)
+                          (expect (plist-get callback-called :data) :to-match "All sub-agents completed.")
+                          (expect (plist-get callback-called :data) :to-match "Output from worker1")
+                          (expect (plist-get callback-called :data) :to-match "Output from worker2")
+                          (kill-buffer buf1)
+                          (kill-buffer buf2)))
 
                     (it "submit_task_result sets the final result buffer-locally"
                         (let* ((buf (generate-new-buffer "worker-buf"))
-                               (tool-fn (gptel-tool-function macher-agent-submit-result-tool)))
+                               (tool-fn (gptel-tool-function macher-agent-submit-task-result-tool)))
                           (with-current-buffer buf
-                            ;; Call the extracted LLM tool function directly
-                            (funcall tool-fn nil "My final answer")
+                            (funcall tool-fn "My final answer")
                             (expect macher-agent--final-result :to-equal "My final answer"))
                           (kill-buffer buf)))
                     
                     (it "write_buffer_in_workspace registers a virtual edit safely"
                         (let* ((ctx (macher--make-context :contents '(("test-buf" . ("orig" . "orig")))))
-                               (tool-fn (gptel-tool-function macher-agent-write-buffer-tool))
-                               (response (funcall tool-fn ctx "test-buf" "New virtual content")))
-                          (expect response :to-match "SUCCESS")
-                          (expect (macher-context-dirty-p ctx) :to-be t)
-                          (expect (cdr (cdr (assoc "test-buf" (macher-context-contents ctx)))) :to-equal "New virtual content"))))
+                               (tool-fn (gptel-tool-function macher-agent-write-buffer-in-workspace-tool)))
+                          (let* ((macher-agent--persistent-context ctx)
+                                 (response (funcall tool-fn "test-buf" "New virtual content")))
+                            (expect response :to-match "SUCCESS")
+                            (expect (macher-context-dirty-p ctx) :to-be t)
+                            (expect (cdr (cdr (assoc "test-buf" (macher-context-contents ctx)))) :to-equal "New virtual content")))))
 
           (describe "Sandbox Execution (macher-agent-context-tools.el)"
                     (it "constructs a safe rsync command with all necessary exclusions"
@@ -121,11 +165,11 @@
                           (expect cmd :to-match "--exclude=\\.git/")
                           (expect cmd :to-match "--exclude=node_modules/"))))
 
+
           (describe "Interactive Commands & State (macher-agent-orchestration.el)"
                     (it "macher-agent-add-subagent creates a buffer and tracks it globally"
                         (let ((buf (macher-agent-add-subagent "test-worker" "/tmp/")))
                           (expect (buffer-live-p buf) :to-be t)
-                          ;; Check if the global state tracking updated
                           (expect (assoc "test-worker" macher-agent-active-subagents) :to-be-truthy)
                           (kill-buffer buf)))
 
@@ -134,10 +178,9 @@
                                (ctx (macher--make-context :contents (list (cons (buffer-name buf) (cons "old" "new text"))))))
                           (with-current-buffer buf (insert "old"))
                           
-                          ;; Set up the environment to pretend we just finished an LLM turn
                           (setq macher--fsm-latest (make-mock-fsm))
                           (spy-on 'macher-agent--fsm-get-context :and-return-value ctx)
-                          (spy-on 'macher-agent--auto-sync-context) ;; Don't actually sync in the test
+                          (spy-on 'macher-agent--auto-sync-context)
                           
                           (macher-agent-apply-virtual-buffers)
                           
@@ -154,6 +197,30 @@
                             (expect macher-agent--persistent-context :to-be nil)
                             (expect macher--fsm-latest :to-be nil))
                           (kill-buffer buf))))
+
+          (describe "Tool Signatures (Macro Contracts)"
+                    (before-all
+                     (macher-agent-define-tool mock-async-contract-tool
+                                               ("Mock async tool" "test" :args '((:name "arg1" :type string) (:name "arg2" :type string)) :async t)
+                                               (arg1 arg2)
+                                               (funcall gptel-callback (format "Async %s %s" arg1 arg2)))
+
+                     (macher-agent-define-tool mock-sync-contract-tool
+                                               ("Mock sync tool" "test" :args '((:name "arg1" :type string)))
+                                               (arg1)
+                                               (format "Sync %s" arg1)))
+
+                    (it "generates exact signatures for async tools (callback + args)"
+                        (let* ((tool-fn (gptel-tool-function mock-async-contract-tool))
+                               (arity (func-arity tool-fn)))
+                          (expect (car arity) :to-equal 3)
+                          (expect (cdr arity) :to-equal 3)))
+
+                    (it "generates exact signatures for sync tools (only args)"
+                        (let* ((tool-fn (gptel-tool-function mock-sync-contract-tool))
+                               (arity (func-arity tool-fn)))
+                          (expect (car arity) :to-equal 1)
+                          (expect (cdr arity) :to-equal 1))))
           )
 
 (provide 'macher-agent-test)

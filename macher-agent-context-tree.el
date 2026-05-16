@@ -219,10 +219,7 @@ Displays the full workspace, highlighting items actively in the macher context."
                 (macher-agent-context-tree--populate macher-agent-context-tree--ewoc context)))))))))
 
 ;; Advise the core context modification functions to automatically refresh the sidebar
-(advice-add 'macher-agent--update-context-file :after #'macher-agent-context-tree-refresh)
-(advice-add 'macher-agent--add-buffer-to-scope-headless :after #'macher-agent-context-tree-refresh)
-(advice-add 'macher-agent--auto-sync-context :after #'macher-agent-context-tree-refresh)
-(advice-add 'macher-agent-clear-context :after #'macher-agent-context-tree-refresh)
+(add-hook 'macher-agent-context-mutated-hook #'macher-agent-context-tree-refresh)
 
 ;; Attach to gptel's native hook to ensure a refresh when the LLM turn ends
 (add-hook 'gptel-post-response-functions #'macher-agent-context-tree-refresh)

@@ -1,13 +1,11 @@
 ;;; macher-agent-gptel-tools.el --- Pure gptel orchestration tools -*- lexical-binding: t; -*-
 
 (require 'macher)
+(require 's)
+(require 'json)
+(require 'cl-lib)
 
 ;; --- Configuration & UI Hooks ---
-
-(defcustom macher-agent-tool-timeout-attempts 1200
-  "Maximum number of 0.5s polling attempts before a sub-agent times out."
-  :type 'integer
-  :group 'macher-agent)
 
 (defcustom macher-agent-display-subagent-fn nil
   "Function to call with a BUFFER to display it while running.
@@ -43,91 +41,92 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
     (overlay-put ov 'display "")
     (overlay-put ov 'insert-behind-hooks '(ignore))))
 
-;; --- Wait Loops ---
+;; --- Pure Event-Driven Orchestration ---
 
-(defun macher-agent--wait-and-return (buffers callback &optional attempts old-fsms)
-  "Wait for 1-to-many sub-agents to populate their final result variables using FSM termination."
-  (let ((results nil)
-        (failed-buffers nil)
-        (pending-count (length buffers))
-        (attempts (or attempts 0)))
-
+(defun macher-agent--execute-parallel (buffers callback)
+  "Execute multiple sub-agents concurrently using event-driven callbacks."
+  (let ((pending-count (length buffers))
+        (results nil)
+        (errors nil))
     (cl-labels
-        ;; 1. Check if all tasks have resolved and trigger the final callback
         ((check-done ()
            (when (= pending-count 0)
-             (if failed-buffers
-                 (funcall callback (string-join failed-buffers "\n"))
-               (dolist (b buffers)
-                 (with-current-buffer b (setq-local macher-agent--final-result nil))
-                 (macher-agent--hide-ui b))
+             (if errors
+                 (funcall callback (list :status 'error :error (string-join errors "\n")))
                (let ((final-output
                       (mapconcat (lambda (r) (format "=== Response from %s ===\n%s" (car r) (cdr r)))
-                                 (nreverse results)
-                                 "\n\n")))
-                 (funcall callback (format "SUCCESS. All sub-agents completed. Outputs:\n\n%s" final-output))))))
-
-         ;; 2. State Mutator: Record an error and check if we are done
-         (mark-error (err-msg)
-           (push err-msg failed-buffers)
+                                 (nreverse results) "\n\n")))
+                 (funcall callback (list :status 'success :data (format "All sub-agents completed. Outputs:\n\n%s" final-output))))))))
+      (dolist (buf buffers)
+        (macher-agent--dispatch-and-wait
+         buf
+         (lambda (result)
+           (if (eq (plist-get result :status) 'success)
+               (push (cons (buffer-name buf) (plist-get result :data)) results)
+             (push (plist-get result :error) errors))
            (cl-decf pending-count)
-           (check-done))
+           (check-done)))))))
 
-         ;; 3. State Mutator: Record a success and check if we are done
-         (mark-success (buf-name res)
-           (push (cons buf-name res) results)
-           (cl-decf pending-count)
-           (check-done))
-
-         ;; 4. Check if an agent spawned a new FSM to continue its work
-         (handle-continuation (buf fsm)
-           (let ((new-fsm (buffer-local-value 'macher--fsm-latest buf)))
-             (if (and new-fsm (not (eq new-fsm fsm)))
-                 (progn
-                   ;; CRITICAL FIX: Forward the context to the new FSM so the diff isn't lost
-                   (let ((ctx (macher-agent--fsm-get-context fsm)))
-                     (when ctx (macher-agent--fsm-put-context new-fsm ctx)))
-                   
-                   ;; Wait for the continuation to finish
-                   (macher-agent--wait-and-return
-                    (list buf)
-                    (lambda (msg)
-                      (if (string-match-p "^SUCCESS" msg)
-                          (let ((clean-result (replace-regexp-in-string "^SUCCESS.*Outputs:\n\n=== Response from .* ===\n" "" msg)))
-                            (mark-success (buffer-name buf) clean-result))
-                        (mark-error (format "ERROR: %s" msg))))
-                    0 (list (cons buf fsm))))
-               (mark-error (format "ERROR: Buffer '%s' stopped silently." (buffer-name buf))))))
-
-         ;; 5. Handle an FSM reaching its termination state
-         (handle-termination (buf fsm _terminated-fsm)
-           (if (not (buffer-live-p buf))
-               (mark-error (format "ERROR: Buffer '%s' was killed." (buffer-name buf)))
-             (let ((res (buffer-local-value 'macher-agent--final-result buf)))
-               (if res
-                   (mark-success (buffer-name buf) res)
-                 (run-at-time 0.5 nil #'handle-continuation buf fsm)))))
-
-         ;; 6. Validate that all buffers have initialized their FSMs
-         (all-started-p ()
-           (cl-loop for buf in buffers
-                    for fsm = (buffer-local-value 'macher--fsm-latest buf)
-                    for old-fsm = (cdr (assq buf old-fsms))
-                    always (and fsm (not (eq fsm old-fsm))))))
-
-      ;; --- Main Execution Flow ---
-      (if (and (not (all-started-p)) (< attempts macher-agent-tool-timeout-attempts))
-          (run-at-time 0.1 nil #'macher-agent--wait-and-return buffers callback (1+ attempts) old-fsms)
-        
-        ;; Once started (or timed out), process each buffer
-        (dolist (buf buffers)
-          (let* ((fsm (buffer-local-value 'macher--fsm-latest buf))
-                 (old-fsm (cdr (assq buf old-fsms))))
-            (if (or (not fsm) (eq fsm old-fsm))
-                (mark-error (format "ERROR: Buffer '%s' failed to start." (buffer-name buf)))
+(defun macher-agent--dispatch-and-wait (buf callback)
+  "Trigger gptel-send and securely capture the FSM via a transient transform."
+  (with-current-buffer buf
+    (macher-agent--show-ui buf)
+    (let ((capture-transform nil))
+      (setq capture-transform
+            (lambda (transform-cb fsm)
+              ;; 1. Remove ourselves immediately so we only run for this specific request
+              (setq-local gptel-prompt-transform-functions
+                          (remove capture-transform gptel-prompt-transform-functions))
+              
+              ;; 2. Attach the termination handler directly to the FSM before the network request starts
               (macher--add-termination-handler
                fsm
-               (lambda (term-fsm) (handle-termination buf fsm term-fsm))))))))))
+               (lambda (_term-fsm)
+                 (let ((res (buffer-local-value 'macher-agent--final-result buf)))
+                   (if res
+                       (progn
+                         (macher-agent--hide-ui buf)
+                         (funcall callback (list :status 'success :data res)))
+                     ;; Handle continuation or abort
+                     (run-at-time 0.5 nil
+                                  (lambda ()
+                                    (let ((new-fsm (buffer-local-value 'macher--fsm-latest buf)))
+                                      (if (and new-fsm (not (eq new-fsm fsm)))
+                                          (progn
+                                            ;; Forward context across continuations
+                                            (let ((ctx (macher-agent--fsm-get-context fsm)))
+                                              (when ctx (macher-agent--fsm-put-context new-fsm ctx)))
+                                            (macher-agent--wait-for-fsm buf new-fsm callback))
+                                        (funcall callback (list :status 'error :error (format "ERROR: Buffer '%s' stopped silently without calling submit_task_result (Check if process was aborted)." (buffer-name buf))))))))))))
+              
+              ;; 3. Proceed with the standard transform chain
+              (funcall transform-cb)))
+      
+      ;; Prepend the transient transform
+      (add-hook 'gptel-prompt-transform-functions capture-transform nil t)
+      
+      ;; Fire!
+      (gptel-send))))
+
+(defun macher-agent--wait-for-fsm (buf fsm callback)
+  "Securely wait for a continuation FSM to terminate."
+  (macher--add-termination-handler
+   fsm
+   (lambda (_term-fsm)
+     (let ((res (buffer-local-value 'macher-agent--final-result buf)))
+       (if res
+           (progn
+             (macher-agent--hide-ui buf)
+             (funcall callback (list :status 'success :data res)))
+         (run-at-time 0.5 nil
+                      (lambda ()
+                        (let ((new-fsm (buffer-local-value 'macher--fsm-latest buf)))
+                          (if (and new-fsm (not (eq new-fsm fsm)))
+                              (progn
+                                (let ((ctx (macher-agent--fsm-get-context fsm)))
+                                  (when ctx (macher-agent--fsm-put-context new-fsm ctx)))
+                                (macher-agent--wait-for-fsm buf new-fsm callback))
+                            (funcall callback (list :status 'error :error (format "ERROR: Buffer '%s' stopped silently." (buffer-name buf)))))))))))))
 
 (defun macher-agent--set-system-message (msg)
   "Adapter function to safely set the gptel system message without hardcoding internals."
@@ -135,24 +134,61 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
 
 ;; --- Tools ---
 
+(cl-defmacro macher-agent-define-tool (name-symbol (description category &key args async) lambda-args &rest body)
+  "Define a gptel tool with standardised JSON parsing, error handling, and native signature."
+  (let* ((name-str (replace-regexp-in-string "^macher-agent-\\|-tool$" "" (symbol-name name-symbol)))
+         (name (replace-regexp-in-string "-" "_" name-str))
+         (all-lambda-args (if async (cons 'gptel-callback lambda-args) lambda-args))
+         (docstring (format "Gptel tool wrapper for %s." name))
+         (clean-args (cl-remove-if (lambda (sym) (string-prefix-p "&" (symbol-name sym))) lambda-args)))
+    `(defvar ,name-symbol
+       (gptel-make-tool
+        :name ,name
+        :description ,description
+        :category ,(concat "macher-agent-" category)
+        :args ,args
+        :async ,async
+        :function
+        (lambda ,all-lambda-args
+          ,docstring
+          (let ((context (macher-agent-current-context)))
+            (let ((parsed-args
+                   (mapcar (lambda (arg)
+                             (if (and (stringp arg)
+                                      (or (string-prefix-p "[" (string-trim arg))
+                                          (string-prefix-p "{" (string-trim arg))))
+                                 (condition-case nil
+                                     (json-parse-string arg :array-type 'vector :object-type 'plist)
+                                   (error arg))
+                               arg))
+                           (list ,@clean-args))))
+
+              ,(if async
+                   `(let ((callback (lambda (plist-result)
+                                      (let ((final-str (if (eq (plist-get plist-result :status) 'success)
+                                                           (plist-get plist-result :data)
+                                                         (plist-get plist-result :error))))
+                                        (funcall gptel-callback final-str)))))
+                      (condition-case err
+                          (apply (lambda ,lambda-args ,@body) parsed-args)
+                        (error
+                         (funcall callback (list :status 'error :error (macher-agent--format-error err))))))
+
+                 `(let ((result
+                         (condition-case err
+                             (list :status 'success :data (apply (lambda ,lambda-args ,@body) parsed-args))
+                           (error
+                            (list :status 'error :error (macher-agent--format-error err))))))
+                    (if (eq (plist-get result :status) 'success)
+                        (plist-get result :data)
+                      (plist-get result :error)))))))))))
+
 (defun macher-agent--format-error (err)
   "Standardise the error message string for the LLM."
   (let ((msg (error-message-string err)))
     (if (string-match-p "^\\(ERROR\\|SECURITY ERROR\\):" msg)
         msg
       (format "ERROR: %s" msg))))
-
-(defun macher-agent--parse-tasks-array (tasks callback)
-  "Parse TASKS into a valid vector, executing CALLBACK on error."
-  (unless (vectorp tasks)
-    (if (stringp tasks)
-        (condition-case nil
-            (setq tasks (json-parse-string tasks :array-type 'vector :object-type 'plist))
-          (error (funcall callback "ERROR: 'tasks' parameter was not a valid JSON array.")
-                 (setq tasks nil)))
-      (funcall callback "ERROR: 'tasks' parameter must be an array of objects.")
-      (setq tasks nil)))
-  tasks)
 
 (defun macher-agent--prepare-subagent-instructions (buf instructions)
   "Insert INSTRUCTIONS into BUF with cloaked system reminders."
@@ -163,259 +199,202 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
       (insert (substring-no-properties instructions)))
     (macher-agent--insert-hidden "\n\n@macher-agent-worker\n=== SYSTEM REMINDER ===\nYou MUST use the `submit_task_result` tool to return your answer. Do not just type it as plain text.\n")))
 
-(defun macher-agent--dispatch-async (buf)
-  "Trigger gptel-send in BUF and show UI."
-  (with-current-buffer buf
-    (macher-agent--show-ui buf)
-    (gptel-send)))
+(macher-agent-define-tool macher-agent-spawn-subagent-tool
+                          ("Spawn a new sub-agent buffer to handle delegated work." "orchestrate" 
+                           :args '((:name "name" :type string)))
+                          (name)
+                          (let* ((ctx (macher-agent-current-context))
+                                 (dir default-directory)
+                                 (buf (macher-agent-add-subagent name dir nil ctx)))
+                            
+                            (when ctx
+                              (macher-agent--add-buffer-to-scope-headless (buffer-name buf) ctx))
+                            
+                            (format "SUCCESS: Sub-agent created. The EXACT buffer name to use is '%s'." (buffer-name buf))))
 
-(defvar macher-agent-spawn-subagent-tool
-  (gptel-make-tool
-   :name "spawn_subagent"
-   :description "Create a new, isolated sub-agent in the current project directory. Use this to spin up a worker for a specific task."
-   :category "macher-agent-orchestrate"
-   :args (list '(:name "name" :type string :description "The name of the new sub-agent."))
-   :function (lambda (context name)
-               (condition-case err
-                   (let ((buf-name (format "*macher-agent: %s*" name)))
-                     (macher-agent-add-subagent name default-directory t context)
-                     (when context
-                       (let* ((contents (macher-context-contents context))
-                              (entry (assoc buf-name contents)))
-                         (unless entry
-                           (let ((orig (with-current-buffer buf-name
-                                         (buffer-substring-no-properties (point-min) (point-max)))))
-                             (setf (macher-context-contents context)
-                                   (cons (cons buf-name (cons orig nil)) contents))))))
-                     (format "SUCCESS: Sub-agent created. The EXACT buffer name to use is '%s'." buf-name))
-                 (error (macher-agent--format-error err))))))
+(macher-agent-define-tool macher-agent-delegate-tasks-to-subagents-tool
+                          ("Delegate tasks to multiple sub-agents asynchronously." "orchestrate"
+                           :args '((:name "tasks" :type array :description "An array of task objects to delegate to sub-agents."
+                                          :items (:type object
+                                                        :properties (:buffer_name (:type string :description "The exact name of the target sub-agent buffer.")
+                                                                                  :instructions (:type string :description "The task instructions for this sub-agent to execute."))
+                                                        :required ["buffer_name" "instructions"]))) 
+                           :async t)
+                          (tasks)
+                          (let ((ctx (macher-agent-current-context))
+                                (buffers nil))
+                            
+                            (cl-loop for task across tasks
+                                     for buf-name = (plist-get task :buffer_name)
+                                     do (macher-agent--ensure-access ctx buf-name))
+                            
+                            (cl-loop for task across tasks
+                                     for buf-name = (plist-get task :buffer_name)
+                                     for instructions = (plist-get task :instructions)
+                                     for buf = (get-buffer buf-name)
+                                     do (if (buffer-live-p buf)
+                                            (progn
+                                              (push buf buffers)
+                                              (macher-agent--prepare-subagent-instructions buf instructions))
+                                          (error "Sub-agent buffer '%s' not found. You must spawn it first." buf-name)))
+                            
+                            (macher-agent--execute-parallel (nreverse buffers) callback)))
 
-(defvar macher-agent-delegate-multiple-tool
-  (gptel-make-tool
-   :name "delegate_tasks_to_subagents"
-   :description "Write instructions to 1-to-many sub-agents concurrently and wait for all their final responses. Used to fan-out work."
-   :category "macher-agent-orchestrate"
-   :async t
-   :args (list '(:name "tasks" :type array 
-                       :description "An array of task objects."
-                       :items (:type object 
-                                     :properties (:buffer_name (:type string) 
-                                                               :instructions (:type string)) 
-                                     :required ["buffer_name" "instructions"])))
-   :function (lambda (context callback tasks)
-               (let ((parsed-tasks (macher-agent--parse-tasks-array tasks callback)))
-                 (when parsed-tasks
-                   (condition-case err
-                       (let ((target-pairs nil)
-                             (target-buffers nil)
-                             (old-fsms nil))
-                         
-                         (cl-loop for task across parsed-tasks do
-                                  (let* ((buffer-name (plist-get task :buffer_name))
-                                         (instructions (plist-get task :instructions))
-                                         (actual-name (macher-agent--resolve-buffer-name buffer-name)))
-                                    (macher-agent--ensure-access context actual-name)
-                                    (let ((buf (get-buffer actual-name)))
-                                      (unless (buffer-live-p buf)
-                                        (error "ERROR: Buffer '%s' does not exist." actual-name))
-                                      (push (cons buf instructions) target-pairs))))
-                         
-                         (dolist (task-pair (nreverse target-pairs))
-                           (let ((buf (car task-pair))
-                                 (instructions (cdr task-pair)))
-                             (push buf target-buffers)
-                             (push (cons buf (buffer-local-value 'macher--fsm-latest buf)) old-fsms)
-                             (macher-agent--prepare-subagent-instructions buf instructions)
-                             (macher-agent--dispatch-async buf)))
-                         
-                         (macher-agent--wait-and-return (nreverse target-buffers) callback 0 old-fsms))
-                     (error (funcall callback (macher-agent--format-error err)))))))))
+(macher-agent-define-tool macher-agent-execute-subagents-tool
+                          ("Trigger 1-to-many sub-agents to begin processing. Does NOT provide new instructions. Supports an optional blocking flag to wait for their final output."
+                           "orchestrate"
+                           :async t
+                           :args '((:name "buffer_names" :type array
+                                          :description "List of buffer names to trigger."
+                                          :items (:type string))
+                                   (:name "blocking" :type boolean :optional t
+                                          :description "If true, pause the parent agent and wait for all triggered agents to complete. If false (default), run asynchronously in the background.")))
+                          (buffer_names &optional blocking)
+                          (unless (vectorp buffer_names) (error "ERROR: 'buffer_names' parameter must be an array of strings."))
+                          (let ((ctx (macher-agent-current-context))
+                                (target-buffers nil))
+                            (cl-loop for buffer_name across buffer_names do
+                                     (let ((actual-name (macher-agent--resolve-buffer-name buffer_name)))
+                                       (macher-agent--ensure-access ctx actual-name)
+                                       (let ((buf (get-buffer actual-name)))
+                                         (unless (buffer-live-p buf)
+                                           (error "ERROR: Buffer '%s' does not exist." actual-name))
+                                         (push buf target-buffers))))
 
-(defvar macher-agent-execute-subagents-tool
-  (gptel-make-tool
-   :name "execute_subagents"
-   :description "Trigger 1-to-many sub-agents to begin processing. Does NOT provide new instructions. Supports an optional blocking flag to wait for their final output."
-   :category "macher-agent-orchestrate"
-   :async t
-   :args (list '(:name "buffer_names" :type array 
-                       :description "List of buffer names to trigger."
-                       :items (:type string))
-               '(:name "blocking" :type boolean :optional t
-                       :description "If true, pause the parent agent and wait for all triggered agents to complete. If false (default), run asynchronously in the background."))
-   :function (lambda (context callback buffer_names &optional blocking)
-               (unless (vectorp buffer_names)
-                 (if (stringp buffer_names)
-                     (condition-case nil
-                         (setq buffer_names (json-parse-string buffer_names :array-type 'vector))
-                       (error (funcall callback "ERROR: 'buffer_names' parameter must be an array of strings.")
-                              (setq buffer_names nil)))
-                   (funcall callback "ERROR: 'buffer_names' parameter must be an array of strings.")
-                   (setq buffer_names nil)))
-               
-               (when buffer_names
-                 (condition-case err
-                     (let ((target-buffers nil)
-                           (old-fsms nil))
-                       
-                       (cl-loop for buffer_name across buffer_names do
-                                (let ((actual-name (macher-agent--resolve-buffer-name buffer_name)))
-                                  (macher-agent--ensure-access context actual-name)
-                                  (let ((buf (get-buffer actual-name)))
-                                    (unless (buffer-live-p buf)
-                                      (error "ERROR: Buffer '%s' does not exist." actual-name))
-                                    (push buf target-buffers)
-                                    (push (cons buf (buffer-local-value 'macher--fsm-latest buf)) old-fsms))))
-                       
-                       (dolist (buf target-buffers)
-                         (macher-agent--prepare-subagent-instructions buf "")
-                         (macher-agent--dispatch-async buf))
-                       
-                       (if (and blocking (not (eq blocking :json-false)))
-                           (macher-agent--wait-and-return (nreverse target-buffers) callback 0 old-fsms)
-                         (funcall callback (format "SUCCESS: Triggered %d sub-agents asynchronously." (length target-buffers)))))
-                   (error (funcall callback (macher-agent--format-error err))))))))
+                            (dolist (buf target-buffers)
+                              (macher-agent--prepare-subagent-instructions buf ""))
 
-(defvar macher-agent-write-buffer-tool
-  (gptel-make-tool
-   :name "write_buffer_in_workspace"
-   :description "Propose new content for a live Emacs buffer. This creates a virtual patch that will be presented for review rather than mutating the buffer immediately."
-   :category "macher-agent"
-   :args (list '(:name "buffer_name" :type string :description "The name of the target buffer")
-               '(:name "content" :type string :description "The proposed new content for the buffer"))
-   :function (lambda (context buffer_name content)
-               (condition-case err
-                   (let ((actual-name (macher-agent--resolve-buffer-name buffer_name)))
-                     (unless (get-buffer actual-name)
-                       (get-buffer-create actual-name))
-                     (macher-agent--update-context-file context actual-name content)
-                     (format "SUCCESS: Virtual edit recorded for buffer '%s'. A patch will be generated at the end of the turn." actual-name))
-                 (error (macher-agent--format-error err))))))
+                            (if (and blocking (not (eq blocking :json-false)))
+                                (macher-agent--execute-parallel (nreverse target-buffers) callback)
+                              (progn
+                                (dolist (buf target-buffers)
+                                  (with-current-buffer buf
+                                    (macher-agent--show-ui buf)
+                                    (gptel-send)))
+                                (funcall callback (list :status 'success :data (format "Triggered %d sub-agents asynchronously." (length target-buffers))))))))
 
-(defvar macher-agent-commit-buffer-tool
-  (gptel-make-tool
-   :name "write_and_commit_buffer_in_workspace"
-   :description "Directly overwrite an Emacs buffer and synchronise the agent's memory immediately, bypassing the patch review step."
-   :category "macher-agent-commit"
-   :args (list '(:name "buffer_name" :type string)
-               '(:name "content" :type string))
-   :function (lambda (context buffer_name content)
-               (condition-case err
-                   (let ((actual-name (macher-agent--resolve-buffer-name buffer_name)))
-                     (macher-agent--ensure-access context actual-name)
-                     (let ((target-buffer (get-buffer-create actual-name)))
-                       (with-current-buffer target-buffer
-                         (erase-buffer)
-                         (insert content))
-                       (when context
-                         (macher-agent--update-context-file context actual-name content)
-                         (macher-agent--auto-sync-context context))
-                       (format "SUCCESS: Buffer '%s' has been directly overwritten and synchronised." actual-name)))
-                 (error (macher-agent--format-error err))))))
+(macher-agent-define-tool macher-agent-write-buffer-in-workspace-tool
+                          ("Propose new content for a live Emacs buffer. This creates a virtual patch that will be presented for review rather than mutating the buffer immediately."
+                           ""
+                           :args '((:name "buffer_name" :type string :description "The name of the target buffer")
+                                   (:name "content" :type string :description "The proposed new content for the buffer")))
+                          (buffer_name content)
+                          (let* ((context (macher-agent-current-context))
+                                 (actual-name (macher-agent--resolve-buffer-name buffer_name)))
+                            (macher-agent--ensure-access context actual-name)
+                            (unless (get-buffer actual-name)
+                              (get-buffer-create actual-name))
+                            (macher-agent--update-context-file context actual-name content)
+                            (format "SUCCESS: Virtual edit recorded for buffer '%s'. A patch will be generated at the end of the turn." actual-name)))
 
-(defvar macher-agent-list-buffers-tool
-  (gptel-make-tool
-   :name "list_buffers_in_workspace"
-   :description "List all buffers you currently have explicit access to. You cannot access buffers outside this list."
-   :category "macher-agent-ro"
-   :function (lambda (context)
-               (let ((active-buffers nil))
-                 (when context
-                   (dolist (entry (macher-context-contents context))
-                     (let ((buf-name (car entry)))
-                       (when (get-buffer buf-name)
-                         (push buf-name active-buffers)))))
-                 (if active-buffers
-                     (mapconcat #'identity (nreverse active-buffers) "\n")
-                   "No buffers are currently in your scope.")))))
+(macher-agent-define-tool macher-agent-write-and-commit-buffer-in-workspace-tool
+                          ("Directly overwrite an Emacs buffer and synchronise the agent's memory immediately, bypassing the patch review step."
+                           "commit"
+                           :args '((:name "buffer_name" :type string)
+                                   (:name "content" :type string)))
+                          (buffer_name content)
+                          (let* ((context (macher-agent-current-context))
+                                 (actual-name (macher-agent--resolve-buffer-name buffer_name)))
+                            (macher-agent--ensure-access context actual-name)
+                            (let ((target-buffer (get-buffer-create actual-name)))
+                              (with-current-buffer target-buffer
+                                (erase-buffer)
+                                (insert content))
+                              (when context
+                                (macher-agent--update-context-file context actual-name content)
+                                (macher-agent--auto-sync-context context))
+                              (format "SUCCESS: Buffer '%s' has been directly overwritten and synchronised." actual-name))))
 
-(defvar macher-agent-search-buffers-tool
-  (gptel-make-tool
-   :name "search_buffers_in_workspace"
-   :description "Search for a regular expression pattern across the buffers in your restricted scope."
-   :category "macher-agent-ro"
-   :args (list '(:name "pattern" :type string :description "The Emacs regex pattern to search for"))
-   :function (lambda (context pattern)
-               (condition-case err
-                   (let ((results nil))
-                     (when context
-                       (dolist (entry (macher-context-contents context))
-                         (let* ((buf-name (car entry))
-                                (buf (get-buffer buf-name)))
-                           (when buf
-                             (with-current-buffer buf
-                               (save-excursion
-                                 (goto-char (point-min))
-                                 (while (re-search-forward pattern nil t)
-                                   (let* ((line (line-number-at-pos))
-                                          (content (string-trim (thing-at-point 'line t))))
-                                     (push (format "%s:%d: %s" buf-name line content) results)))))))))
-                     (if results
-                         (mapconcat #'identity (nreverse results) "\n")
-                       (format "No matches found for '%s' in your scoped buffers." pattern)))
-                 (error (macher-agent--format-error err))))))
+(macher-agent-define-tool macher-agent-list-buffers-in-workspace-tool
+                          ("List all buffers you currently have explicit access to. You cannot access buffers outside this list."
+                           "ro")
+                          ()
+                          (let ((context (macher-agent-current-context))
+                                (active-buffers nil))
+                            (when context
+                              (dolist (entry (macher-context-contents context))
+                                (let ((buf-name (car entry)))
+                                  (when (get-buffer buf-name)
+                                    (push buf-name active-buffers)))))
+                            (if active-buffers
+                                (mapconcat #'identity (nreverse active-buffers) "\n")
+                              "No buffers are currently in your scope.")))
 
-(defvar macher-agent-read-buffer-tool
-  (gptel-make-tool
-   :name "read_buffer_in_workspace"
-   :description "Read the contents of a scoped buffer (ie a buffer in your allowed list)."
-   :category "macher-agent-ro"
-   :args (list '(:name "buffer_name" :type string :description "The name of the buffer to read")
-               '(:name "offset" :type number :optional t :description "Line number to start reading from (1-based)")
-               '(:name "limit" :type number :optional t :description "Number of lines to read")
-               '(:name "show_line_numbers" :type boolean :optional t :description "Include line numbers in output"))
-   :function (lambda (context buffer_name &optional offset limit show_line_numbers)
-               (condition-case err
-                   (let* ((actual-name (macher-agent--resolve-buffer-name buffer_name))
-                          (content (macher-agent--read-context-file context actual-name))
-                          (parsed-offset (when offset (round offset)))
-                          (parsed-limit (when limit (round limit))))
-                     (macher--read-string content parsed-offset parsed-limit show_line_numbers))
-                 (error (macher-agent--format-error err))))))
+(macher-agent-define-tool macher-agent-search-buffers-in-workspace-tool
+                          ("Search for a regular expression pattern across the buffers in your restricted scope."
+                           "ro"
+                           :args '((:name "pattern" :type string :description "The Emacs regex pattern to search for")))
+                          (pattern)
+                          (let ((context (macher-agent-current-context))
+                                (results nil))
+                            (when context
+                              (dolist (entry (macher-context-contents context))
+                                (let* ((buf-name (car entry))
+                                       (buf (get-buffer buf-name)))
+                                  (when buf
+                                    (with-current-buffer buf
+                                      (save-excursion
+                                        (goto-char (point-min))
+                                        (while (re-search-forward pattern nil t)
+                                          (let* ((line (line-number-at-pos))
+                                                 (content (string-trim (thing-at-point 'line t))))
+                                            (push (format "%s:%d: %s" buf-name line content) results)))))))))
+                            (if results
+                                (mapconcat #'identity (nreverse results) "\n")
+                              (format "No matches found for '%s' in your scoped buffers." pattern))))
 
-(defvar macher-agent-multi-edit-buffer-tool
-  (gptel-make-tool
-   :name "multi_edit_buffer_in_workspace"
-   :description "Apply 1-to-many replacements to one scoped buffer in your workspace sequentially. All edits use exact text matching (whitespace, newlines, indentation). Use actual content - NO line numbers.\n\nEdits apply in array order. If ANY edit fails, ALL changes are rolled back."
-   :category "macher-agent"
-   :args (list '(:name "buffer_name" :type string :description "The name of the target buffer")
-               '(:name "edits" :type array :description "Array of edit operations to apply in sequence"
-                       :items (:type object
-                                     :properties (:old_text (:type string :description "Exact text to find and replace.")
-                                                            :new_text (:type string :description "Text to replace the old_text with")
-                                                            :replace_all (:type boolean :description "If true, replace all occurrences."))
-                                     :required ["old_text" "new_text"])))
-   :function (lambda (context buffer_name edits)
-               (condition-case err
-                   (let* ((actual-name (macher-agent--resolve-buffer-name buffer_name))
-                          (content (macher-agent--read-context-file context actual-name)))
-                     (unless (vectorp edits)
-                       (if (stringp edits)
-                           (setq edits (json-parse-string edits :array-type 'vector :object-type 'plist))
-                         (error "The 'edits' parameter must be an array of objects")))
-                     (cl-loop for edit across edits do
-                              (let* ((old-text (plist-get edit :old_text))
-                                     (new-text (plist-get edit :new_text))
-                                     (replace-all (plist-get edit :replace_all))
-                                     (replace-all-bool (and replace-all (not (eq replace-all :json-false)))))
-                                (unless (and old-text new-text)
-                                  (error "Each edit must contain old_text and new_text properties"))
-                                (setq content (macher--edit-string content old-text new_text replace-all-bool))))
-                     (macher-agent--update-context-file context actual-name content)
-                     (format "SUCCESS: Virtual multi-edit recorded for buffer '%s'. A patch will be generated at the end of the turn." actual-name))
-                 (error (macher-agent--format-error err))))))
+(macher-agent-define-tool macher-agent-read-buffer-in-workspace-tool
+                          ("Read the contents of a scoped buffer (ie a buffer in your allowed list)."
+                           "ro"
+                           :args '((:name "buffer_name" :type string :description "The name of the buffer to read")
+                                   (:name "offset" :type number :optional t :description "Line number to start reading from (1-based)")
+                                   (:name "limit" :type number :optional t :description "Number of lines to read")
+                                   (:name "show_line_numbers" :type boolean :optional t :description "Include line numbers in output")))
+                          (buffer_name &optional offset limit show_line_numbers)
+                          (let* ((context (macher-agent-current-context))
+                                 (actual-name (macher-agent--resolve-buffer-name buffer_name))
+                                 (content (macher-agent--read-context-file context actual-name))
+                                 (parsed-offset (when offset (round offset)))
+                                 (parsed-limit (when limit (round limit))))
+                            (macher--read-string content parsed-offset parsed-limit show_line_numbers)))
+
+(macher-agent-define-tool macher-agent-multi-edit-buffer-in-workspace-tool
+                          ("Apply 1-to-many replacements to one scoped buffer in your workspace sequentially. All edits use exact text matching (whitespace, newlines, indentation). Use actual content - NO line numbers.\n\nEdits apply in array order. If ANY edit fails, ALL changes are rolled back."
+                           ""
+                           :args '((:name "buffer_name" :type string :description "The name of the target buffer")
+                                   (:name "edits" :type array :description "Array of edit operations to apply in sequence"
+                                          :items (:type object
+                                                        :properties (:old_text (:type string :description "Exact text to find and replace.")
+                                                                               :new_text (:type string :description "Text to replace the old_text with")
+                                                                               :replace_all (:type boolean :description "If true, replace all occurrences."))
+                                                        :required ["old_text" "new_text"]))))
+                          (buffer_name edits)
+                          (let* ((context (macher-agent-current-context))
+                                 (actual-name (macher-agent--resolve-buffer-name buffer_name))
+                                 (content (macher-agent--read-context-file context actual-name)))
+                            (unless (vectorp edits)
+                              (error "The 'edits' parameter must be an array of objects"))
+                            (cl-loop for edit across edits do
+                                     (let* ((old-text (plist-get edit :old_text))
+                                            (new-text (plist-get edit :new_text))
+                                            (replace-all (plist-get edit :replace_all))
+                                            (replace-all-bool (and replace-all (not (eq replace-all :json-false)))))
+                                       (unless (and old-text new-text)
+                                         (error "Each edit must contain old_text and new_text properties"))
+                                       (setq content (macher--edit-string content old-text new-text replace-all-bool))))
+                            (macher-agent--update-context-file context actual-name content)
+                            (format "SUCCESS: Virtual multi-edit recorded for buffer '%s'. A patch will be generated at the end of the turn." actual-name)))
 
 (defvar-local macher-agent--final-result nil
   "Stores the clean, synthesised final answer from the sub-agent.")
 
-(defvar macher-agent-submit-result-tool
-  (gptel-make-tool
-   :name "submit_task_result"
-   :description "Submit your final, completed answer back to the parent agent. Call this ONLY when your task is completely finished."
-   :category "macher-agent-worker"
-   :args (list '(:name "final_answer" :type string :description "The comprehensive final response to the requested task."))
-   :function (lambda (context final_answer)
-               (setq-local macher-agent--final-result final_answer)
-               "SUCCESS: Result submitted successfully. You have completed your task.")))
+(macher-agent-define-tool macher-agent-submit-task-result-tool
+                          ("Submit your final, completed answer back to the parent agent. Call this ONLY when your task is completely finished."
+                           "worker"
+                           :args '((:name "final_answer" :type string :description "The comprehensive final response to the requested task.")))
+                          (final_answer)
+                          (setq-local macher-agent--final-result final_answer)
+                          "SUCCESS: Result submitted successfully. You have completed your task.")
 
 ;; --- Presets ---
 
@@ -426,48 +405,58 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
   "Base filesystem reading tools provided by macher.el.")
 
 (defconst macher-agent-ro-tools
-  '("read_buffer_in_workspace"
-    "list_buffers_in_workspace"
-    "search_buffers_in_workspace")
+  (list (gptel-tool-name macher-agent-read-buffer-in-workspace-tool)
+        (gptel-tool-name macher-agent-list-buffers-in-workspace-tool)
+        (gptel-tool-name macher-agent-search-buffers-in-workspace-tool))
   "Read-only tools for inspecting Emacs buffers.")
 
 (defconst macher-agent-edit-tools
-  '("multi_edit_buffer_in_workspace"
-    "write_buffer_in_workspace")
+  (list (gptel-tool-name macher-agent-multi-edit-buffer-in-workspace-tool)
+        (gptel-tool-name macher-agent-write-buffer-in-workspace-tool))
   "Destructive tools for modifying Emacs buffers.")
 
 (defconst macher-agent-orchestrate-tools
-  '("spawn_subagent"
-    "delegate_tasks_to_subagents"
-    "execute_subagents"
-    "write_and_commit_buffer_in_workspace")
+  (list (gptel-tool-name macher-agent-spawn-subagent-tool)
+        (gptel-tool-name macher-agent-delegate-tasks-to-subagents-tool)
+        (gptel-tool-name macher-agent-execute-subagents-tool)
+        (gptel-tool-name macher-agent-write-and-commit-buffer-in-workspace-tool))
   "Tools for managing and communicating with sub-agents.")
 
 (with-eval-after-load 'macher
   
-  ;; 1. The Planner Preset
   (gptel-make-preset "macher-agent-plan"
     :description "Project planning, architectural analysis, and sub-agent orchestration"
-    ;; Planners get eyes (ro/base) and management powers (orchestrate), but no hands
+    :system "You are the Principal Architect of this codebase. Your role is orchestration and system design. 
+
+You do not write or edit code directly. Your workflow is:
+1. Analyse the user's request.
+2. Use read tools to explore the workspace and understand the current implementation.
+3. Devise a step-by-step execution plan.
+4. Delegate discrete implementation tasks to sub-agents using the appropriate orchestration tools.
+   - Provide sub-agents with highly specific instructions, including exact file paths and expected outcomes.
+   - Do not ask them to 'figure it out'; give them the blueprint.
+5. Synthesise their results and report back to the user."
     :tools (append macher-agent-base-read-tools
                    macher-agent-ro-tools
                    macher-agent-orchestrate-tools))
 
-  ;; 2. The Worker Preset
   (gptel-make-preset "macher-agent-worker"
     :description "Sub-agent worker preset with strict tool-submission rules."
-    :system "You are an autonomous sub-agent working on a delegated task within an Emacs environment.
+    :system "You are an autonomous Senior Software Engineer operating within a sandboxed Emacs environment.
+Your role is to execute a specific, delegated task with absolute precision.
 
-CRITICAL DIRECTIVE: 
-You MUST use the `submit_task_result` tool to deliver your final answer back to the orchestrator if asked to. 
-Do NOT output your final answer as conversational plain text.
-If you need to explore the codebase, use your read/search tools. 
-The very last action you take must be invoking `submit_task_result`."
-    ;; Workers get eyes (ro/base) and hands (edit), plus their specific submission tool
+CRITICAL DIRECTIVES:
+1. You MUST use the `submit_task_result` tool to deliver your final answer back to the orchestrator.
+   - Never output your final answer as conversational plain text.
+   - The orchestrator can only 'hear' you if you use the submission tool.
+2. Use your read tools to verify file contents before attempting any edits.
+3. When using edit tools, rely on exact text matching. Account for indentation and whitespace.
+4. Stay strictly within the scope of your delegated instructions. Do not attempt to refactor unrelated code.
+5. The very last action you take in your execution loop MUST be invoking `submit_task_result`."
     :tools (append macher-agent-base-read-tools
                    macher-agent-ro-tools
                    macher-agent-edit-tools
-                   '("submit_task_result"))))
+                   (list (gptel-tool-name macher-agent-submit-task-result-tool)))))
 
 (provide 'macher-agent-gptel-tools)
 ;;; macher-agent-gptel-tools.el ends here

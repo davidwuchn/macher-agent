@@ -5,6 +5,9 @@
 
 (declare-function gptel-fsm-info "gptel" (fsm))
 
+(defvar macher-agent-context-mutated-hook nil
+  "Hook run whenever the agent's context is modified.")
+
 (defun macher-agent--ensure-access (context path)
   "Halt execution if PATH is outside the agent's explicit scope."
   (let* ((actual-name (substring-no-properties path))
@@ -12,6 +15,22 @@
     (unless (assoc actual-name contents)
       ;; Throwing a catchable error is idiomatic Emacs Lisp for access denial
       (error "SECURITY ERROR: You do not have permission to access '%s'. Use list_buffers_in_workspace to see your allowed scope." actual-name))))
+
+(defun macher-agent-current-context ()
+  "Dynamically resolve the active agent context for tool execution.
+If no context exists, lazily initialize an empty one so the agent can build its scope."
+  (let* ((fsm (bound-and-true-p macher--fsm-latest))
+         (fsm-ctx (when fsm (macher-agent--fsm-get-context fsm)))
+         (pers-ctx (bound-and-true-p macher-agent--persistent-context)))
+    (or fsm-ctx 
+        pers-ctx
+        ;; Lazy Initialization: If the agent is starting from a blank slate,
+        ;; create a fresh context and bind it to the orchestrator buffer.
+        (let ((new-ctx (macher--make-context)))
+          (setq-local macher-agent--persistent-context new-ctx)
+          (when fsm 
+            (macher-agent--fsm-put-context fsm new-ctx))
+          new-ctx))))
 
 (defun macher-agent--get-buffer-content (path)
   "Get the content of a buffer or file by path."
@@ -39,7 +58,8 @@ Can handle both physical file paths and pure Emacs buffer names."
       (let ((orig (macher-agent--get-buffer-content path)))
         (setf (macher-context-contents context)
               (cons (cons path (cons orig new-content)) contents))))
-    (setf (macher-context-dirty-p context) t)))
+    (setf (macher-context-dirty-p context) t)
+    (run-hooks 'macher-agent-context-mutated-hook)))
 
 (defun macher-agent--read-context-file (context path)
   "Securely read PATH from the virtual CONTEXT or the live Emacs buffer."
@@ -158,7 +178,8 @@ Did we change it? and Did they change it?"
              )))
         
         (when synced
-          (setf (macher-context-dirty-p actual-ctx) nil))))))
+          (setf (macher-context-dirty-p actual-ctx) nil)
+          (run-hooks 'macher-agent-context-mutated-hook))))))
 
 ;; --- Adapters ---
 
@@ -179,53 +200,7 @@ Functions are called with two arguments: (CONTEXT FSM).
 Functions can be used to modify the CONTEXT object, trigger side-effects,
 or update the FSM state.")
 
-(defun macher-agent--simulate-resolved-hook-advice (orig-fn fsm get-context)
-  "Simulate an upstream hook that fires when the context is resolved."
-  (let ((wrapped-get-context
-         (lambda ()
-           (let ((ctx (funcall get-context)))
-             (run-hook-with-args 'macher-agent-context-resolved-functions ctx fsm)
-             (macher-agent--fsm-get-context fsm)))))
-    (funcall orig-fn fsm wrapped-get-context)))
 
-;; [FIX 1: Restored the missing advice block to attach the simulation to the upstream engine]
-(advice-add 'macher--setup-tools :around #'macher-agent--simulate-resolved-hook-advice)
-
-(defun macher-agent-persist-context-hook (ctx fsm)
-  "Maintain a persistent context and synchronise it with the disk."
-  (when ctx
-    (unless macher-agent--persistent-context
-      (setq macher-agent--persistent-context ctx))
-    
-    (let ((persistent-ctx macher-agent--persistent-context))
-      (macher-agent--fsm-put-context fsm persistent-ctx)
-      (setq macher--fsm-latest fsm))))
-
-(add-hook 'macher-agent-context-resolved-functions #'macher-agent-persist-context-hook)
-
-(defvar macher-agent-extended-tool-categories nil
-  "Custom agent categories that should receive native macher context injection.")
-
-(defun macher-agent--auto-register-tool-category (orig-fn &rest args)
-  "Automatically harvest the :category from `gptel-make-tool` and add it to the active list."
-  (let ((category (plist-get args :category)))
-    (when category
-      (add-to-list 'macher-agent-extended-tool-categories category)))
-  (apply orig-fn args))
-
-(advice-add 'gptel-make-tool :around #'macher-agent--auto-register-tool-category)
-
-(defun macher-agent--extend-tool-categories-advice (orig-fn fsm get-context)
-  "Run macher--setup-tools multiple times to capture custom agent categories."
-  ;; 1. Run the original function first to process standard "macher" tools
-  (funcall orig-fn fsm get-context)
-  
-  ;; 2. Dynamically rebind the category and re-run the processor for our custom tools
-  (dolist (custom-category macher-agent-extended-tool-categories)
-    (let ((macher-tool-category custom-category))
-      (funcall orig-fn fsm get-context))))
-
-(advice-add 'macher--setup-tools :around #'macher-agent--extend-tool-categories-advice)
 
 ;; --- 4. Interactive Commands ---
 

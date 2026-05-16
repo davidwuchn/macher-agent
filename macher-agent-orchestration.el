@@ -16,7 +16,8 @@ from the UI, strictly mutating the payload context."
         (let ((orig (with-current-buffer buf-name
                       (buffer-substring-no-properties (point-min) (point-max)))))
           (setf (macher-context-contents persistent-context)
-                (cons (cons buf-name (cons orig orig)) contents)))))))
+                (cons (cons buf-name (cons orig orig)) contents))))))
+  (run-hooks 'macher-agent-context-mutated-hook))
 
 ;;;###autoload
 (defun macher-agent-add-buffer-to-scope (buffer)

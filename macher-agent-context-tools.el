@@ -3,6 +3,7 @@
 (require 'project)
 (require 'gptel)
 (require 'macher)
+(require 'macher-agent-vfs)
 
 (defun macher-agent--get-context-edits (context)
   "Extract file paths and virtual contents from the macher CONTEXT."
@@ -46,36 +47,20 @@
 
 (defun macher-agent--pure-async-execute (project-root context cmd success-override callback)
   "Execute CMD inside a temporary sandbox cleanly and asynchronously."
-  (let* ((temp-dir (let ((default-directory project-root))
-                     (file-name-as-directory (make-temp-file "sandbox-" t))))
-         (rsync-cmd (macher-agent--build-rsync-cmd project-root temp-dir))
-         (cleanup-fn (lambda () (delete-directory temp-dir t))))
+  (let* ((vfs (macher-agent-vfs-create project-root))
+         (cleanup-fn nil))
     
-    (message "Executing: %s" rsync-cmd)
-
-    ;; 1. Run Rsync
-    (macher-agent--run-async-cmd 
-     "rsync" rsync-cmd project-root
-     (lambda (exit-code output)
-       (if (not (= exit-code 0))
-           (progn
-             (funcall cleanup-fn)
-             (funcall callback (format "ERROR: Rsync failed.\nCommand: %s\nOutput: %s" 
-                                       rsync-cmd (string-trim output))))
-         
-         ;; 2. Overlay in-memory files
-         (dolist (edit context)
-           (let* ((path (car edit))
-                  (content (cdr edit))
-                  (full-path (expand-file-name (file-relative-name path project-root) temp-dir)))
-             (if content
-                 (progn
-                   (make-directory (file-name-directory full-path) t)
-                   (with-temp-file full-path (insert content)))
-               (when (file-exists-p full-path)
-                 (delete-file full-path)))))
-         
-         ;; 3. Run User Command
+    (dolist (edit context)
+      (let ((path (car edit))
+            (content (cdr edit)))
+        (macher-agent-vfs-add-overlay vfs path content)))
+    
+    (macher-agent-vfs-get-execution-path
+     vfs
+     (lambda (temp-dir err)
+       (if err
+           (funcall callback err)
+         (setq cleanup-fn (lambda () (delete-directory temp-dir t)))
          (macher-agent--run-async-cmd 
           "cmd" cmd temp-dir
           (lambda (cmd-exit cmd-output)
@@ -126,7 +111,8 @@
       (message "No active context to clear in this buffer.")
     (setq-local macher-agent--persistent-context nil)
     ;; Also clear the FSM tracker so it doesn't try to auto-resume a dead state
-    (setq-local macher--fsm-latest nil) 
+    (setq-local macher--fsm-latest nil)
+    (run-hooks 'macher-agent-context-mutated-hook)
     (message "Agent memory cleared. It will take a fresh snapshot of the disk on its next task.")))
 
 (provide 'macher-agent-context-tools)
