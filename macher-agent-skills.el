@@ -17,15 +17,14 @@ Handles both inline JSON arrays [...] and YAML block lists (- item)."
         (let ((raw-items (split-string (match-string 1 text) "[, \t\n\r\"]+" t)))
           (setq items raw-items))
       ;; Parse block list format:
-      ;; - tool_1
-      ;; - tool_2
       (let* ((lines (split-string text "\n"))
              (in-list nil))
         (dolist (line lines)
           (cond
            ((string-match (format "^%s:" key) line)
             (setq in-list t))
-           ((and in-list (string-match "^[ \t]+-[ \t]+\"?\\([^\"]+\\)\"?" line))
+           ;; FIX: Use [:space:] to ignore \r, \t, and trailing spaces cleanly
+           ((and in-list (string-match "^[[:space:]]*-[[:space:]]+\"?\\([^\"[:space:]]+\\)\"?" line))
             (push (match-string 1 line) items))
            ((and in-list (string-match "^[A-Za-z0-9_-]+:" line))
             (setq in-list nil))))
@@ -57,22 +56,27 @@ Returns a property list compatible with the tests."
             :allowed-tools tools
             :body body))))
 
+
 (defun macher-agent-resolve-tool (tool-name dir-context)
-  "Retrieve TOOL-NAME from registry, or load it from DIR-CONTEXT/scripts if missing."
+  "Retrieve TOOL-NAME from registry, or load it from DIR-CONTEXT/scripts if missing.
+If no local script is found, fallback to returning the TOOL-NAME string,
+assuming it is a globally registered native gptel/macher tool."
   (or (gethash tool-name macher-agent-tools-registry)
-      (when dir-context
-        (let ((script-path (expand-file-name (format "scripts/%s.el" tool-name) dir-context)))
-          (when (file-exists-p script-path)
-            (let ((tool (with-temp-buffer
-                          (insert-file-contents script-path)
-                          (let ((val nil))
-                            (condition-case nil
-                                (while t
-                                  (setq val (eval (read (current-buffer)) lexical-binding)))
-                              (end-of-file val))))))
-              (when tool
-                (puthash tool-name tool macher-agent-tools-registry)))
-            (gethash tool-name macher-agent-tools-registry))))))
+      (and dir-context
+           (let ((script-path (expand-file-name (format "scripts/%s.el" tool-name) dir-context)))
+             (when (file-exists-p script-path)
+               (let ((tool (with-temp-buffer
+                             (insert-file-contents script-path)
+                             (let ((val nil))
+                               (condition-case nil
+                                   (while t
+                                     (setq val (eval (read (current-buffer)) lexical-binding)))
+                                 (end-of-file val))))))
+                 (when tool
+                   (puthash tool-name tool macher-agent-tools-registry)))
+               (gethash tool-name macher-agent-tools-registry))))
+      ;; Fallback: Return the raw string name so gptel can link built-in tools
+      tool-name))
 
 (defun macher-agent-load-skill-from-file (filepath &optional is-global)
   "Load skill from FILEPATH. 
@@ -112,18 +116,31 @@ so they appear in the `gptel-menu`."
           (dolist (script (directory-files scripts-dir t "\\.el$"))
             (let* ((base (file-name-base script))
                    (tool (macher-agent-resolve-tool base skills-dir)))
-              ;; Tool is resolved and cached in registry by resolve-tool
               (ignore tool)))))
       
-      ;; 2. Load all SKILL.md files into gptel-directives
+      ;; 2. Load all SKILL.md files and bundle them into gptel presets
       (dolist (subdir (directory-files skills-dir t "^[^.]"))
         (when (file-directory-p subdir)
           (let ((skill-file (expand-file-name "SKILL.md" subdir)))
             (when (file-exists-p skill-file)
               (let* ((parsed (macher-agent-load-skill-from-file skill-file t))
                      (sym (plist-get parsed :name-sym))
-                     (body (plist-get parsed :body)))
+                     (body (plist-get parsed :body))
+                     (desc (plist-get parsed :description))
+                     (tool-names (plist-get parsed :allowed-tools)))
                 (when (and sym body)
-                  (setf (alist-get sym gptel-directives) body))))))))))
+                  (let ((resolved-tools (when tool-names
+                                          (delq nil (mapcar (lambda (tname)
+                                                              (macher-agent-resolve-tool tname skills-dir))
+                                                            tool-names)))))         
+                    
+                    (if (fboundp 'gptel-make-preset)
+                        (apply #'gptel-make-preset sym
+                               :system body
+                               (append 
+                                (when desc (list :description desc))
+                                (when resolved-tools (list :tools resolved-tools))))
+                      ;; Fallback: Only run if gptel version is too old to support presets.
+                      (setf (alist-get sym gptel-directives) body))))))))))))
 
 (provide 'macher-agent-skills)
