@@ -8,6 +8,7 @@
 (require 'macher-agent-context-tools)
 (require 'macher-agent-gptel-tools)
 (require 'macher-agent-orchestration)
+(require 'macher-agent-skills)
 
 (cl-defstruct mock-fsm info)
 
@@ -334,6 +335,60 @@
                                (arity (func-arity tool-fn)))
                           (expect (car arity) :to-equal 1)
                           (expect (cdr arity) :to-equal 1))))
-          )
+          
+          (describe "Agent Skills (macher-agent-skills.el)"
+                    (it "parses SKILL.md files correctly extracting frontmatter and markdown body"
+                        (let* ((parsed (macher-agent-parse-skill-file "tests/fixtures/skills/global/SKILL.md")))
+                          (expect (plist-get parsed :name) :to-equal "mock-skill")
+                          (expect (plist-get parsed :name-sym) :to-equal 'mock-skill)
+                          (expect (plist-get parsed :description) :to-equal "A mock skill for testing")
+                          (expect (plist-get parsed :allowed-tools) :to-equal '("mock-tool-1" "mock-tool-2"))
+                          (expect (plist-get parsed :body) :to-equal "This is the system prompt for the mock skill.\nIt spans multiple lines.")))
+
+                    (it "resolves global skill tools by loading their script if not registered"
+                        (let* ((mock-script-dir "tests/fixtures/skills/global/scripts")
+                               (mock-script-path (expand-file-name "mock-tool-load.el" mock-script-dir)))
+                          ;; Setup mock script
+                          (make-directory mock-script-dir t)
+                          (with-temp-file mock-script-path
+                            (insert "(setq mock-tool-load 'loaded-tool-object)"))
+                          
+                          ;; Resolution test
+                          (let ((resolved (macher-agent-resolve-tool "mock-tool-load" "tests/fixtures/skills/global/")))
+                            (expect resolved :to-equal 'loaded-tool-object))
+                          
+                          (delete-directory mock-script-dir t)))
+
+                    (it "refuses to load workspace skill tools (security context)"
+                        (let* ((mock-script-dir "tests/fixtures/skills/workspace/scripts")
+                               (mock-script-path (expand-file-name "workspace-tool-1.el" mock-script-dir)))
+                          ;; Setup mock script
+                          (make-directory mock-script-dir t)
+                          (with-temp-file mock-script-path
+                            (insert "(setq workspace-tool-1 'workspace-loaded)"))
+                          
+                          ;; Test workspace parsing logic
+                          (macher-agent-load-skill-from-file "tests/fixtures/skills/workspace/SKILL.md" nil)
+                          (let ((skill-meta (alist-get 'workspace-skill macher-agent-skills-alist)))
+                            (expect (plist-get skill-meta :context-dir) :to-be nil))
+                          
+                          ;; Resolution should fail to load because context-dir is nil
+                          (let ((resolved (macher-agent-resolve-tool "workspace-tool-1" nil)))
+                            (expect resolved :to-be nil)
+                            (expect (boundp 'workspace-tool-1) :to-be nil))
+                          
+                          (delete-directory mock-script-dir t)))
+                    
+                    (it "applies skill tools correctly into gptel-tools when selected"
+                        (let ((gptel-tools nil)
+                              (mock-tool-obj 'the-tool))
+                          (puthash "selected-tool" mock-tool-obj macher-agent-tools-registry)
+                          
+                          (setf (alist-get 'test-preset macher-agent-skills-alist)
+                                (list :description "test" :tools '("selected-tool") :context-dir nil))
+                          
+                          (macher-agent--apply-skill-tools 'test-preset)
+                          
+                          (expect gptel-tools :to-equal (list mock-tool-obj))))))
 
 (provide 'macher-agent-test)

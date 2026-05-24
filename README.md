@@ -99,6 +99,27 @@ Or
              (shell-command-to-string (format "ruskel %s </dev/null 2>&1" target))))
 ```
 
+### Agent Skills
+
+`macher-agent` includes support for reading and parsing Agent Skills, loosely based on the [AgentSkills SKILL.md specification](https://agentskills.io/specification/SKILL.md). This system automatically converts folder-based skill structures into `gptel` directives.
+
+A skill is defined by a `SKILL.md` file containing YAML or JSON-like frontmatter with a `name`, `description`, and `allowed-tools` array. The Markdown body is treated as the system prompt instructions.
+
+Example `SKILL.md`:
+```markdown
+---
+name: mock-skillp
+description: A testing skill
+allowed-tools: ["example-tool"]
+---
+You are a testing assistant. Please use the example tool when needed.
+```
+#### Configuration and Security
+*   `macher-agent-global-skills-directory` this custom variable to a trusted directory containing global agent skills. If a tool mentioned in `allowed-tools` is not registered natively, `macher-agent` will attempt to dynamically evaluate and load its implementation script from `<global-directory>/scripts/<tool-name>.el`.
+* `macher-agent` can also load skills from your active Emacs workspace (`M-x macher-agent-load-workspace-skills`). However, to maintain a secure sandbox, *scripts are ignored in workspace skills*. Workspace skills may only use tools that are already globally registered.
+
+When an Agent Skill is selected via `gptel`'s menu ( by selecting its `name`), `macher-agent` intercepts the selection and automatically activates the required tools for that session into `gptel-tools`.
+
 ### Macher context availability
 
 All tools built with `macher-agent-make-tool` (or `gptel-make-tool` after macher-agent has loaded) will have their category added to the evaluation list used by macher (which by default only loads the macher-tool-category). View the current macher-context real time using `macher-agent-context-tree`
