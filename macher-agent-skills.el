@@ -110,7 +110,8 @@ so they appear in the `gptel-menu`."
   (interactive)
   (let ((skills-dir (or dir (bound-and-true-p macher-agent-global-skills-directory))))
     (when (and skills-dir (file-exists-p skills-dir))
-      ;; 1. Pre-load all scripts so gptel knows about them (for the menu)
+      
+      ;; 1. Pre-load all scripts so gptel knows about them
       (let ((scripts-dir (expand-file-name "scripts" skills-dir)))
         (when (file-directory-p scripts-dir)
           (dolist (script (directory-files scripts-dir t "\\.el$"))
@@ -118,7 +119,7 @@ so they appear in the `gptel-menu`."
                    (tool (macher-agent-resolve-tool base skills-dir)))
               (ignore tool)))))
       
-      ;; 2. Load all SKILL.md files and bundle them into gptel presets
+      ;; 2. Load all SKILL.md files and bundle them appropriately
       (dolist (subdir (directory-files skills-dir t "^[^.]"))
         (when (file-directory-p subdir)
           (let ((skill-file (expand-file-name "SKILL.md" subdir)))
@@ -134,13 +135,15 @@ so they appear in the `gptel-menu`."
                                                               (macher-agent-resolve-tool tname skills-dir))
                                                             tool-names)))))         
                     
-                    (if (fboundp 'gptel-make-preset)
+                    ;; Branch: Create a preset if tools exist, otherwise store as a raw prompt
+                    (if (and resolved-tools (fboundp 'gptel-make-preset))
                         (apply #'gptel-make-preset sym
                                :system body
                                (append 
                                 (when desc (list :description desc))
-                                (when resolved-tools (list :tools resolved-tools))))
-                      ;; Fallback: Only run if gptel version is too old to support presets.
+                                (list :tools resolved-tools)))
+                      
+                      ;; Fallback: Pure string prompt for tool-less skills
                       (setf (alist-get sym gptel-directives) body))))))))))))
 
 (provide 'macher-agent-skills)
