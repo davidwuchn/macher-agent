@@ -1,6 +1,8 @@
 ;;; macher-agent-skills.el --- Agent Skills parsing and resolution -*- lexical-binding: t -*-
 
 (require 'cl-lib)
+(require 'org)
+(require 'org-macro)
 
 (defvar macher-agent-tools-registry (make-hash-table :test 'equal)
   "Global registry mapping tool names (strings) to gptel tool objects.")
@@ -35,27 +37,40 @@ Handles both inline JSON arrays [...] and YAML block lists (- item)."
   "Parse a SKILL.md file at FILEPATH extracting frontmatter and body.
 Returns a property list compatible with the tests."
   (with-temp-buffer
-    (insert-file-contents filepath)
-    (goto-char (point-min))
-    (let ((name nil) (desc nil) (tools nil) (body nil))
-      ;; Extract YAML Frontmatter
-      (when (re-search-forward "^---\n" nil t)
-        (let ((start (point)))
-          (when (re-search-forward "^---\n" nil t)
-            (let ((frontmatter (buffer-substring-no-properties start (match-beginning 0))))
-              (when (string-match "^name:[ \t]*\"?\\([^\n\"]+\\)\"?" frontmatter)
-                (setq name (match-string 1 frontmatter)))
-              (when (string-match "^description:[ \t]*\"?\\([^\n\"]+\\)\"?" frontmatter)
-                (setq desc (match-string 1 frontmatter)))
-              (setq tools (macher-agent--parse-yaml-array frontmatter "allowed-tools"))))))
-      ;; Extract Markdown Body
-      (setq body (string-trim (buffer-substring-no-properties (point) (point-max))))
-      (list :name name
-            :name-sym (when name (intern name))
-            :description desc
-            :allowed-tools tools
-            :body body))))
-
+    (let ((org-inhibit-startup t))
+      (insert-file-contents filepath)
+      
+      ;; Ensure a trailing newline exists so org-element-context doesn't fail at EOF
+      (goto-char (point-max))
+      (unless (bolp)
+        (insert "\n"))
+      
+      (org-mode)
+      ;; Explicitly disable the cache locally after org-mode initialisation
+      ;; and outside of a let-binding to prevent the Emacs warning.
+      (setq-local org-element-use-cache nil)
+      
+      (org-macro-initialize-templates)
+      (org-macro-replace-all org-macro-templates)
+      (goto-char (point-min))
+      (let ((name nil) (desc nil) (tools nil) (body nil))
+        ;; Extract YAML Frontmatter
+        (when (re-search-forward "^---\n" nil t)
+          (let ((start (point)))
+            (when (re-search-forward "^---\n" nil t)
+              (let ((frontmatter (buffer-substring-no-properties start (match-beginning 0))))
+                (when (string-match "^name:[ \t]*\"?\\([^\n\"]+\\)\"?" frontmatter)
+                  (setq name (match-string 1 frontmatter)))
+                (when (string-match "^description:[ \t]*\"?\\([^\n\"]+\\)\"?" frontmatter)
+                  (setq desc (match-string 1 frontmatter)))
+                (setq tools (macher-agent--parse-yaml-array frontmatter "allowed-tools"))))))
+        ;; Extract Markdown Body
+        (setq body (string-trim (buffer-substring-no-properties (point) (point-max))))
+        (list :name name
+              :name-sym (when name (intern name))
+              :description desc
+              :allowed-tools tools
+              :body body)))))
 
 (defun macher-agent-resolve-tool (tool-name dir-context)
   "Retrieve TOOL-NAME from registry, or load it from DIR-CONTEXT/scripts if missing.
