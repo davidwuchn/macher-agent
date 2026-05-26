@@ -372,9 +372,10 @@
                           (let ((skill-meta (alist-get 'workspace-skill macher-agent-skills-alist)))
                             (expect (plist-get skill-meta :context-dir) :to-be nil))
                           
-                          ;; Resolution should fail to load because context-dir is nil
+                          ;; Resolution should fail to load because context-dir is nil,
+                          ;; returning the raw string fallback instead of a loaded tool object.
                           (let ((resolved (macher-agent-resolve-tool "workspace-tool-1" nil)))
-                            (expect resolved :to-be nil)
+                            (expect resolved :to-equal "workspace-tool-1")
                             (expect (boundp 'workspace-tool-1) :to-be nil))
                           
                           (delete-directory mock-script-dir t)))
@@ -389,6 +390,10 @@
                           
                           (macher-agent--apply-skill-tools 'test-preset)
                           
-                          (expect gptel-tools :to-equal (list mock-tool-obj))))))
+                          (expect gptel-tools :to-equal (list mock-tool-obj))))
+
+                    (it "expands org-macros in SKILL.md body"
+                        (let* ((parsed (macher-agent-parse-skill-file "tests/fixtures/skills/macro-skill/SKILL.md")))
+                          (expect (plist-get parsed :body) :to-match "Version: 0.1.0")))))
 
 (provide 'macher-agent-test)

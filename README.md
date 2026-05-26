@@ -106,7 +106,7 @@ Or
 A skill is defined by a `SKILL.md` file containing YAML or JSON-like frontmatter with a `name`, `description`, and `allowed-tools` array. The Markdown body is treated as the system prompt instructions.
 
 Example `SKILL.md`:
-```markdown
+```elisp
 ---
 name: mock-skillp
 description: A testing skill
@@ -114,6 +114,19 @@ allowed-tools: ["example-tool"]
 ---
 You are a testing assistant. Please use the example tool when needed.
 ```
+
+Or a skill using templated values:
+```elisp
+---
+name: versioned-skill
+description: A skill that uses macros
+allowed-tools: []
+---
+#+MACRO: version (eval (with-temp-buffer (insert-file-contents "version.txt") (string-trim (buffer-string))))
+
+The current version of this skill is {{{version}}}.
+```
+
 #### Configuration and Security
 *   `macher-agent-global-skills-directory` this custom variable to a trusted directory containing global agent skills. If a tool mentioned in `allowed-tools` is not registered natively, `macher-agent` will attempt to dynamically evaluate and load its implementation script from `<global-directory>/scripts/<tool-name>.el`.
 * `macher-agent` can also load skills from your active Emacs workspace (`M-x macher-agent-load-workspace-skills`). However, to maintain a secure sandbox, *scripts are ignored in workspace skills*. Workspace skills may only use tools that are already globally registered.
