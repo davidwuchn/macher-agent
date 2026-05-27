@@ -1,7 +1,7 @@
 ;;; macher-agent.el --- Sandboxed, Language-Agnostic AI Workflows -*- lexical-binding: t; -*-
 
 ;; Author: Elijah Charles
-;; Version: 0.1.3
+;; Version: 0.2.0
 ;; Package-Requires: ((emacs "29.1") (gptel "0.9.0") (macher "0.5.0"))
 ;; Keywords: convenience, gptel, llm, macher
 ;; URL: https://github.com/elij/macher-agent
@@ -32,10 +32,9 @@
   :type 'directory
   :group 'macher-agent)
 
-;; Initialize skills when loaded, if configured
+;; Initialize skills when loaded
 (with-eval-after-load 'macher-agent
-  (when macher-agent-global-skills-directory
-    (macher-agent-initialize-skills)))
+  (macher-agent-initialize-skills))
 
 (provide 'macher-agent)
 ;;; macher-agent.el ends here

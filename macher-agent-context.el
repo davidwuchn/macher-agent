@@ -9,6 +9,35 @@
 (defvar macher-agent-context-mutated-hook nil
   "Hook run whenever the agent's context is modified.")
 
+;; work around fir large edits
+(defun macher-agent--edit-string-fast (content old-string new-string &optional replace-all)
+  "Replacement for `macher--edit-string`."
+  (when (string-equal old-string new-string)
+    (error "No changes to make: old_string and new_string are exactly the same"))
+  
+  (if (string-empty-p old-string)
+      (if (string-empty-p content)
+          new-string
+        (error "Cannot replace empty string in non-empty content"))
+    (let ((matches 0)
+          (start 0))
+      ;; Fast C-level count
+      (while (setq start (string-search old-string content start))
+        (setq matches (1+ matches))
+        (setq start (+ start (length old-string))))
+      
+      (cond
+       ((= matches 0)
+        (error "String to replace not found in file"))
+       ((and (> matches 1) (not replace-all))
+        (error "Found %d matches of the string to replace, but replace_all is false. To replace all occurrences, set replace_all to true. To replace only one occurrence, please provide more context to uniquely identify the instance" matches))
+       (t
+        ;; Since we verified there is exactly 1 match (if not replace-all),
+        ;; or we want to replace all, we can safely use the native string-replace.
+        (string-replace old-string new-string content))))))
+
+(advice-add 'macher--edit-string :override #'macher-agent--edit-string-fast)
+
 (defun macher-agent--ensure-access (context path)
   "Halt execution if PATH is outside the agent's explicit scope."
   (let* ((actual-name (substring-no-properties path))
@@ -318,29 +347,31 @@ Optional ROOT-DIR is used to determine if a file resides within the workspace."
          c)))))
 
 (defun macher-agent-process-request-split (reason context fsm)
-  "Processes the request by splitting file edits and pure buffer edits into two patch screens."
-  (when context
-    (when (macher-context-dirty-p context)
-      (let* ((split (macher-agent--split-context context))
-             (file-ctx (car split))
-             (buf-ctx (cdr split)))
-        
-        (when file-ctx
-          (macher--build-patch file-ctx fsm))
-        
-        (when buf-ctx
-          (cl-letf (((symbol-function 'macher-patch-buffer)
-                     (lambda (&optional workspace create)
-                       (let ((result (macher--get-buffer "virtual-buffers-patch" workspace create)))
-                         (when result
-                           (let ((target-buffer (car result))
-                                 (created-p (cdr result)))
-                             (when created-p
-                               (with-current-buffer target-buffer
-                                 (macher--patch-buffer-setup)
-                                 (run-hooks 'macher-patch-buffer-setup-hook)))
-                             target-buffer))))))
-            (macher--build-patch buf-ctx fsm)))))))
+  "Processes the request by splitting file edits and pure buffer edits into two patch screens.
+Diff screen presentation is suppressed for sub-agents."
+  (unless (bound-and-true-p macher-agent--is-subagent)
+    (when context
+      (when (macher-context-dirty-p context)
+        (let* ((split (macher-agent--split-context context))
+               (file-ctx (car split))
+               (buf-ctx (cdr split)))
+          
+          (when file-ctx
+            (macher--build-patch file-ctx fsm))
+          
+          (when buf-ctx
+            (cl-letf (((symbol-function 'macher-patch-buffer)
+                       (lambda (&optional workspace create)
+                         (let ((result (macher--get-buffer "virtual-buffers-patch" workspace create)))
+                           (when result
+                             (let ((target-buffer (car result))
+                                   (created-p (cdr result)))
+                               (when created-p
+                                 (with-current-buffer target-buffer
+                                   (macher--patch-buffer-setup)
+                                   (run-hooks 'macher-patch-buffer-setup-hook)))
+                               target-buffer))))))
+              (macher--build-patch buf-ctx fsm))))))))
 
 ;; Override the native default processor with our splitting processor
 (setq macher-process-request-function #'macher-agent-process-request-split)
