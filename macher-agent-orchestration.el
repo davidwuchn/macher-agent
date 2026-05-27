@@ -46,6 +46,7 @@ the inherited CONTEXT."
   (with-current-buffer buf
     (setq default-directory full-dir)
     (setq-local macher-agent--is-workspace t)
+    (setq-local macher-agent--is-subagent t)
     (setq-local macher--workspace (cons 'agent full-dir))
     (when context
       (setq-local macher-agent--persistent-context context))

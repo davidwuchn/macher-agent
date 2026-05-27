@@ -122,6 +122,26 @@
                           (kill-buffer file-buf)
                           (kill-buffer pure-buf)))
 
+                    (it "suppresses diff presentation when executing as a subagent"
+                        (let* ((ctx (macher--make-context :dirty-p t))
+                               (fsm (make-mock-fsm)))
+                          (push (cons "*subagent-edit*" (cons "a" "b")) (macher-context-contents ctx))
+                          (spy-on 'macher--build-patch)
+                          
+                          ;; When not a subagent, it should call macher--build-patch
+                          (setq-default macher-agent--is-subagent nil)
+                          (macher-agent-process-request-split 'complete ctx fsm)
+                          (expect 'macher--build-patch :to-have-been-called)
+                          
+                          ;; Reset spy
+                          (spy-on 'macher--build-patch)
+                          
+                          ;; When a subagent, it should NOT call macher--build-patch
+                          (setq macher-agent--is-subagent t)
+                          (macher-agent-process-request-split 'complete ctx fsm)
+                          (expect 'macher--build-patch :not :to-have-been-called)
+                          (setq macher-agent--is-subagent nil)))
+
                     (it "forcefully injects :macher--context into the FSM info plist to awaken the native UI"
                         (let* ((fsm (gptel-make-fsm))
                                (ctx (macher--make-context :dirty-p t))
@@ -149,7 +169,16 @@
                             ;; 4. Verify the native UI engine was called
                             (expect 'macher-process-request :to-have-been-called-with 'complete fsm)))))
 
-          (describe "Orchestration Tools (macher-agent-gptel-tools.el)"
+          (describe "Orchestration Tools (skills/scripts/*.el)"
+                    (before-all
+                     ;; Load all tool scripts to define their variables for testing
+                     (dolist (script (directory-files "skills/scripts" t "\\.el$"))
+                       (with-temp-buffer
+                         (insert-file-contents script)
+                         (let ((val nil))
+                           (condition-case nil
+                               (while t (setq val (eval (read (current-buffer)) t)))
+                             (end-of-file val))))))
                     (it "guarantees list_buffers_in_workspace output perfectly matches context-tree buffer categorisation"
                         (let* ((ctx (macher--make-context :contents '(("*pure-buffer*" . ("" . ""))
                                                                       ("/external/path.txt" . ("" . ""))
@@ -379,6 +408,31 @@
                             (expect (boundp 'workspace-tool-1) :to-be nil))
                           
                           (delete-directory mock-script-dir t)))
+
+                    (it "verifies tool resolution hierarchy (workspace shadows package tools)"
+                        (let* ((pkg-dir (make-temp-file "macher-pkg" t))
+                               (ws-dir (make-temp-file "macher-ws" t))
+                               (pkg-scripts (expand-file-name "scripts" pkg-dir))
+                               (ws-scripts (expand-file-name "scripts" ws-dir)))
+                          (make-directory pkg-scripts t)
+                          (make-directory ws-scripts t)
+                          ;; Package provides tool-a and tool-b
+                          (with-temp-file (expand-file-name "tool-a.el" pkg-scripts) (insert "(setq tool-a 'pkg-a)"))
+                          (with-temp-file (expand-file-name "tool-b.el" pkg-scripts) (insert "(setq tool-b 'pkg-b)"))
+                          ;; Workspace overrides tool-a
+                          (with-temp-file (expand-file-name "tool-a.el" ws-scripts) (insert "(setq tool-a 'ws-a)"))
+                          
+                          ;; Clear registry
+                          (clrhash macher-agent-tools-registry)
+                          
+                          ;; Resolve pkg first, then workspace shadows
+                          (let* ((res-pkg-b (macher-agent-resolve-tool "tool-b" pkg-dir))
+                                 (res-ws-a (macher-agent-resolve-tool "tool-a" ws-dir)))
+                            (expect res-pkg-b :to-equal 'pkg-b)
+                            (expect res-ws-a :to-equal 'ws-a))
+                          
+                          (delete-directory pkg-dir t)
+                          (delete-directory ws-dir t)))
                     
                     (it "applies skill tools correctly into gptel-tools when selected"
                         (let ((gptel-tools nil)
@@ -394,6 +448,32 @@
 
                     (it "expands org-macros in SKILL.md body"
                         (let* ((parsed (macher-agent-parse-skill-file "tests/fixtures/skills/macro-skill/SKILL.md")))
-                          (expect (plist-get parsed :body) :to-match "Version: 0.1.0")))))
+                          (expect (plist-get parsed :body) :to-match "Version: 0.1.0")))
+
+                    (it "creates a preset when allowed-tools is provided"
+                        (let* ((mock-dir (make-temp-file "macher-test-skills-preset" t))
+                               (skill-dir (expand-file-name "test-skill" mock-dir)))
+                          (make-directory skill-dir t)
+                          (with-temp-file (expand-file-name "SKILL.md" skill-dir)
+                            (insert "---\nname: my-preset\ndescription: test\nallowed-tools: []\nmodel: gpt-4o\n---\nPreset body"))
+                          (spy-on 'gptel-make-preset)
+                          (macher-agent-initialize-skills mock-dir)
+                          (expect 'gptel-make-preset :to-have-been-called)
+                          (let ((args (spy-calls-args-for 'gptel-make-preset 0)))
+                            (expect (car args) :to-equal 'my-preset)
+                            (expect (plist-get (cdr args) :system) :to-equal "Preset body")
+                            (expect (plist-get (cdr args) :model) :to-equal 'gpt-4o))
+                          (delete-directory mock-dir t)))
+
+                    (it "injects directly into gptel-directives when allowed-tools is omitted"
+                        (let* ((mock-dir (make-temp-file "macher-test-skills-directive" t))
+                               (skill-dir (expand-file-name "test-skill" mock-dir)))
+                          (make-directory skill-dir t)
+                          (with-temp-file (expand-file-name "SKILL.md" skill-dir)
+                            (insert "---\nname: my-directive\n---\nDirective body"))
+                          (let ((gptel-directives nil))
+                            (macher-agent-initialize-skills mock-dir)
+                            (expect (alist-get 'my-directive gptel-directives) :to-equal "Directive body"))
+                          (delete-directory mock-dir t)))))
 
 (provide 'macher-agent-test)

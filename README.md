@@ -103,13 +103,14 @@ Or
 
 `macher-agent` includes support for reading and parsing Agent Skills, loosely based on the [AgentSkills SKILL.md specification](https://agentskills.io/specification/SKILL.md). This system automatically converts folder-based skill structures into `gptel` directives.
 
-A skill is defined by a `SKILL.md` file containing YAML or JSON-like frontmatter with a `name`, `description`, and `allowed-tools` array. The Markdown body is treated as the system prompt instructions.
+A skill is defined by a `SKILL.md` file containing YAML or JSON-like frontmatter with a `name`, `description`, optional `model`, and an `allowed-tools` array. The Markdown body is treated as the system prompt instructions.
 
 Example `SKILL.md`:
 ```elisp
 ---
 name: mock-skillp
 description: A testing skill
+model: gpt-4o
 allowed-tools: ["example-tool"]
 ---
 You are a testing assistant. Please use the example tool when needed.
