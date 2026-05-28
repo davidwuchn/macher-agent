@@ -126,6 +126,42 @@ If IS-GLOBAL is non-nil, sets :context-dir to allow script resolution."
     (file-name-directory file))
   "Directory where the macher-agent package is installed.")
 
+(defun macher-agent--load-scripts-from-dir (skills-dir)
+  "Load script tools from the scripts subdirectory of SKILLS-DIR."
+  (let ((scripts-dir (expand-file-name "scripts" skills-dir)))
+    (when (file-directory-p scripts-dir)
+      (dolist (script (directory-files scripts-dir t "\\.el$"))
+        (let* ((base (file-name-base script))
+               (tool (macher-agent-resolve-tool base skills-dir)))
+          (ignore tool))))))
+
+(defun macher-agent--load-skill-from-subdir (skills-dir subdir)
+  "Load a skill from SUBDIR of SKILLS-DIR if SKILL.md exists."
+  (when (file-directory-p subdir)
+    (let ((skill-file (expand-file-name "SKILL.md" subdir)))
+      (when (file-exists-p skill-file)
+        (let* ((parsed (macher-agent-load-skill-from-file skill-file t))
+               (sym (plist-get parsed :name-sym))
+               (body (plist-get parsed :body))
+               (desc (plist-get parsed :description))
+               (model (plist-get parsed :model))
+               (has-tools (plist-get parsed :has-tools))
+               (tool-names (plist-get parsed :allowed-tools)))
+          (when (and sym body)
+            (if has-tools
+                (let ((resolved-tools (when tool-names
+                                        (delq nil (mapcar (lambda (tname)
+                                                            (macher-agent-resolve-tool tname skills-dir))
+                                                          tool-names)))))
+                  (when (fboundp 'gptel-make-preset)
+                    (apply #'gptel-make-preset sym
+                           :system body
+                           (append 
+                            (when desc (list :description desc))
+                            (when model (list :model (intern model)))
+                            (list :tools resolved-tools)))))
+              (setf (alist-get sym gptel-directives) body))))))))
+
 (defun macher-agent-initialize-skills (&optional override-dir)
   "Load all skills from package, global, and workspace directories.
 If OVERRIDE-DIR is provided, load skills only from that directory."
@@ -140,37 +176,9 @@ If OVERRIDE-DIR is provided, load skills only from that directory."
                  (delq nil (list package-dir global-dir workspace-dir)))))
     (dolist (skills-dir dirs)
       (when (and skills-dir (file-directory-p skills-dir))
-        (let ((scripts-dir (expand-file-name "scripts" skills-dir)))
-          (when (file-directory-p scripts-dir)
-            (dolist (script (directory-files scripts-dir t "\\.el$"))
-              (let* ((base (file-name-base script))
-                     (tool (macher-agent-resolve-tool base skills-dir)))
-                (ignore tool)))))
+        (macher-agent--load-scripts-from-dir skills-dir)
         (dolist (subdir (directory-files skills-dir t "^[^.]"))
-          (when (file-directory-p subdir)
-            (let ((skill-file (expand-file-name "SKILL.md" subdir)))
-              (when (file-exists-p skill-file)
-                (let* ((parsed (macher-agent-load-skill-from-file skill-file t))
-                       (sym (plist-get parsed :name-sym))
-                       (body (plist-get parsed :body))
-                       (desc (plist-get parsed :description))
-                       (model (plist-get parsed :model))
-                       (has-tools (plist-get parsed :has-tools))
-                       (tool-names (plist-get parsed :allowed-tools)))
-                  (when (and sym body)
-                    (if has-tools
-                        (let ((resolved-tools (when tool-names
-                                                (delq nil (mapcar (lambda (tname)
-                                                                    (macher-agent-resolve-tool tname skills-dir))
-                                                                  tool-names)))))
-                          (when (fboundp 'gptel-make-preset)
-                            (apply #'gptel-make-preset sym
-                                   :system body
-                                   (append 
-                                    (when desc (list :description desc))
-                                    (when model (list :model (intern model)))
-                                    (list :tools resolved-tools)))))
-                      (setf (alist-get sym gptel-directives) body)))))))))))
+          (macher-agent--load-skill-from-subdir skills-dir subdir)))))
   (when-let* ((default-val (alist-get 'default gptel-directives))
               (default-prompt (if (listp default-val)
                                   (plist-get default-val :system)

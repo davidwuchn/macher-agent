@@ -27,7 +27,9 @@ to the headless execution layer and reports success via message."
   (interactive "BAdd buffer to current agent's scope: ")
   (let* ((buf-name (if (stringp buffer) buffer (buffer-name buffer)))
          ;; Lazily initialise the context if it doesn't exist yet
-         (ctx (macher-agent-current-context)))
+         (ctx (condition-case nil
+                  (macher-agent-current-context)
+                (error (setq-local macher-agent--persistent-context (macher--make-context))))))
     (macher-agent--add-buffer-to-scope-headless buf-name ctx)
     (message "SUCCESS: Added '%s' to the agent's restricted scope." buf-name)))
 
@@ -56,18 +58,18 @@ the inherited CONTEXT."
     (unless gptel-mode
       (gptel-mode 1))
     
-    (when (assoc "macher-agent-worker" gptel-directives)
-      (macher-agent--set-system-message (alist-get "macher-agent-worker" gptel-directives))
-      (make-local-variable 'gptel-tools)
-      (setq gptel-tools '("read_buffer_in_workspace" 
-                          "list_buffers_in_workspace" 
-                          "search_buffers_in_workspace"
-                          "edit_buffer_in_workspace"
-                          "multi_edit_buffer_in_workspace"
-                          "write_buffer_in_workspace"
-                          "write_and_commit_buffer_in_workspace"
-                          ;; Assuming this is your tool to finish the job:
-                          "submit_task_result")))))
+    (let* ((preset-sym 'macher-agent-worker)
+           (skill-meta (alist-get preset-sym macher-agent-skills-alist)))
+      (when skill-meta
+        (macher-agent--set-system-message (plist-get skill-meta :body))
+        (make-local-variable 'gptel-tools)
+        (setq gptel-tools nil)
+        (let ((dir-context (plist-get skill-meta :context-dir)))
+          (dolist (tname (plist-get skill-meta :tools))
+            (let ((tool (macher-agent-resolve-tool tname dir-context)))
+              (when tool
+                (push tool gptel-tools)))))
+        (setq gptel-tools (nreverse gptel-tools))))))
 
 ;;;###autoload
 (defun macher-agent-add-subagent (name dir &optional _display context)
