@@ -3,6 +3,7 @@
 (require 'cl-lib)
 (require 'macher)
 (require 'gptel nil t)
+(require 'xref)
 
 (declare-function gptel-fsm-info "gptel" (fsm))
 
@@ -57,25 +58,41 @@
       (setq-local macher-agent--persistent-context fsm-ctx)
       fsm-ctx)
      (t
-      ;; Lazy Initialization: Start from a blank slate with FULL macher integration.
-      (let ((new-ctx (macher--make-context
-                      :workspace (when (fboundp 'macher-workspace) (macher-workspace))
-                      :process-request-function (when (boundp 'macher-process-request-function) 
-                                                  macher-process-request-function))))
-        (setq-local macher-agent--persistent-context new-ctx)
-        new-ctx)))))
+      (let ((primary-ctx nil))
+        (dolist (buf (buffer-list))
+          (with-current-buffer buf
+            (when (bound-and-true-p macher-agent--persistent-context)
+              (if primary-ctx
+                  (error "Multiple active agent sessions found; cannot resolve primary context")
+                (setq primary-ctx macher-agent--persistent-context)))))
+        (unless primary-ctx
+          (error "No active agent session found"))
+        (setq-local macher-agent--persistent-context primary-ctx)
+        primary-ctx)))))
+
+(defun macher-agent--read-content-from-disk-or-buffer (path)
+  "Read the content of PATH from its live buffer or physical file."
+  (let ((buf (or (get-file-buffer path) (get-buffer path))))
+    (cond
+     ((and buf (buffer-live-p buf))
+      (with-current-buffer buf
+        (buffer-substring-no-properties (point-min) (point-max))))
+     ((file-exists-p path)
+      (with-temp-buffer
+        (insert-file-contents path)
+        (buffer-string)))
+     (t nil))))
 
 (defun macher-agent--get-buffer-content (path)
   "Get the content of a buffer or file by path."
-  (cond
-   ((or (get-file-buffer path) (get-buffer path))
-    (with-current-buffer (or (get-file-buffer path) (get-buffer path))
-      (buffer-substring-no-properties (point-min) (point-max))))
-   ((file-exists-p path)
-    (with-temp-buffer
-      (insert-file-contents path)
-      (buffer-string)))
-   (t nil)))
+  (let* ((ctx (macher-agent-current-context))
+         (workspace (when ctx (macher-context-workspace ctx)))
+         (workspace-root (when workspace (macher--workspace-root workspace)))
+         (abs-path (expand-file-name path)))
+    (when (and workspace-root
+               (not (string-prefix-p (expand-file-name workspace-root) abs-path)))
+      (error "SECURITY ERROR: Path traversal attempt detected. Path '%s' is outside workspace root '%s'." path workspace-root))
+    (macher-agent--read-content-from-disk-or-buffer path)))
 
 (defun macher-agent--update-context-file (context path new-content)
   "Update the virtual NEW-CONTENT for PATH in the macher CONTEXT.
@@ -146,19 +163,12 @@ Optional ROOT-DIR is used to determine if a file resides within the workspace."
 
 (defun macher-agent--get-files (dir)
   "Safely return files for the agent workspace, respecting VC ignores."
-  (condition-case nil
-      (if-let ((proj (project-current nil dir)))
-          (project-files proj)
-        ;; Fallback if not in a recognized project
-        (directory-files-recursively
-         dir "^[^.]" nil
-         (lambda (d)
-           (let ((base (file-name-nondirectory (directory-file-name d))))
-             (and (not (member base '(".git" "target" "node_modules" ".Trash" "Library")))
-                  (condition-case nil
-                      (progn (directory-files d) t)
-                    (error nil)))))))
-    (error nil)))
+  (let ((expanded-dir (expand-file-name dir)))
+    (condition-case err
+        (if-let ((proj (project-current nil expanded-dir)))
+            (project-files proj)
+          (error "SECURITY HALT: Workspace '%s' is not under version control. Unbounded scans are prohibited." expanded-dir))
+      (error (error "Agent Workspace Error: %s" (error-message-string err))))))
 
 ;; Register the new agent workspace type
 (add-to-list 'macher-workspace-types-alist
@@ -193,6 +203,19 @@ Optional ROOT-DIR is used to determine if a file resides within the workspace."
         (unless (equal orig new)
           (macher-agent--update-context-file parent-ctx path new))))))
 
+(defun macher-agent--sync-context-entry (entry)
+  "Synchronize a single virtual memory ENTRY against disk/buffer state."
+  (let* ((path (car entry))
+         (content-pair (cdr entry))
+         (orig (car content-pair))
+         (new (cdr content-pair))
+         (current-state (macher-agent--read-content-from-disk-or-buffer path)))
+    (when (or (not (equal orig new))
+              (not (equal orig current-state)))
+      (setcar content-pair current-state)
+      (setcdr content-pair current-state)
+      t)))
+
 (defun macher-agent--auto-sync-context (ctx &optional fsm &rest _args)
   "Check live buffers and physical disk to fast-forward the agent's memory using strict three-way merge logic."
   (let ((actual-ctx (if fsm (macher-agent--fsm-get-context fsm) ctx)))
@@ -200,54 +223,8 @@ Optional ROOT-DIR is used to determine if a file resides within the workspace."
       (let ((contents (macher-context-contents actual-ctx))
             (synced nil))
         (dolist (entry contents)
-          (let* ((path (car entry))
-                 (content-pair (cdr entry))
-                 (orig (car content-pair))
-                 (new (cdr content-pair))
-                 (buf (or (get-file-buffer path) (get-buffer path)))
-                 (disk-exists (file-exists-p path))
-                 (current-state 
-                  (cond
-                   ((and buf (buffer-live-p buf))
-                    (with-current-buffer buf
-                      (buffer-substring-no-properties (point-min) (point-max))))
-                   (disk-exists
-                    (with-temp-buffer
-                      (insert-file-contents path)
-                      (buffer-string)))
-                   (t nil)))
-                 
-                 ;; Establish our truth table booleans
-                 (local-changed (not (equal orig new)))
-                 (remote-changed (not (equal orig current-state))))
-            
-            (cond
-             ;; 1. Clean Convergence: The patch was applied externally
-             ((and local-changed remote-changed (equal new current-state))
-              (setcar content-pair current-state)
-              (setq synced t))
-
-             ;; 2. Fast-Forward: External edit only (or external deletion)
-             ((and remote-changed (not local-changed))
-              (setcar content-pair current-state)
-              (setcdr content-pair current-state)
-              (setq synced t))
-
-             ;; 3. True Conflict: Both diverged to different states
-             ((and local-changed remote-changed (not (equal new current-state)))
-              ;; The safest autonomous action is cache invalidation (adopt remote)
-              (setcar content-pair current-state)
-              (setcdr content-pair current-state)
-              (setq synced t))
-
-             ;; 4. Stale Virtual Edit (Unapplied Patch)
-             ;; The agent proposed an edit, but it was ignored by the user.
-             ;; Invalidate the edit to prevent ghost diffs on the next turn.
-             ((and local-changed (not remote-changed))
-              (setcar content-pair current-state)
-              (setcdr content-pair current-state)
-              (setq synced t)))))
-        
+          (when (macher-agent--sync-context-entry entry)
+            (setq synced t)))
         (when synced
           (setf (macher-context-dirty-p actual-ctx) nil)
           (run-hooks 'macher-agent-context-mutated-hook))))))
@@ -264,25 +241,15 @@ Optional ROOT-DIR is used to determine if a file resides within the workspace."
   "Adapter to securely retrieve the macher context from the gptel FSM."
   (plist-get (gptel-fsm-info fsm) :macher--context))
 
-(defun macher-agent-current-context ()
-  "Dynamically resolve the active agent context for tool execution."
-  (let* ((fsm (bound-and-true-p macher--fsm-latest))
-         (fsm-ctx (when fsm (macher-agent--fsm-get-context fsm)))
-         (pers-ctx (bound-and-true-p macher-agent--persistent-context)))
-    (cond
-     (pers-ctx pers-ctx)
-     (fsm-ctx
-      (setq-local macher-agent--persistent-context fsm-ctx)
-      fsm-ctx)
-     (t
-      (let ((new-ctx (macher--make-context
-                      :workspace (when (fboundp 'macher-workspace) (macher-workspace))
-                      :process-request-function (when (boundp 'macher-process-request-function) 
-                                                  macher-process-request-function))))
-        (setq-local macher-agent--persistent-context new-ctx)
-        new-ctx)))))
 
-;; --- Bridge to Native Macher Patch Engine ---
+
+(defun macher-agent--handle-termination (terminated-fsm)
+  "Handle completion of an agent's reasoning cycle."
+  (let ((ctx (macher-agent--fsm-get-context terminated-fsm)))
+    (when (and ctx (macher-context-dirty-p ctx))
+      (setf (gptel-fsm-info terminated-fsm)
+            (plist-put (gptel-fsm-info terminated-fsm) :macher--context ctx))
+      (macher-process-request 'complete terminated-fsm))))
 
 (defun macher-agent--bridge-context-advice (orig-fun fsm get-context)
   "Bridge the native macher setup with the agent's persistent memory by proxying the context generator."
@@ -311,15 +278,7 @@ Optional ROOT-DIR is used to determine if a file resides within the workspace."
       (let ((final-ctx (funcall proxy-get-context)))
         (when final-ctx
           (macher-agent--fsm-put-context fsm final-ctx)
-          
-          (macher--add-termination-handler
-           fsm
-           (lambda (terminated-fsm)
-             (let ((ctx (macher-agent--fsm-get-context terminated-fsm)))
-               (when (and ctx (macher-context-dirty-p ctx))
-                 (setf (gptel-fsm-info terminated-fsm)
-                       (plist-put (gptel-fsm-info terminated-fsm) :macher--context ctx))
-                 (macher-process-request 'complete terminated-fsm))))))))))
+          (macher--add-termination-handler fsm #'macher-agent--handle-termination))))))
 
 ;; Apply the new secure internal bridge
 (advice-add 'macher--setup-tools :around #'macher-agent--bridge-context-advice)
@@ -346,32 +305,33 @@ Optional ROOT-DIR is used to determine if a file resides within the workspace."
          (setf (macher-context-contents c) (nreverse buffers))
          c)))))
 
+(defun macher-agent--build-virtual-patch (buf-ctx fsm)
+  "Build patch buffer specifically for virtual buffers."
+  (cl-letf (((symbol-function 'macher-patch-buffer)
+             (lambda (&optional workspace create)
+               (let ((result (macher--get-buffer "virtual-buffers-patch" workspace create)))
+                 (when result
+                   (let ((target-buffer (car result))
+                         (created-p (cdr result)))
+                     (when created-p
+                       (with-current-buffer target-buffer
+                         (macher--patch-buffer-setup)
+                         (run-hooks 'macher-patch-buffer-setup-hook)))
+                     target-buffer))))))
+    (macher--build-patch buf-ctx fsm)))
+
 (defun macher-agent-process-request-split (reason context fsm)
   "Processes the request by splitting file edits and pure buffer edits into two patch screens.
 Diff screen presentation is suppressed for sub-agents."
   (unless (bound-and-true-p macher-agent--is-subagent)
-    (when context
-      (when (macher-context-dirty-p context)
-        (let* ((split (macher-agent--split-context context))
-               (file-ctx (car split))
-               (buf-ctx (cdr split)))
-          
-          (when file-ctx
-            (macher--build-patch file-ctx fsm))
-          
-          (when buf-ctx
-            (cl-letf (((symbol-function 'macher-patch-buffer)
-                       (lambda (&optional workspace create)
-                         (let ((result (macher--get-buffer "virtual-buffers-patch" workspace create)))
-                           (when result
-                             (let ((target-buffer (car result))
-                                   (created-p (cdr result)))
-                               (when created-p
-                                 (with-current-buffer target-buffer
-                                   (macher--patch-buffer-setup)
-                                   (run-hooks 'macher-patch-buffer-setup-hook)))
-                               target-buffer))))))
-              (macher--build-patch buf-ctx fsm))))))))
+    (when (and context (macher-context-dirty-p context))
+      (let* ((split (macher-agent--split-context context))
+             (file-ctx (car split))
+             (buf-ctx (cdr split)))
+        (when file-ctx
+          (macher--build-patch file-ctx fsm))
+        (when buf-ctx
+          (macher-agent--build-virtual-patch buf-ctx fsm))))))
 
 ;; Override the native default processor with our splitting processor
 (setq macher-process-request-function #'macher-agent-process-request-split)

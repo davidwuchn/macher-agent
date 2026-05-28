@@ -205,6 +205,7 @@
                                (tool-fn (gptel-tool-function macher-agent-delegate-tasks-to-subagents-tool))
                                (buf (get-buffer-create "test-sub")))
                           
+                          (spy-on 'macher-agent-current-context :and-return-value (macher--make-context))
                           (spy-on 'json-parse-string :and-return-value expected-vector)
                           (spy-on 'macher-agent--execute-parallel)
                           (spy-on 'macher-agent--prepare-subagent-instructions)
@@ -238,6 +239,7 @@
                                (callback-called nil)
                                (callback (lambda (msg) (setq callback-called msg))))
                           
+                          (spy-on 'macher-agent-current-context :and-return-value (macher--make-context))
                           ;; Mock the dispatcher to instantly return a success payload rather than firing the network
                           (spy-on 'macher-agent--dispatch-and-wait :and-call-fake
                                   (lambda (b cb)
@@ -277,6 +279,7 @@
                     (it "submit_task_result sets the final result buffer-locally"
                         (let* ((buf (generate-new-buffer "worker-buf"))
                                (tool-fn (gptel-tool-function macher-agent-submit-task-result-tool)))
+                          (spy-on 'macher-agent-current-context :and-return-value (macher--make-context))
                           (with-current-buffer buf
                             (funcall tool-fn "My final answer")
                             (expect macher-agent--final-result :to-equal "My final answer"))

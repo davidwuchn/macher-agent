@@ -13,9 +13,7 @@
                                        (classification (macher-agent-context-classify-entry buf-name root-dir)))
                                   ;; Include both pure buffers and external files
                                   (when (memq classification '(buffer external))
-                                    ;; Read from virtual memory if present, fallback to live content
-                                    (let ((content (or (cddr entry)
-                                                       (macher-agent--get-buffer-content buf-name))))
+                                    (let ((content (macher-agent--read-context-file context buf-name)))
                                       (when content
                                         (with-temp-buffer
                                           (insert content)
@@ -23,7 +21,7 @@
                                           (while (re-search-forward pattern nil t)
                                             (let* ((line (line-number-at-pos))
                                                    (match-content (string-trim (thing-at-point 'line t))))
-                                              (push (format "%s:%d: %s" buf-name line match-content) results))))))))))
-                            (if results
-                                (mapconcat #'identity (nreverse results) "\n")
-                              (format "No matches found for '%s' in your scoped buffers." pattern))))
+                                              (push (format "%s:%d: %s" buf-name line match-content) results)))))))))
+                              (if results
+                                  (mapconcat #'identity (nreverse results) "\n")
+                                (format "No matches found for '%s' in your scoped buffers." pattern))))

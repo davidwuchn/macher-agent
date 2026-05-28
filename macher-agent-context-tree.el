@@ -80,6 +80,20 @@
     ;; 2. Flatten the tree recursively, passing down the active context tracker
     (macher-agent-context-tree--flatten-hash tree 0 depth-offset "" active-hash)))
 
+(defun macher-agent-context-tree--render-buffers (ewoc buffers)
+  "Render active BUFFERS into the EWOC tree."
+  (when buffers
+    (ewoc-enter-last ewoc (make-macher-agent-tree-node :type 'root :name "Active Buffers" :depth 0))
+    (dolist (b buffers)
+      (ewoc-enter-last ewoc (make-macher-agent-tree-node :type 'buffer :name b :depth 1 :path b)))))
+
+(defun macher-agent-context-tree--render-files (ewoc all-files active-files-hash)
+  "Render ALL-FILES into the EWOC tree, flagging active files."
+  (when all-files
+    (ewoc-enter-last ewoc (make-macher-agent-tree-node :type 'root :name "Workspace" :depth 0))
+    (dolist (node (macher-agent-context-tree--build-file-nodes all-files 1 active-files-hash))
+      (ewoc-enter-last ewoc node))))
+
 (defun macher-agent-context-tree--populate (ewoc context)
   "Extract the complete workspace structure and flag items currently in CONTEXT."
   (let* ((workspace (when (fboundp 'macher-context-workspace)
@@ -100,7 +114,6 @@
     ;; Top Header
     (ewoc-set-hf ewoc (propertize project-name 'face 'bold) "")
 
-    ;; 1. Determine what is currently "active" in the agent's memory
     ;; 1. Determine what is currently "active" in the agent's memory
     (dolist (entry contents)
       (let* ((path-or-buf (car entry))
@@ -132,17 +145,8 @@
     (setq buffers (sort buffers #'string<))
     (setq all-files (sort all-files #'string<))
 
-    ;; Render Buffers Parent
-    (when buffers
-      (ewoc-enter-last ewoc (make-macher-agent-tree-node :type 'root :name "Active Buffers" :depth 0))
-      (dolist (b buffers)
-        (ewoc-enter-last ewoc (make-macher-agent-tree-node :type 'buffer :name b :depth 1 :path b))))
-
-    ;; Render Files Parent
-    (when all-files
-      (ewoc-enter-last ewoc (make-macher-agent-tree-node :type 'root :name "Workspace" :depth 0))
-      (dolist (node (macher-agent-context-tree--build-file-nodes all-files 1 active-files-hash))
-        (ewoc-enter-last ewoc node)))))
+    (macher-agent-context-tree--render-buffers ewoc buffers)
+    (macher-agent-context-tree--render-files ewoc all-files active-files-hash)))
 
 ;; --- State & Modes ---
 

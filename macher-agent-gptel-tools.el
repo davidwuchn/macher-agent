@@ -43,6 +43,17 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
 
 ;; --- Pure Event-Driven Orchestration ---
 
+(defun macher-agent--format-parallel-results (master-ctx results)
+  "Format sub-agent results and merge shadow contexts into MASTER-CTX."
+  (mapconcat (lambda (r)
+               (let ((buf-name (car r))
+                     (res (cdr r)))
+                 (when-let ((buf (get-buffer buf-name))
+                            (shadow-ctx (buffer-local-value 'macher-agent--persistent-context buf)))
+                   (macher-agent--merge-contexts master-ctx shadow-ctx))
+                 (format "=== Response from %s ===\n%s" buf-name res)))
+             (nreverse results) "\n\n"))
+
 (defun macher-agent--execute-parallel (buffers callback)
   "Execute multiple sub-agents concurrently using event-driven callbacks."
   (let ((pending-count (length buffers))
@@ -54,17 +65,7 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
            (when (= pending-count 0)
              (if errors
                  (funcall callback (list :status 'error :error (string-join errors "\n")))
-               ;; Map over results and merge shadow contexts back
-               (let ((final-output
-                      (mapconcat (lambda (r) 
-                                   (let ((buf-name (car r))
-                                         (res (cdr r)))
-                                     ;; Merge back the shadow context if it exists
-                                     (when-let ((buf (get-buffer buf-name))
-                                                (shadow-ctx (buffer-local-value 'macher-agent--persistent-context buf)))
-                                       (macher-agent--merge-contexts master-ctx shadow-ctx))
-                                     (format "=== Response from %s ===\n%s" buf-name res)))
-                                 (nreverse results) "\n\n")))
+               (let ((final-output (macher-agent--format-parallel-results master-ctx results)))
                  (funcall callback (list :status 'success :data (format "All sub-agents completed. Outputs:\n\n%s" final-output))))))))
       (dolist (buf buffers)
         ;; Clone context and assign buffer-locally
@@ -116,6 +117,29 @@ Relies on macher-agent--bridge-context-advice to safely bind virtual memory."
 
 ;; --- Tools ---
 
+(defun macher-agent--parse-tool-arg (arg)
+  "Parse a JSON string argument into a Lisp object if applicable."
+  (if (and (stringp arg)
+           (or (string-prefix-p "[" (string-trim arg))
+               (string-prefix-p "{" (string-trim arg))))
+      (condition-case nil
+          (json-parse-string arg :array-type 'vector :object-type 'plist)
+        (error arg))
+    arg))
+
+(defun macher-agent--validate-tool-args (name-symbol context clean-args parsed-args)
+  "Middleware: Security check for buffer arguments after JSON parsing."
+  (let ((arg-alist (cl-mapcar #'cons clean-args parsed-args)))
+    (unless (eq name-symbol 'macher-agent-write-buffer-in-workspace-tool)
+      (dolist (arg-name '("buffer_name" "buffer_names"))
+        (let* ((arg-sym (intern arg-name))
+               (val (cdr (assq arg-sym arg-alist))))
+          (when val
+            (if (or (listp val) (vectorp val))
+                (cl-loop for item being the elements of val do
+                         (macher-agent--ensure-access context item))
+              (macher-agent--ensure-access context val))))))))
+
 (cl-defmacro macher-agent-define-tool (name-symbol (description category &key args async) lambda-args &rest body)
   "Define a gptel tool with standardised JSON parsing, error handling, and native signature."
   (let* ((name-str (replace-regexp-in-string "^macher-agent-\\|-tool$" "" (symbol-name name-symbol)))
@@ -133,49 +157,29 @@ Relies on macher-agent--bridge-context-advice to safely bind virtual memory."
         :function
         (lambda ,all-lambda-args
           ,docstring
-          (let ((context (macher-agent-current-context)))
-            (let ((parsed-args
-                   (mapcar (lambda (arg)
-                             (if (and (stringp arg)
-                                      (or (string-prefix-p "[" (string-trim arg))
-                                          (string-prefix-p "{" (string-trim arg))))
-                                 (condition-case nil
-                                     (json-parse-string arg :array-type 'vector :object-type 'plist)
-                                   (error arg))
-                               arg))
-                           (list ,@clean-args))))
+          (let* ((context (macher-agent-current-context))
+                 (parsed-args (mapcar #'macher-agent--parse-tool-arg (list ,@clean-args))))
+            (macher-agent--validate-tool-args ',name-symbol context ',clean-args parsed-args)
 
-              ;; Middleware: Security check for buffer arguments after JSON parsing
-              (let ((arg-alist (cl-mapcar #'cons ',clean-args parsed-args)))
-                (unless (eq ',name-symbol 'macher-agent-write-buffer-in-workspace-tool)
-                  (dolist (arg-name '("buffer_name" "buffer_names"))
-                    (let* ((arg-sym (intern arg-name))
-                           (val (cdr (assq arg-sym arg-alist))))
-                      (when val
-                        (if (or (listp val) (vectorp val))
-                            (cl-loop for item being the elements of val do
-                                     (macher-agent--ensure-access context item))
-                          (macher-agent--ensure-access context val)))))))
+            ,(if async
+                 `(let ((callback (lambda (plist-result)
+                                    (let ((final-str (if (eq (plist-get plist-result :status) 'success)
+                                                         (plist-get plist-result :data)
+                                                       (plist-get plist-result :error))))
+                                      (funcall gptel-callback final-str)))))
+                    (condition-case err
+                        (apply (lambda ,lambda-args ,@body) parsed-args)
+                      (error
+                       (funcall callback (list :status 'error :error (macher-agent--format-error err))))))
 
-              ,(if async
-                   `(let ((callback (lambda (plist-result)
-                                      (let ((final-str (if (eq (plist-get plist-result :status) 'success)
-                                                           (plist-get plist-result :data)
-                                                         (plist-get plist-result :error))))
-                                        (funcall gptel-callback final-str)))))
-                      (condition-case err
-                          (apply (lambda ,lambda-args ,@body) parsed-args)
-                        (error
-                         (funcall callback (list :status 'error :error (macher-agent--format-error err))))))
-
-                 `(let ((result
-                         (condition-case err
-                             (list :status 'success :data (apply (lambda ,lambda-args ,@body) parsed-args))
-                           (error
-                            (list :status 'error :error (macher-agent--format-error err))))))
-                    (if (eq (plist-get result :status) 'success)
-                        (plist-get result :data)
-                      (plist-get result :error)))))))))))
+               `(let ((result
+                       (condition-case err
+                           (list :status 'success :data (apply (lambda ,lambda-args ,@body) parsed-args))
+                         (error
+                          (list :status 'error :error (macher-agent--format-error err))))))
+                  (if (eq (plist-get result :status) 'success)
+                      (plist-get result :data)
+                    (plist-get result :error))))))))))
 
 (defun macher-agent--format-error (err)
   "Standardise the error message string for the LLM."
