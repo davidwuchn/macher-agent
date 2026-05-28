@@ -2,6 +2,9 @@
 
 (require 'cl-lib)
 
+(declare-function macher-agent--run-async-cmd "macher-agent-context-tools" (name cmd dir callback))
+(declare-function macher-agent--build-rsync-cmd "macher-agent-context-tools" (source dest))
+
 (cl-defstruct macher-agent-vfs
   "A virtual file system that overlays in-memory edits on a physical project directory."
   root-dir

@@ -1,3 +1,5 @@
+(require 'macher-agent)
+
 (macher-agent-define-tool macher-agent-read-buffer-in-workspace-tool
                           ("Read the contents of a scoped buffer (ie a buffer in your allowed list)."
                            "ro"

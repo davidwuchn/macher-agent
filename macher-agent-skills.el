@@ -70,7 +70,7 @@ Returns a property list compatible with the tests."
               :body body)))))
 
 (defun macher-agent-resolve-tool (tool-name dir-context)
-  "Retrieve TOOL-NAME from registry, or load it from DIR-CONTEXT/scripts if missing.
+  "Retrieve TOOL-NAME from registry, or load from DIR-CONTEXT/scripts.
 If no local script is found, fallback to returning the TOOL-NAME string,
 assuming it is a globally registered native gptel/macher tool."
   (or (gethash tool-name macher-agent-tools-registry)

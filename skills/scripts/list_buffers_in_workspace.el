@@ -1,3 +1,5 @@
+(require 'macher-agent)
+
 (macher-agent-define-tool macher-agent-list-buffers-in-workspace-tool
                           ("List all buffers you currently have explicit access to. You cannot access buffers outside this list."
                            "ro")

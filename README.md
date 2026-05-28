@@ -154,6 +154,6 @@ Alternatively, you can create sub-agents manually using interactive commands. Yo
 | `write_and_commit_buffer_in_workspace` | Overwrites a buffer and syncs the context.                      |
 | `multi_edit_buffer_in_workspace`       | Performs string replacements in a buffer.                       |
 | `read_buffer_in_workspace`             | Retrieves buffer contents from the persistent context.          |
-| `read_image_in_workspace`              | Reads an image into the agent's context (requires `gptel-track-media`). |
+| `read_image_in_workspace`              | Reads an image into the agent's context. |
 | `list_buffers_in_workspace`            | Lists active agent buffers in scope.                            |
 | `search_buffers_in_workspace`          | Searches across accessible agent buffers.                       |

@@ -1,3 +1,5 @@
+(require 'macher-agent)
+
 (macher-agent-define-tool macher-agent-spawn-subagent-tool
                           ("Spawn a new sub-agent buffer to handle delegated work." "orchestrate" 
                            :args '((:name "name" :type string)))

@@ -1,3 +1,5 @@
+(require 'macher-agent)
+
 (macher-agent-define-tool macher-agent-delegate-tasks-to-subagents-tool
                           ("Delegate tasks to multiple sub-agents asynchronously." "orchestrate"
                            :args '((:name "tasks" :type array :description "An array of task objects to delegate to sub-agents."

@@ -58,13 +58,23 @@
       (setq-local macher-agent--persistent-context fsm-ctx)
       fsm-ctx)
      (t
-      (let ((primary-ctx nil))
+      (let ((primary-ctx nil)
+            (current-root (or (and (fboundp 'vc-root-dir) (vc-root-dir))
+                              default-directory)))
         (dolist (buf (buffer-list))
           (with-current-buffer buf
-            (when (bound-and-true-p macher-agent--persistent-context)
-              (if primary-ctx
-                  (error "Multiple active agent sessions found; cannot resolve primary context")
-                (setq primary-ctx macher-agent--persistent-context)))))
+            (when (and (bound-and-true-p macher-agent--is-workspace)
+                       (bound-and-true-p macher-agent--persistent-context))
+              (let* ((ws (when (fboundp 'macher-context-workspace) 
+                           (macher-context-workspace macher-agent--persistent-context)))
+                     (agent-root (when ws (macher--workspace-root ws))))
+                (when (and agent-root
+                           current-root
+                           (string-prefix-p (expand-file-name agent-root)
+                                            (expand-file-name current-root)))
+                  (if primary-ctx
+                      (error "Multiple active agent sessions found; cannot resolve primary context")
+                    (setq primary-ctx macher-agent--persistent-context)))))))
         (unless primary-ctx
           (error "No active agent session found"))
         (setq-local macher-agent--persistent-context primary-ctx)
@@ -125,7 +135,7 @@ Can handle both physical file paths and pure Emacs buffer names."
      (t (error "ERROR: Buffer '%s' does not exist." path)))))
 
 (defun macher-agent-context-classify-entry (path-or-buf &optional root-dir)
-  "Classify PATH-OR-BUF as a workspace 'file', 'external', or 'buffer'.
+  "Classify PATH-OR-BUF as a workspace \\='file\\=', \\='external\\=', or \\='buffer\\='.
 Optional ROOT-DIR is used to determine if a file resides within the workspace."
   (let* ((expanded (expand-file-name path-or-buf))
          (buf (get-buffer path-or-buf))
@@ -200,8 +210,7 @@ Enforces strict boundary validation to prevent unbounded scans of home or root."
 
 (defun macher-agent--merge-contexts (parent-ctx child-ctx)
   "Append all dirty file pairs from CHILD-CTX back into PARENT-CTX."
-  (let ((parent-contents (macher-context-contents parent-ctx))
-        (child-contents (macher-context-contents child-ctx)))
+  (let ((child-contents (macher-context-contents child-ctx)))
     (dolist (child-entry child-contents)
       (let* ((path (car child-entry))
              (orig-new (cdr child-entry))
@@ -225,7 +234,7 @@ Enforces strict boundary validation to prevent unbounded scans of home or root."
       t)))
 
 (defun macher-agent--auto-sync-context (ctx &optional fsm &rest _args)
-  "Check live buffers and physical disk to fast-forward the agent's memory using strict three-way merge logic."
+  "Check live buffers and physical disk to fast-forward the agent's memory."
   (let ((actual-ctx (if fsm (macher-agent--fsm-get-context fsm) ctx)))
     (when actual-ctx
       (let ((contents (macher-context-contents actual-ctx))
@@ -240,10 +249,13 @@ Enforces strict boundary validation to prevent unbounded scans of home or root."
 
 (defun macher-agent--persist-vfs-to-hidden-buffer (ctx)
   "Persist the VFS state to a dedicated hidden buffer.
-This moves the heavy string payload out of raw Lisp variables into a C-optimised
-gap buffer (*macher-agent-vfs-state*), preventing geometric string allocation loops
-and GC pauses when the UI thread interacts with the agent context."
-  (let ((vfs-buf (get-buffer-create " *macher-agent-vfs-state*")))
+This moves the heavy string payload out of raw Lisp variables into a
+C-optimised gap buffer, preventing memory loops. Uses a unique buffer
+per workspace to prevent cross-contamination."
+  (let* ((workspace (when (fboundp 'macher-context-workspace) (macher-context-workspace ctx)))
+         (root-dir (if workspace (macher--workspace-root workspace) "default"))
+         (buf-name (format " *macher-agent-vfs-state-%s*" (md5 (expand-file-name root-dir))))
+         (vfs-buf (get-buffer-create buf-name)))
     (with-current-buffer vfs-buf
       (erase-buffer)
       ;; Insert a lightweight, parsable dump of the VFS
@@ -255,7 +267,7 @@ and GC pauses when the UI thread interacts with the agent context."
           (when new-content
             (insert (format "=== VFS ENTRY: %s ===\n" path))
             (insert new-content)
-            (insert "\n========================\n\n")))))))
+            (insert "\n=======================\n\n")))))))
 
 ;; --- Adapters ---
 
@@ -280,8 +292,8 @@ and GC pauses when the UI thread interacts with the agent context."
       (macher-process-request 'complete terminated-fsm))))
 
 (defun macher-agent--bridge-context-advice (orig-fun fsm get-context)
-  "Bridge the native macher setup with the agent's persistent memory by proxying the context generator.
-Enforces explicit context hunting to prevent orphaned ghost sessions outside workspace boundaries."
+  "Bridge macher setup with the agent's memory by proxying the context generator.
+Enforces explicit context hunting to prevent orphaned ghost sessions."
   (let* ((info (gptel-fsm-info fsm))
          (buf (plist-get info :buffer))
          (pers-ctx (when (buffer-live-p buf)
@@ -355,8 +367,8 @@ Enforces explicit context hunting to prevent orphaned ghost sessions outside wor
                      target-buffer))))))
     (macher--build-patch buf-ctx fsm)))
 
-(defun macher-agent-process-request-split (reason context fsm)
-  "Processes the request by splitting file edits and pure buffer edits into two patch screens.
+(defun macher-agent-process-request-split (_reason context fsm)
+  "Processes the request by splitting file edits and pure buffer edits.
 Diff screen presentation is suppressed for sub-agents."
   (unless (bound-and-true-p macher-agent--is-subagent)
     (when (and context (macher-context-dirty-p context))
@@ -374,7 +386,7 @@ Diff screen presentation is suppressed for sub-agents."
 ;; --- 4. Interactive Commands ---
 
 (defun macher-agent-apply-patch ()
-  "Apply the current patch buffer using external diff utilities to avoid collisions."
+  "Apply current patch buffer using external diff utilities safely."
   (interactive)
   (unless (derived-mode-p 'diff-mode)
     (user-error "Not in a patch/diff buffer"))

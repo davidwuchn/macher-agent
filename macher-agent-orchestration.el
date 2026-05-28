@@ -3,6 +3,11 @@
 (require 'macher)
 
 (declare-function macher-agent--set-system-message "macher-agent-gptel-tools" (msg))
+(declare-function macher-agent-current-context "macher-agent-context")
+(declare-function macher-agent-resolve-tool "macher-agent-skills" (tool-name))
+(declare-function macher-agent--auto-sync-context "macher-agent-context" (&optional ctx fsm))
+
+(defvar macher-agent-skills-alist)
 
 (defun macher-agent--add-buffer-to-scope-headless (buf-name persistent-context)
   "Headless core logic for adding BUF-NAME to PERSISTENT-CONTEXT.

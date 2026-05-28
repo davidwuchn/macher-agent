@@ -1,3 +1,5 @@
+(require 'macher-agent)
+
 (macher-agent-define-tool macher-agent-multi-edit-buffer-in-workspace-tool
                           ("Apply 1-to-many replacements to one scoped buffer in your workspace sequentially. All edits use exact text matching (whitespace, newlines, indentation). Use actual content - NO line numbers.\n\nEdits apply in array order. If ANY edit fails, ALL changes are rolled back."
                            ""

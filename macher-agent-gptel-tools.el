@@ -3,6 +3,17 @@
 (require 'macher)
 (require 'json)
 (require 'cl-lib)
+(require 'transient)
+
+(declare-function macher-agent-current-context "macher-agent-context")
+(declare-function macher-agent--resolve-buffer-name "macher-agent-orchestration")
+(declare-function macher-agent--read-context-file "macher-agent-context")
+(declare-function macher-agent--merge-contexts "macher-agent-context")
+(declare-function macher-agent--clone-context "macher-agent-context")
+(declare-function macher-agent--ensure-access "macher-agent-context")
+(declare-function macher-agent-context-classify-entry "macher-agent-context")
+
+(defvar macher-agent-tools-registry)
 
 ;; --- Configuration & UI Hooks ---
 
@@ -99,7 +110,7 @@ Relies on macher-agent--bridge-context-advice to safely bind virtual memory."
       
       ;; 2. Handle completion naturally
       (setq response-hook
-            (lambda (response info)
+            (lambda (_response _info)
               (let ((res (buffer-local-value 'macher-agent--final-result buf)))
                 (if res
                     (progn
@@ -111,7 +122,7 @@ Relies on macher-agent--bridge-context-advice to safely bind virtual memory."
       (gptel-send))))
 
 (defun macher-agent--set-system-message (msg)
-  "Adapter function to safely set the gptel system message without hardcoding internals."
+  "Adapter function to safely set the gptel system message."
   (setq-local gptel--system-message msg))
 
 ;; --- Tools ---
@@ -134,13 +145,18 @@ Relies on macher-agent--bridge-context-advice to safely bind virtual memory."
         (let* ((arg-sym (intern arg-name))
                (val (cdr (assq arg-sym arg-alist))))
           (when val
-            (if (or (listp val) (vectorp val))
-                (cl-loop for item being the elements of val do
-                         (macher-agent--ensure-access context item))
-              (macher-agent--ensure-access context val))))))))
+            (let ((items (if (or (listp val) (vectorp val)) val (list val))))
+              (cl-loop for item being the elements of items do
+                       (if (string= arg-name "image_path")
+                           (let* ((workspace (when context (macher-context-workspace context)))
+                                  (root-dir (when workspace (macher--workspace-root workspace))))
+                             ;; Images are allowed if they are physical files under the workspace root
+                             (unless (eq (macher-agent-context-classify-entry item root-dir) 'file)
+                               (macher-agent--ensure-access context item)))
+                         (macher-agent--ensure-access context item))))))))))
 
 (cl-defmacro macher-agent-define-tool (name-symbol (description category &key args async) lambda-args &rest body)
-  "Define a gptel tool with standardised JSON parsing, error handling, and native signature."
+  "Define a gptel tool with standardised JSON parsing and error handling."
   (let* ((name-str (replace-regexp-in-string "^macher-agent-\\|-tool$" "" (symbol-name name-symbol)))
          (name (replace-regexp-in-string "-" "_" name-str))
          (all-lambda-args (if async (cons 'gptel-callback lambda-args) lambda-args))
@@ -200,46 +216,78 @@ Relies on macher-agent--bridge-context-advice to safely bind virtual memory."
   "Stores the clean, synthesised final answer from the sub-agent.")
 
 (defvar gptel-track-media)
-(defvar gptel-context--alist)
+(defvar gptel-context)
 (declare-function gptel-add-file "gptel")
+(declare-function gptel--parse-buffer "gptel")
 (declare-function gptel-context-remove "gptel-context" (file))
 
+(defvar macher-agent--pending-tool-media-alist nil
+  "Global alist mapping buffers to their pending media.
+This guarantees media survives even if the process filter evaluates tool 
+callbacks in a temporary network buffer.")
+
+;; 1. Remove the old, bypassed advice
+(ignore-errors (advice-remove 'gptel-request #'macher-agent--inject-media-advice))
+
+;; 2. Add the new State Machine advice
+(defun macher-agent--inject-media-fsm-advice (orig-fun fsm &rest args)
+  "Inject pending tool media into the FSM payload right before it hits the network."
+  (let* ((info (gptel-fsm-info fsm))
+         (buf (plist-get info :buffer))
+         (pending (alist-get buf macher-agent--pending-tool-media-alist)))
+    
+    (when pending
+      (let* ((msg-plist (list :role "user" 
+                              :content "Tool execution complete. Here is the requested visual data:"))
+             (prompts (list msg-plist))
+             (gptel-context pending))
+        
+        ;; Have gptel natively encode the image to base64 JSON payload
+        (gptel--inject-media (plist-get info :backend) prompts)
+        
+        ;; Inject directly into the raw API payload data
+        (gptel--inject-prompt (plist-get info :backend) 
+                              (plist-get info :data) 
+                              (car prompts))
+        
+        ;; Clear the queue for this buffer
+        (setf (alist-get buf macher-agent--pending-tool-media-alist nil 'remove) nil)))
+    
+    ;; Continue with the actual network request
+    (apply orig-fun fsm args)))
+
+(advice-add 'gptel--handle-wait :around #'macher-agent--inject-media-fsm-advice)
+
 (macher-agent-define-tool macher-agent-read-image-in-workspace-tool
-                          ("Read an image from the workspace into the agent's context for a single turn. This allows you to 'see' images, including those generated by tools."
+                          ("Read an image from the workspace into the agent's visual context."
                            "ro"
-                           :args '((:name "image_path" :type string :description "The path or buffer name of the image to read")))
+                           :args '((:name "image_path" :type string :description "The path to the image file relative to the workspace root.")))
                           (image_path)
+                          
                           (unless (and (boundp 'gptel-track-media) gptel-track-media)
                             (error "gptel media send option is off (gptel-track-media is nil)"))
+                          
                           (let* ((context (macher-agent-current-context))
+                                 (workspace (when context (macher-context-workspace context)))
+                                 (workspace-root (when workspace (macher--workspace-root workspace)))
                                  (actual-name (macher-agent--resolve-buffer-name image_path))
-                                 (content (macher-agent--read-context-file context actual-name)))
-                            (unless content
-                              (error "SECURITY ERROR: You do not have permission to access '%s' or file not found. Use list_buffers_in_workspace to see your allowed scope." actual-name))
-                            ;; Write the virtual content (raw bytes) to a temporary file
-                            (let* ((ext (let ((e (file-name-extension actual-name t)))
-                                          (if (and e (not (string-empty-p e))) (concat "." e) ".png")))
-                                   (temp-file (make-temp-file "macher-agent-img-" nil ext))
-                                   (cleanup-hook nil))
-                              (with-temp-file temp-file
-                                (set-buffer-multibyte nil)
-                                (insert content))
-                              ;; Add the file to gptel's context
-                              (gptel-add-file temp-file)
+                                 (abs-path (if workspace-root
+                                               (expand-file-name actual-name workspace-root)
+                                             (expand-file-name actual-name))))
+                            
+                            (unless (file-exists-p abs-path)
+                              (error "Cannot read image. The file does not exist at absolute path: %s" abs-path))
+                            
+                            (let ((mime (mailcap-file-name-to-mime-type abs-path))
+                                  (buf (current-buffer)))
+                              (unless mime
+                                (error "Could not determine MIME type for image: %s" abs-path))
                               
-                              ;; Ensure the file is removed from gptel context after this request
-                              (setq cleanup-hook
-                                    (lambda (&rest _)
-                                      (remove-hook 'gptel-post-response-functions cleanup-hook t)
-                                      ;; Standard gptel removal is either gptel-context-remove, or deleting from gptel-context--alist
-                                      (if (fboundp 'gptel-context-remove)
-                                          (ignore-errors (gptel-context-remove temp-file))
-                                        (when (boundp 'gptel-context--alist)
-                                          (setq gptel-context--alist (assoc-delete-all temp-file gptel-context--alist))))
-                                      (ignore-errors (delete-file temp-file))))
-                              (add-hook 'gptel-post-response-functions cleanup-hook nil t)
+                              ;; Push to our GLOBAL queue keyed by buffer so the advice injects it into the IMMEDIATE mid-flight turn
+                              (setf (alist-get buf macher-agent--pending-tool-media-alist) 
+                                    (list (list abs-path :mime mime)))
                               
-                              (format "Image '%s' has been temporarily added to your visual context for this request." actual-name))))
+                              (format "SUCCESS: Image '%s' has been successfully read and attached to this response. You may now analyse it immediately." actual-name))))
 
 (with-eval-after-load 'macher-agent-skills
   (puthash "read_image_in_workspace" macher-agent-read-image-in-workspace-tool macher-agent-tools-registry))
