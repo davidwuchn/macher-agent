@@ -26,10 +26,7 @@ Acts as the interactive wrapper that passes the user's selected buffer
 to the headless execution layer and reports success via message."
   (interactive "BAdd buffer to current agent's scope: ")
   (let* ((buf-name (if (stringp buffer) buffer (buffer-name buffer)))
-         ;; Lazily initialise the context if it doesn't exist yet
-         (ctx (condition-case nil
-                  (macher-agent-current-context)
-                (error (setq-local macher-agent--persistent-context (macher--make-context))))))
+         (ctx (macher-agent-current-context)))
     (macher-agent--add-buffer-to-scope-headless buf-name ctx)
     (message "SUCCESS: Added '%s' to the agent's restricted scope." buf-name)))
 
@@ -80,7 +77,7 @@ Finally, this keeps the global tracking updated by pushing the new
 sub-agent to `macher-agent-active-subagents`."
   (let* ((buf-name (format "*macher-agent: %s*" name))
          (buf (get-buffer-create buf-name))
-         (safe-dir (if (and dir (stringp dir)) dir (or default-directory "~/")))
+         (safe-dir (if (and dir (stringp dir)) dir default-directory))
          (full-dir (file-name-as-directory (expand-file-name safe-dir))))
     
     (macher-agent--prepare-subagent-buffer buf full-dir context)

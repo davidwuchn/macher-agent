@@ -148,32 +148,43 @@ If IS-GLOBAL is non-nil, sets :context-dir to allow script resolution."
                (has-tools (plist-get parsed :has-tools))
                (tool-names (plist-get parsed :allowed-tools)))
           (when (and sym body)
-            (if has-tools
-                (let ((resolved-tools (when tool-names
-                                        (delq nil (mapcar (lambda (tname)
-                                                            (macher-agent-resolve-tool tname skills-dir))
-                                                          tool-names)))))
-                  (when (fboundp 'gptel-make-preset)
-                    (apply #'gptel-make-preset sym
-                           :system body
-                           (append 
-                            (when desc (list :description desc))
-                            (when model (list :model (intern model)))
-                            (list :tools resolved-tools)))))
-              (setf (alist-get sym gptel-directives) body))))))))
+            (let ((resolved-tools (when tool-names
+                                    (delq nil (mapcar (lambda (tname)
+                                                        (macher-agent-resolve-tool tname skills-dir))
+                                                      tool-names)))))
+              ;; Always set in skills registry
+              (setf (alist-get sym macher-agent-skills-alist)
+                    (list :system body :description desc :model (when model (intern model)) :tools resolved-tools))
+              ;; Always make available as a directive string in gptel
+              (setf (alist-get sym gptel-directives) body)
+              ;; If gptel natively supports presets one day
+              (when (and has-tools (fboundp 'gptel-make-preset))
+                (apply #'gptel-make-preset sym
+                       :system body
+                       (append 
+                        (when desc (list :description desc))
+                        (when model (list :model (intern model)))
+                        (list :tools resolved-tools)))))))))))
 
 (defun macher-agent-initialize-skills (&optional override-dir)
   "Load all skills from package, global, and workspace directories.
 If OVERRIDE-DIR is provided, load skills only from that directory."
   (interactive)
   (let* ((package-dir (when macher-agent--package-dir (expand-file-name "skills" macher-agent--package-dir)))
-         (global-dir (bound-and-true-p macher-agent-global-skills-directory))
+         (global-dir (when (bound-and-true-p macher-agent-global-skills-directory)
+                       (expand-file-name macher-agent-global-skills-directory)))
          (root (or (locate-dominating-file default-directory ".git") default-directory))
          (workspace-dir (when (and root macher-agent-workspace-skills-directory)
                           (expand-file-name macher-agent-workspace-skills-directory root)))
          (dirs (if override-dir 
                    (if (listp override-dir) override-dir (list override-dir))
                  (delq nil (list package-dir global-dir workspace-dir)))))
+    ;; Clean up any legacy plist formats in gptel-directives
+    (when (boundp 'gptel-directives)
+      (setq gptel-directives 
+            (cl-remove-if (lambda (entry) 
+                            (and (consp entry) (listp (cdr entry))))
+                          gptel-directives)))
     (dolist (skills-dir dirs)
       (when (and skills-dir (file-directory-p skills-dir))
         (macher-agent--load-scripts-from-dir skills-dir)

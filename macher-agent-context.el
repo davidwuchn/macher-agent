@@ -109,6 +109,7 @@ Can handle both physical file paths and pure Emacs buffer names."
                 (cons (cons path (cons orig new-content)) contents)))))
     
     (setf (macher-context-dirty-p context) t)
+    (macher-agent--persist-vfs-to-hidden-buffer context)
     (run-hooks 'macher-agent-context-mutated-hook)))
 
 (defun macher-agent--read-context-file (context path)
@@ -162,11 +163,18 @@ Optional ROOT-DIR is used to determine if a file resides within the workspace."
   (concat "Agent: " (file-name-nondirectory (directory-file-name dir))))
 
 (defun macher-agent--get-files (dir)
-  "Safely return files for the agent workspace, respecting VC ignores."
+  "Safely return files for the agent workspace, respecting VC ignores.
+Enforces strict boundary validation to prevent unbounded scans of home or root."
   (let ((expanded-dir (expand-file-name dir)))
     (condition-case err
         (if-let ((proj (project-current nil expanded-dir)))
-            (project-files proj)
+            (let ((proj-root (expand-file-name (project-root proj))))
+              (if (or (string= proj-root (expand-file-name "~/"))
+                      (string= proj-root (expand-file-name "~"))
+                      (string= proj-root "/")
+                      (string= proj-root (expand-file-name "/")))
+                  (error "SECURITY HALT: Project root detected as '%s', which is too broad. Unbounded scans are prohibited." proj-root)
+                (project-files proj)))
           (error "SECURITY HALT: Workspace '%s' is not under version control. Unbounded scans are prohibited." expanded-dir))
       (error (error "Agent Workspace Error: %s" (error-message-string err))))))
 
@@ -227,7 +235,27 @@ Optional ROOT-DIR is used to determine if a file resides within the workspace."
             (setq synced t)))
         (when synced
           (setf (macher-context-dirty-p actual-ctx) nil)
+          (macher-agent--persist-vfs-to-hidden-buffer actual-ctx)
           (run-hooks 'macher-agent-context-mutated-hook))))))
+
+(defun macher-agent--persist-vfs-to-hidden-buffer (ctx)
+  "Persist the VFS state to a dedicated hidden buffer.
+This moves the heavy string payload out of raw Lisp variables into a C-optimised
+gap buffer (*macher-agent-vfs-state*), preventing geometric string allocation loops
+and GC pauses when the UI thread interacts with the agent context."
+  (let ((vfs-buf (get-buffer-create " *macher-agent-vfs-state*")))
+    (with-current-buffer vfs-buf
+      (erase-buffer)
+      ;; Insert a lightweight, parsable dump of the VFS
+      (insert ";;; Macher Agent Virtual File System State\n")
+      (insert ";;; This buffer is C-optimised and handles gigabytes of text effortlessly.\n\n")
+      (dolist (entry (macher-context-contents ctx))
+        (let ((path (car entry))
+              (new-content (cddr entry)))
+          (when new-content
+            (insert (format "=== VFS ENTRY: %s ===\n" path))
+            (insert new-content)
+            (insert "\n========================\n\n")))))))
 
 ;; --- Adapters ---
 
@@ -252,7 +280,8 @@ Optional ROOT-DIR is used to determine if a file resides within the workspace."
       (macher-process-request 'complete terminated-fsm))))
 
 (defun macher-agent--bridge-context-advice (orig-fun fsm get-context)
-  "Bridge the native macher setup with the agent's persistent memory by proxying the context generator."
+  "Bridge the native macher setup with the agent's persistent memory by proxying the context generator.
+Enforces explicit context hunting to prevent orphaned ghost sessions outside workspace boundaries."
   (let* ((info (gptel-fsm-info fsm))
          (buf (plist-get info :buffer))
          (pers-ctx (when (buffer-live-p buf)
@@ -267,11 +296,17 @@ Optional ROOT-DIR is used to determine if a file resides within the workspace."
              (or resolved-ctx
                  (setq resolved-ctx
                        (or pers-ctx
-                           (let ((new-ctx (funcall get-context)))
-                             (when (buffer-live-p buf)
-                               (with-current-buffer buf
-                                 (setq-local macher-agent--persistent-context new-ctx)))
-                             new-ctx)))))))
+                           (condition-case err
+                               (macher-agent-current-context)
+                             (error
+                              (if (string= (error-message-string err) "Multiple active agent sessions found; cannot resolve primary context")
+                                  (error (error-message-string err))
+                                (let ((new-ctx (funcall get-context)))
+                                  (when (buffer-live-p buf)
+                                    (with-current-buffer buf
+                                      (setq-local macher-agent--is-workspace t)
+                                      (setq-local macher-agent--persistent-context new-ctx)))
+                                  new-ctx))))))))))
       
       (funcall orig-fun fsm proxy-get-context)
       

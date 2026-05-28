@@ -143,9 +143,12 @@
                           (setq macher-agent--is-subagent nil)))
 
                     (it "forcefully injects :macher--context into the FSM info plist to awaken the native UI"
-                        (let* ((fsm (gptel-make-fsm))
+                        (let* ((buf (generate-new-buffer "test-bridge"))
+                               (fsm (gptel-make-fsm :info (list :buffer buf)))
                                (ctx (macher--make-context :dirty-p t))
                                (get-context (lambda () ctx)))
+                          (with-current-buffer buf
+                            (setq-local macher-agent--is-workspace t))
                           
                           (spy-on 'macher-process-request)
                           
@@ -296,6 +299,30 @@
                             (expect (cdr (cdr (assoc "test-buf" (macher-context-contents ctx)))) :to-equal "New virtual content")))))
 
           (describe "Sandbox Execution (macher-agent-context-tools.el)"
+                    (describe "read_image_in_workspace"
+                              (it "errors if gptel-track-media is nil"
+                                  (let* ((gptel-track-media nil)
+                                         (ctx (macher--make-context :contents '(("test.png" . ("" . "img-data")))))
+                                         (tool-fn (gptel-tool-function macher-agent-read-image-in-workspace-tool)))
+                                    (spy-on 'macher-agent-current-context :and-return-value ctx)
+                                    (let ((result (funcall tool-fn "test.png")))
+                                      (expect result :to-match "gptel media send option is off"))))
+                              (it "errors if the image is outside allowed context"
+                                  (let* ((gptel-track-media t)
+                                         (ctx (macher--make-context :contents nil))
+                                         (tool-fn (gptel-tool-function macher-agent-read-image-in-workspace-tool)))
+                                    (spy-on 'macher-agent-current-context :and-return-value ctx)
+                                    (expect (funcall tool-fn "test.png") :to-throw 'error)))
+                              (it "successfully adds a file to gptel context"
+                                  (let* ((gptel-track-media t)
+                                         (ctx (macher--make-context :contents '(("test.png" . ("" . "img-data")))))
+                                         (tool-fn (gptel-tool-function macher-agent-read-image-in-workspace-tool)))
+                                    (spy-on 'macher-agent-current-context :and-return-value ctx)
+                                    (spy-on 'gptel-add-file)
+                                    (let ((result (funcall tool-fn "test.png")))
+                                      (expect 'gptel-add-file :to-have-been-called)
+                                      (expect result :to-match "temporarily added")))))
+
                     (it "constructs a safe rsync command with all necessary exclusions"
                         (let* ((src "/my/project/")
                                (dest "/tmp/sandbox/")
@@ -305,14 +332,13 @@
                           (expect cmd :to-match "--exclude=node_modules/"))))
 
           (describe "Interactive Commands & State (macher-agent-orchestration.el)"
-                    (it "macher-agent-add-buffer-to-scope lazily initialises a missing context"
+                    (it "macher-agent-add-buffer-to-scope explicitly errors out if no existing session is found"
                         (let ((buf (generate-new-buffer "lazy-target")))
-                          (setq macher-agent--persistent-context nil)
-                          
-                          (macher-agent-add-buffer-to-scope "lazy-target")
-                          
-                          (expect macher-agent--persistent-context :not :to-be nil)
-                          (expect (assoc "lazy-target" (macher-context-contents macher-agent--persistent-context)) :not :to-be nil)))
+                          (let ((macher--fsm-latest nil)
+                                (macher-agent--persistent-context nil))
+                            (cl-letf (((symbol-function 'buffer-list) (lambda () nil)))
+                              (expect (macher-agent-add-buffer-to-scope "lazy-target") :to-throw 'error)))
+                          (kill-buffer buf)))
                     (it "macher-agent-add-subagent creates a buffer and tracks it globally"
                         (let ((buf (macher-agent-add-subagent "test-worker" "/tmp/")))
                           (expect (buffer-live-p buf) :to-be t)
@@ -460,12 +486,14 @@
                           (with-temp-file (expand-file-name "SKILL.md" skill-dir)
                             (insert "---\nname: my-preset\ndescription: test\nallowed-tools: []\nmodel: gpt-4o\n---\nPreset body"))
                           (spy-on 'gptel-make-preset)
-                          (macher-agent-initialize-skills mock-dir)
-                          (expect 'gptel-make-preset :to-have-been-called)
-                          (let ((args (spy-calls-args-for 'gptel-make-preset 0)))
-                            (expect (car args) :to-equal 'my-preset)
-                            (expect (plist-get (cdr args) :system) :to-equal "Preset body")
-                            (expect (plist-get (cdr args) :model) :to-equal 'gpt-4o))
+                          (let ((gptel-directives nil))
+                            (macher-agent-initialize-skills mock-dir)
+                            (expect 'gptel-make-preset :to-have-been-called)
+                            (let ((args (spy-calls-args-for 'gptel-make-preset 0)))
+                              (expect (car args) :to-equal 'my-preset)
+                              (expect (plist-get (cdr args) :system) :to-equal "Preset body")
+                              (expect (plist-get (cdr args) :model) :to-equal 'gpt-4o))
+                            (expect (alist-get 'my-preset gptel-directives) :to-equal "Preset body"))
                           (delete-directory mock-dir t)))
 
                     (it "injects directly into gptel-directives when allowed-tools is omitted"
