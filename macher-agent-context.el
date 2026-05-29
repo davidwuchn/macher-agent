@@ -139,7 +139,7 @@ Can handle both physical file paths and pure Emacs buffer names."
      (t (error "ERROR: Buffer '%s' does not exist." path)))))
 
 (defun macher-agent-context-classify-entry (path-or-buf &optional root-dir)
-  "Classify PATH-OR-BUF as a workspace \\='file\\=', \\='external\\=', or \\='buffer\\='.
+  "Classify PATH-OR-BUF as a workspace \\='file\\=', \\='external\\=', \\='buffer\\=', or \\='media\\='.
 Optional ROOT-DIR is used to determine if a file resides within the workspace."
   (let* ((expanded (expand-file-name path-or-buf))
          (buf (get-buffer path-or-buf))
@@ -152,9 +152,14 @@ Optional ROOT-DIR is used to determine if a file resides within the workspace."
           (file-exists-p expanded)
           is-absolute
           has-slash)
-      (let ((path (or (and file-from-buf (file-exists-p file-from-buf) file-from-buf) expanded)))
+      (let* ((path (or (and file-from-buf (file-exists-p file-from-buf) file-from-buf) expanded)))
         (if (and root-dir (string-prefix-p (expand-file-name root-dir) path))
-            'file
+            (let ((mime (mailcap-file-name-to-mime-type path)))
+              (if (and mime (or (string-prefix-p "image/" mime)
+                                (string-prefix-p "video/" mime)
+                                (string-prefix-p "audio/" mime)))
+                  'media
+                'file))
           'external)))
      ;; 2. Otherwise treat as a pure buffer
      (t 'buffer))))

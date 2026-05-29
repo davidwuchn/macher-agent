@@ -141,17 +141,20 @@ Relies on macher-agent--bridge-context-advice to safely bind virtual memory."
   "Middleware: Security check for buffer arguments after JSON parsing."
   (let ((arg-alist (cl-mapcar #'cons clean-args parsed-args)))
     (unless (eq name-symbol 'macher-agent-write-buffer-in-workspace-tool)
-      (dolist (arg-name '("buffer_name" "buffer_names" "image_path"))
+      (dolist (arg-name '("buffer_name" "buffer_names" "media_path"))
         (let* ((arg-sym (intern arg-name))
                (val (cdr (assq arg-sym arg-alist))))
           (when val
-            (let ((items (if (or (listp val) (vectorp val)) val (list val))))
+            (let* ((items (if (or (listp val) (vectorp val)) val (list val))))
               (cl-loop for item being the elements of items do
-                       (if (string= arg-name "image_path")
+                       (if (string= arg-name "media_path")
                            (let* ((workspace (when context (macher-context-workspace context)))
                                   (root-dir (when workspace (macher--workspace-root workspace))))
-                             ;; Images are allowed if they are physical files under the workspace root
-                             (unless (eq (macher-agent-context-classify-entry item root-dir) 'file)
+                             (if (eq (macher-agent-context-classify-entry item root-dir) 'media)
+                                 (when root-dir
+                                   (let ((expanded (expand-file-name item root-dir)))
+                                     (unless (string-prefix-p (expand-file-name root-dir) expanded)
+                                       (error "SECURITY ERROR: Media path escapes workspace root directory."))))
                                (macher-agent--ensure-access context item)))
                          (macher-agent--ensure-access context item))))))))))
 
@@ -204,13 +207,12 @@ Relies on macher-agent--bridge-context-advice to safely bind virtual memory."
       (format "ERROR: %s" msg))))
 
 (defun macher-agent--prepare-subagent-instructions (buf instructions)
-  "Insert INSTRUCTIONS into BUF with cloaked system reminders."
+  "Insert INSTRUCTIONS into BUF for the delegated sub-agent without the hardcoded preset."
   (with-current-buffer buf
     (goto-char (point-max))
-    (when (not (string-empty-p instructions))
+    (unless (string-empty-p instructions)
       (macher-agent--insert-hidden "\n\n=== DELEGATED TASK ===\n")
-      (insert (substring-no-properties instructions)))
-    (macher-agent--insert-hidden "\n\n@macher-agent-worker\n=== SYSTEM REMINDER ===\nYou MUST use the `submit_task_result` tool to return your answer. Do not just type it as plain text.\n")))
+      (insert (substring-no-properties instructions)))))
 
 (defvar-local macher-agent--final-result nil
   "Stores the clean, synthesised final answer from the sub-agent.")
@@ -276,8 +278,8 @@ callbacks in a temporary network buffer.")
 (macher-agent-define-tool macher-agent-read-media-in-workspace-tool
                           ("Read a media file (e.g. image) from the workspace into the agent's visual context."
                            "ro"
-                           :args '((:name "image_path" :type string :description "The path to the media file relative to the workspace root.")))
-                          (image_path)
+                           :args '((:name "media_path" :type string :description "The path to the media file relative to the workspace root.")))
+                          (media_path)
                           
                           (unless (and (boundp 'gptel-track-media) gptel-track-media)
                             (error "gptel media send option is off (gptel-track-media is nil)"))
@@ -285,19 +287,22 @@ callbacks in a temporary network buffer.")
                           (let* ((context (macher-agent-current-context))
                                  (workspace (when context (macher-context-workspace context)))
                                  (workspace-root (when workspace (macher--workspace-root workspace)))
-                                 (actual-name (macher-agent--resolve-buffer-name image_path))
+                                 (actual-name (macher-agent--resolve-buffer-name media_path))
                                  (abs-path (if workspace-root
                                                (expand-file-name actual-name workspace-root)
-                                             (expand-file-name actual-name))))
+                                             (expand-file-name actual-name)))
+                                 (vfs-contents (when context (macher-context-contents context)))
+                                 (in-vfs (assoc actual-name vfs-contents)))
                             
-                            (macher-agent--read-context-file context actual-name)
+                            (unless (or in-vfs (file-exists-p abs-path))
+                              (error "Cannot read media. The file does not exist in VFS or on disk at: %s" abs-path))
                             
-                            (let ((mime (mailcap-file-name-to-mime-type abs-path))
-                                  (buf (current-buffer)))
+                            (let* ((mime (mailcap-file-name-to-mime-type abs-path))
+                                   (buf (current-buffer)))
                               (unless mime
                                 (error "Could not determine MIME type for media: %s" abs-path))
                               
-                              (setf (alist-get buf macher-agent--pending-tool-media-alist) 
+                              (setf (alist-get buf macher-agent--pending-tool-media-alist nil nil #'equal) 
                                     (list (list abs-path :mime mime)))
                               
                               (format "SUCCESS: Media '%s' has been successfully read and attached to this response. You may now analyse it immediately." actual-name))))

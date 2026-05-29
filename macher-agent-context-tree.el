@@ -119,7 +119,7 @@
       (let* ((path-or-buf (car entry))
              (classification (macher-agent-context-classify-entry path-or-buf root-dir)))
         
-        (if (eq classification 'file)
+        (if (memq classification '(file media))
             ;; It's a file in the workspace: format it relatively and flag it as active
             (let ((rel-path path-or-buf))
               (when (and root-dir (file-name-absolute-p path-or-buf))

@@ -202,7 +202,8 @@
                                (json-tasks "[{\"buffer_name\": \"test-sub\", \"instructions\": \"do work\"}]")
                                (expected-vector (vector (list :buffer_name "test-sub" :instructions "do work")))
                                (tool-fn (gptel-tool-function macher-agent-delegate-tasks-to-subagents-tool))
-                               (buf (get-buffer-create "test-sub")))
+                               (buf (get-buffer-create "test-sub"))
+                               (gptel-directives '((@macher-agent-worker . "Mock preset"))))
                           
                           (spy-on 'macher-agent-current-context :and-return-value (macher--make-context))
                           (spy-on 'json-parse-string :and-return-value expected-vector)
@@ -210,7 +211,7 @@
                           (spy-on 'macher-agent--prepare-subagent-instructions)
                           (spy-on 'macher-agent--ensure-access)
                           
-                          (funcall tool-fn callback json-tasks)
+                          (funcall tool-fn callback json-tasks "@macher-agent-worker")
                           
                           (expect 'macher-agent--execute-parallel :to-have-been-called)
                           (kill-buffer buf)))
@@ -303,12 +304,27 @@
                                     (spy-on 'macher-agent-current-context :and-return-value ctx)
                                     (let ((result (funcall tool-fn "test.png")))
                                       (expect result :to-match "gptel media send option is off"))))
-                              (it "errors if the image is outside allowed context"
+                              (it "permits access to valid media files inside the workspace without triggering VFS text security locks"
                                   (let* ((gptel-track-media t)
                                          (ctx (macher--make-context :contents nil))
                                          (tool-fn (gptel-tool-function macher-agent-read-media-in-workspace-tool)))
                                     (spy-on 'macher-agent-current-context :and-return-value ctx)
-                                    (expect (funcall tool-fn "test.png") :to-throw 'error)))
+                                    (spy-on 'macher-agent-context-classify-entry :and-return-value 'media)
+                                    (spy-on 'file-exists-p :and-return-value t)
+                                    (spy-on 'mailcap-file-name-to-mime-type :and-return-value "image/png")
+                                    (let ((result (funcall tool-fn "test_workspace_image.png")))
+                                      (expect result :to-match "SUCCESS: Media 'test_workspace_image.png'"))))
+                              (it "throws SECURITY ERROR if the tool attempts to read a file classified as text outside VFS scope"
+                                  (let* ((gptel-track-media t)
+                                         (ctx (macher--make-context :contents nil))
+                                         (tool-fn (gptel-tool-function macher-agent-read-media-in-workspace-tool)))
+                                    (spy-on 'macher-agent-current-context :and-return-value ctx)
+                                    (spy-on 'macher-agent-context-classify-entry :and-return-value 'file)
+                                    (let ((err-msg nil))
+                                      (condition-case err
+                                          (funcall tool-fn "unauthorized_script.sh")
+                                        (error (setq err-msg (error-message-string err))))
+                                      (expect err-msg :to-match "SECURITY ERROR"))))
                               (it "stages media in the pending global alist instead of polluting gptel-context"
                                   (let* ((gptel-track-media t)
                                          (gptel-context nil)
