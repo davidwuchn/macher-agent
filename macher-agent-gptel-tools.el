@@ -180,11 +180,13 @@ Relies on macher-agent--bridge-context-advice to safely bind virtual memory."
             (macher-agent--validate-tool-args ',name-symbol context ',clean-args parsed-args)
 
             ,(if async
-                 `(let ((callback (lambda (plist-result)
-                                    (let ((final-str (if (eq (plist-get plist-result :status) 'success)
-                                                         (plist-get plist-result :data)
-                                                       (plist-get plist-result :error))))
-                                      (funcall gptel-callback final-str)))))
+                 `(let ((callback (apply-partially
+                                   (lambda (gptel-cb plist-result)
+                                     (let ((final-str (if (eq (plist-get plist-result :status) 'success)
+                                                          (plist-get plist-result :data)
+                                                        (plist-get plist-result :error))))
+                                       (funcall gptel-cb final-str)))
+                                   gptel-callback)))
                     (condition-case err
                         (apply (lambda ,lambda-args ,@body) parsed-args)
                       (error
@@ -206,11 +208,12 @@ Relies on macher-agent--bridge-context-advice to safely bind virtual memory."
         msg
       (format "ERROR: %s" msg))))
 
-(defun macher-agent--prepare-subagent-instructions (buf instructions)
+(defun macher-agent--prepare-subagent-instructions (buf instructions &optional preset)
   "Insert INSTRUCTIONS into BUF for the delegated sub-agent without the hardcoded preset."
   (with-current-buffer buf
     (goto-char (point-max))
     (unless (string-empty-p instructions)
+      (macher-agent--insert-hidden preset)
       (macher-agent--insert-hidden "\n\n=== DELEGATED TASK ===\n")
       (insert (substring-no-properties instructions)))))
 
@@ -307,8 +310,7 @@ callbacks in a temporary network buffer.")
                               
                               (format "SUCCESS: Media '%s' has been successfully read and attached to this response. You may now analyse it immediately." actual-name))))
 
-(with-eval-after-load 'macher-agent-skills
-  (puthash "read_media_in_workspace" macher-agent-read-media-in-workspace-tool macher-agent-tools-registry))
+(puthash "read_media_in_workspace" macher-agent-read-media-in-workspace-tool macher-agent-tools-registry)
 
 (with-eval-after-load 'gptel-transient
   (ignore-errors
