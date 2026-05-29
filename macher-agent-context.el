@@ -82,14 +82,18 @@
 
 (defun macher-agent--read-content-from-disk-or-buffer (path)
   "Read the content of PATH from its live buffer or physical file."
-  (let ((buf (or (get-file-buffer path) (get-buffer path))))
+  (let ((buf (or (get-file-buffer path) (get-buffer path)))
+        (is-media (and (file-exists-p path) 
+                       (string-match-p "\\.\\(png\\|jpe?g\\|gif\\|webp\\|pdf\\)$" path))))
     (cond
      ((and buf (buffer-live-p buf))
       (with-current-buffer buf
         (buffer-substring-no-properties (point-min) (point-max))))
      ((file-exists-p path)
       (with-temp-buffer
-        (insert-file-contents path)
+        (if is-media
+            (insert-file-contents-literally path)
+          (insert-file-contents path))
         (buffer-string)))
      (t nil))))
 

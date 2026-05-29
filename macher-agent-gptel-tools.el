@@ -226,10 +226,25 @@ Relies on macher-agent--bridge-context-advice to safely bind virtual memory."
 This guarantees media survives even if the process filter evaluates tool 
 callbacks in a temporary network buffer.")
 
-;; 1. Remove the old, bypassed advice
-(ignore-errors (advice-remove 'gptel-request #'macher-agent--inject-media-advice))
+(defun macher-agent--gptel-base64-encode-advice (orig-fun file)
+  "Read FILE from VFS if available before encoding."
+  (let* ((ctx (macher-agent-current-context))
+         (workspace (when ctx (macher-context-workspace ctx)))
+         (workspace-root (when workspace (macher--workspace-root workspace)))
+         (actual-name (if (and workspace-root (file-name-absolute-p file))
+                          (file-relative-name file workspace-root)
+                        file))
+         (content (ignore-errors (macher-agent--read-context-file ctx actual-name))))
+    (if content
+        (with-temp-buffer
+          (set-buffer-multibyte nil)
+          (insert content)
+          (base64-encode-region (point-min) (point-max) :no-line-break)
+          (buffer-string))
+      (funcall orig-fun file))))
 
-;; 2. Add the new State Machine advice
+(advice-add 'gptel--base64-encode :around #'macher-agent--gptel-base64-encode-advice)
+
 (defun macher-agent--inject-media-fsm-advice (orig-fun fsm &rest args)
   "Inject pending tool media into the FSM payload right before it hits the network."
   (let* ((info (gptel-fsm-info fsm))
@@ -258,10 +273,10 @@ callbacks in a temporary network buffer.")
 
 (advice-add 'gptel--handle-wait :around #'macher-agent--inject-media-fsm-advice)
 
-(macher-agent-define-tool macher-agent-read-image-in-workspace-tool
-                          ("Read an image from the workspace into the agent's visual context."
+(macher-agent-define-tool macher-agent-read-media-in-workspace-tool
+                          ("Read a media file (e.g. image) from the workspace into the agent's visual context."
                            "ro"
-                           :args '((:name "image_path" :type string :description "The path to the image file relative to the workspace root.")))
+                           :args '((:name "image_path" :type string :description "The path to the media file relative to the workspace root.")))
                           (image_path)
                           
                           (unless (and (boundp 'gptel-track-media) gptel-track-media)
@@ -275,22 +290,20 @@ callbacks in a temporary network buffer.")
                                                (expand-file-name actual-name workspace-root)
                                              (expand-file-name actual-name))))
                             
-                            (unless (file-exists-p abs-path)
-                              (error "Cannot read image. The file does not exist at absolute path: %s" abs-path))
+                            (macher-agent--read-context-file context actual-name)
                             
                             (let ((mime (mailcap-file-name-to-mime-type abs-path))
                                   (buf (current-buffer)))
                               (unless mime
-                                (error "Could not determine MIME type for image: %s" abs-path))
+                                (error "Could not determine MIME type for media: %s" abs-path))
                               
-                              ;; Push to our GLOBAL queue keyed by buffer so the advice injects it into the IMMEDIATE mid-flight turn
                               (setf (alist-get buf macher-agent--pending-tool-media-alist) 
                                     (list (list abs-path :mime mime)))
                               
-                              (format "SUCCESS: Image '%s' has been successfully read and attached to this response. You may now analyse it immediately." actual-name))))
+                              (format "SUCCESS: Media '%s' has been successfully read and attached to this response. You may now analyse it immediately." actual-name))))
 
 (with-eval-after-load 'macher-agent-skills
-  (puthash "read_image_in_workspace" macher-agent-read-image-in-workspace-tool macher-agent-tools-registry))
+  (puthash "read_media_in_workspace" macher-agent-read-media-in-workspace-tool macher-agent-tools-registry))
 
 (with-eval-after-load 'gptel-transient
   (ignore-errors

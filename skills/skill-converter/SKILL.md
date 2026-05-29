@@ -6,7 +6,7 @@ allowed-tools:
   - list_directory_in_workspace
   - search_in_workspace
   - read_buffer_in_workspace
-  - read_image_in_workspace
+  - read_media_in_workspace
   - list_buffers_in_workspace
   - search_buffers_in_workspace
   - multi_edit_buffer_in_workspace
