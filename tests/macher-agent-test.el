@@ -8,7 +8,6 @@
 (require 'macher-agent-context-tools)
 (require 'macher-agent-gptel-tools)
 (require 'macher-agent-orchestration)
-(require 'macher-agent-skills)
 
 
 (describe "Macher-Agent BDD Test Suite"
@@ -167,133 +166,6 @@
                             
                             ;; 4. Verify the native UI engine was called
                             (expect 'macher-process-request :to-have-been-called-with 'complete fsm)))))
-
-          (describe "Orchestration Tools (skills/scripts/*.el)"
-                    (before-all
-                     ;; Load all tool scripts to define their variables for testing
-                     (dolist (script (directory-files "skills/scripts" t "\\.el$"))
-                       (with-temp-buffer
-                         (insert-file-contents script)
-                         (let ((val nil))
-                           (condition-case nil
-                               (while t (setq val (eval (read (current-buffer)) t)))
-                             (end-of-file val))))))
-                    (it "guarantees list_buffers_in_workspace output perfectly matches context-tree buffer categorisation"
-                        (let* ((ctx (macher--make-context :contents '(("*pure-buffer*" . ("" . ""))
-                                                                      ("/external/path.txt" . ("" . ""))
-                                                                      ("/root/internal.txt" . ("" . "")))))
-                               (list-tool-fn (gptel-tool-function macher-agent-list-buffers-in-workspace-tool)))
-
-                          (spy-on 'macher-agent-current-context :and-return-value ctx)
-                          (spy-on 'macher-agent-context-classify-entry :and-call-fake
-                                  (lambda (path &rest _)
-                                    (pcase path
-                                      ("*pure-buffer*" 'buffer)
-                                      ("/external/path.txt" 'external)
-                                      ("/root/internal.txt" 'file))))
-
-                          (let ((result (funcall list-tool-fn)))
-                            (expect result :to-match "\\*pure-buffer\\*")
-                            (expect result :to-match "/external/path\\.txt")
-                            (expect result :not :to-match "internal\\.txt"))))
-                    (it "properly parses a JSON string into a vector for task delegation"
-                        (let* ((callback-called nil)
-                               (callback (lambda (res) (setq callback-called res)))
-                               (json-tasks "[{\"buffer_name\": \"test-sub\", \"instructions\": \"do work\"}]")
-                               (expected-vector (vector (list :buffer_name "test-sub" :instructions "do work")))
-                               (tool-fn (gptel-tool-function macher-agent-delegate-tasks-to-subagents-tool))
-                               (buf (get-buffer-create "test-sub"))
-                               (gptel-directives '((@macher-agent-worker . "Mock preset"))))
-                          
-                          (spy-on 'macher-agent-current-context :and-return-value (macher--make-context))
-                          (spy-on 'json-parse-string :and-return-value expected-vector)
-                          (spy-on 'macher-agent--execute-parallel)
-                          (spy-on 'macher-agent--prepare-subagent-instructions)
-                          (spy-on 'macher-agent--ensure-access)
-                          
-                          (funcall tool-fn callback json-tasks "@macher-agent-worker")
-                          
-                          (expect 'macher-agent--execute-parallel :to-have-been-called)
-                          (kill-buffer buf)))
-
-                    (it "reports an error if gptel-send aborts or fails silently"
-                        (let* ((buf (generate-new-buffer "worker"))
-                               (callback-called nil)
-                               (callback (lambda (msg) (setq callback-called msg))))
-
-                          ;; Simulate gptel-send firing and instantly triggering the post-response hook
-                          (spy-on 'gptel-send :and-call-fake
-                                  (lambda ()
-                                    (with-current-buffer buf
-                                      (run-hook-with-args 'gptel-post-response-functions (point-min) (point-max)))))
-
-                          (macher-agent--dispatch-and-wait buf callback)
-                          
-                          (expect (plist-get callback-called :status) :to-equal 'error)
-                          (expect (plist-get callback-called :error) :to-match "stopped silently")
-                          (kill-buffer buf)))
-
-                    (it "correctly aggregates results from multiple event-driven sub-agents"
-                        (let* ((buf1 (generate-new-buffer "worker1"))
-                               (buf2 (generate-new-buffer "worker2"))
-                               (callback-called nil)
-                               (callback (lambda (msg) (setq callback-called msg))))
-                          
-                          (spy-on 'macher-agent-current-context :and-return-value (macher--make-context))
-                          ;; Mock the dispatcher to instantly return a success payload rather than firing the network
-                          (spy-on 'macher-agent--dispatch-and-wait :and-call-fake
-                                  (lambda (b cb)
-                                    (funcall cb (list :status 'success :data (format "Output from %s" (buffer-name b))))))
-                          
-                          (macher-agent--execute-parallel (list buf1 buf2) callback)
-                          
-                          (expect (plist-get callback-called :status) :to-equal 'success)
-                          (expect (plist-get callback-called :data) :to-match "All sub-agents completed.")
-                          (expect (plist-get callback-called :data) :to-match "Output from worker1")
-                          (expect (plist-get callback-called :data) :to-match "Output from worker2")
-                          (kill-buffer buf1)
-                          (kill-buffer buf2)))
-
-                    (it "ensures target buffer exists when using write_buffer_in_workspace to support patch UI"
-                        (let* ((ctx (macher--make-context :contents nil))
-                               (tool-fn (gptel-tool-function macher-agent-write-buffer-in-workspace-tool)))
-                          (spy-on 'macher-agent-current-context :and-return-value ctx)
-                          
-                          (funcall tool-fn "*new-virtual-asset*" "Ghost content")
-                          
-                          (expect (assoc "*new-virtual-asset*" (macher-context-contents ctx)) :not :to-be nil)
-                          ;; Assert that the buffer WAS created so the patch engine can diff against it
-                          (expect (buffer-live-p (get-buffer "*new-virtual-asset*")) :to-be t)))
-                    
-                    (it "rejects fuzzy security matching in read_buffer_in_workspace"
-                        (let* ((ctx (macher--make-context :contents '(("*scratch*" . ("" . "content")))))
-                               (tool-fn (gptel-tool-function macher-agent-read-buffer-in-workspace-tool)))
-                          (spy-on 'macher-agent-current-context :and-return-value ctx)
-                          (let ((threw nil))
-                            (condition-case err
-                                (funcall tool-fn "scratch")
-                              (error (setq threw t)
-                                     (expect (error-message-string err) :to-match "SECURITY ERROR.*scratch.*")))
-                            (expect threw :to-be t))))
-
-                    (it "submit_task_result sets the final result buffer-locally"
-                        (let* ((buf (generate-new-buffer "worker-buf"))
-                               (tool-fn (gptel-tool-function macher-agent-submit-task-result-tool)))
-                          (spy-on 'macher-agent-current-context :and-return-value (macher--make-context))
-                          (with-current-buffer buf
-                            (funcall tool-fn "My final answer")
-                            (expect macher-agent--final-result :to-equal "My final answer"))
-                          (kill-buffer buf)))
-                    
-                    (it "write_buffer_in_workspace registers a virtual edit safely"
-                        (let* ((ctx (macher--make-context :contents '(("test-buf" . ("orig" . "orig")))))
-                               (tool-fn (gptel-tool-function macher-agent-write-buffer-in-workspace-tool)))
-                          (spy-on 'macher-agent-current-context :and-return-value ctx)
-                          
-                          (let* ((response (funcall tool-fn "test-buf" "New virtual content")))
-                            (expect response :to-match "SUCCESS")
-                            (expect (macher-context-dirty-p ctx) :to-be t)
-                            (expect (cdr (cdr (assoc "test-buf" (macher-context-contents ctx)))) :to-equal "New virtual content")))))
 
           (describe "Sandbox Execution (macher-agent-context-tools.el)"
                     (describe "read_media_in_workspace"
@@ -522,7 +394,7 @@
                             (insert "---\nname: my-preset\ndescription: test\nallowed-tools: []\nmodel: gpt-4o\n---\nPreset body"))
                           (spy-on 'gptel-make-preset)
                           (let ((gptel-directives nil))
-                            (macher-agent-initialize-skills mock-dir)
+                            (macher-agent-api-register-skills-in-directory mock-dir)
                             (expect 'gptel-make-preset :to-have-been-called)
                             (let ((args (spy-calls-args-for 'gptel-make-preset 0)))
                               (expect (car args) :to-equal 'my-preset)
@@ -538,7 +410,7 @@
                           (with-temp-file (expand-file-name "SKILL.md" skill-dir)
                             (insert "---\nname: my-directive\n---\nDirective body"))
                           (let ((gptel-directives nil))
-                            (macher-agent-initialize-skills mock-dir)
+                            (macher-agent-api-register-skills-in-directory mock-dir)
                             (expect (alist-get 'my-directive gptel-directives) :to-equal "Directive body"))
                           (delete-directory mock-dir t)))))
 

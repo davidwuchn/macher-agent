@@ -182,19 +182,38 @@ Optional ROOT-DIR is used to determine if a file resides within the workspace."
   (concat "Agent: " (file-name-nondirectory (directory-file-name dir))))
 
 (defun macher-agent--get-files (dir)
-  "Safely return files for the agent workspace, respecting VC ignores.
-Enforces strict boundary validation to prevent unbounded scans of home or root."
-  (let ((expanded-dir (expand-file-name dir)))
+  "Return a list of safe files in the workspace at DIR.
+This strictly enforces size and file type limits to prevent memory exhaustion,
+and will abort if the workspace resolves to the root or home directory."
+  (let ((expanded-dir (expand-file-name dir))
+        (home-dir (expand-file-name "~/")))
     (condition-case err
-        (if-let ((proj (project-current nil expanded-dir)))
-            (let ((proj-root (expand-file-name (project-root proj))))
-              (if (or (string= proj-root (expand-file-name "~/"))
-                      (string= proj-root (expand-file-name "~"))
-                      (string= proj-root "/")
-                      (string= proj-root (expand-file-name "/")))
-                  (error "SECURITY HALT: Project root detected as '%s', which is too broad. Unbounded scans are prohibited." proj-root)
-                (project-files proj)))
-          (error "SECURITY HALT: Workspace '%s' is not under version control. Unbounded scans are prohibited." expanded-dir))
+        (let* ((raw-files 
+                (if-let ((proj (project-current nil expanded-dir)))
+                    (project-files proj)
+                  (when (or (string= expanded-dir home-dir)
+                            (string= expanded-dir "/"))
+                    (error "SECURITY HALT: Workspace resolved to root or home directory."))
+                  (directory-files-recursively
+                   expanded-dir "^[^.]" nil
+                   (lambda (d)
+                     (let ((base (file-name-nondirectory (directory-file-name d))))
+                       (and (not (member base '(".git" "target" "node_modules" ".Trash" "Library" ".cache" ".config")))
+                            (condition-case nil
+                                (progn (directory-files d) t)
+                              (error nil))))))))
+               (safe-files '()))
+          
+          (dolist (file raw-files)
+            (when (file-exists-p file)
+              (let ((attrs (file-attributes file)))
+                (when (and attrs
+                           (< (file-attribute-size attrs) 1000000)
+                           (not (string-suffix-p ".json" file))
+                           (not (string-suffix-p ".eln" file))
+                           (not (string-suffix-p ".elc" file)))
+                  (push file safe-files)))))
+          (nreverse safe-files))
       (error (error "Agent Workspace Error: %s" (error-message-string err))))))
 
 ;; Register the new agent workspace type

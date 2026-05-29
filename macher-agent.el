@@ -20,12 +20,12 @@
 (require 'gptel)
 (require 'project)
 
+(require 'macher-agent-api)
 (require 'macher-agent-context)
 (require 'macher-agent-async)
 (require 'macher-agent-orchestration)
 (require 'macher-agent-context-tools)
 (require 'macher-agent-gptel-tools)
-(require 'macher-agent-skills)
 
 (defgroup macher-agent nil
   "Agent tools within the macher edit context ."
@@ -34,15 +34,6 @@
 
 (defvar macher-agent-active-subagents nil
   "Alist of active sub-agents and their locked directories.")
-
-(defcustom macher-agent-global-skills-directory nil
-  "Directory containing global agent skills."
-  :type 'directory
-  :group 'macher-agent)
-
-;; Initialize skills when loaded
-(with-eval-after-load 'macher-agent
-  (macher-agent-initialize-skills))
 
 (provide 'macher-agent)
 ;;; macher-agent.el ends here
