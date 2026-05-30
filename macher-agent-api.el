@@ -49,6 +49,10 @@
 (defvar macher-agent-skills-alist nil
   "Alist mapping skill name symbols to skill metadata.")
 
+(defvar macher-agent-bundled-skills-directory
+  (expand-file-name "skills" (file-name-directory (or load-file-name buffer-file-name)))
+  "Path to the default skills directory bundled with the macher-agent package.")
+
 (defcustom macher-agent-workspace-skills-directory ".macher-agent/skills/"
   "The directory relative to the workspace root containing project-specific SKILL.md files."
   :type 'string
@@ -242,5 +246,9 @@ Also loads any Elisp script tools found in the 'scripts' subdirectory."
   (let ((target-dir (or dir macher-agent-global-skills-directory)))
     (when (and target-dir (file-directory-p target-dir))
       (macher-agent-api-register-skills-in-directory target-dir))))
+
+;; Initialise bundled skills on startup
+(when (file-directory-p macher-agent-bundled-skills-directory)
+  (macher-agent-initialize-skills macher-agent-bundled-skills-directory))
 
 (provide 'macher-agent-api)
