@@ -6,7 +6,7 @@
 (defvar macher-agent-tools-registry (make-hash-table :test 'equal)
   "Global registry mapping tool names (strings) to gptel tool objects.")
 
-(require 'macher-agent-context)
+(require 'macher-agent-vfs-client)
 (require 'macher-agent-orchestration)
 (require 'macher-agent-gptel-tools)
 
@@ -57,6 +57,29 @@
   "The directory relative to the workspace root containing project-specific SKILL.md files."
   :type 'string
   :group 'macher-agent-skills)
+
+(defun macher-agent-force-review ()
+  "Manually trigger the diff review screen for any pending virtual edits.
+Useful for salvaging proposed edits if an agent's generation is aborted early."
+  (interactive)
+  (let ((context (macher-agent-current-context))
+        (fsm (bound-and-true-p macher--fsm-latest)))
+    
+    (if (not (and context (macher-context-dirty-p context)))
+        (message "No pending edits to review.")
+      
+      ;; Replicate the exact patch-splitting logic used by the automated processor
+      (let* ((split (macher-agent--split-context context))
+             (file-ctx (car split))
+             (buf-ctx (cdr split)))
+        
+        (when file-ctx
+          (macher--build-patch file-ctx fsm))
+        
+        (when buf-ctx
+          (macher-agent--build-virtual-patch buf-ctx fsm)))
+      
+      (message "SUCCESS: Patch review screen(s) generated for pending edits."))))
 
 (defun macher-agent--parse-yaml-array (text key)
   "Extract a YAML list for KEY from TEXT."
@@ -134,7 +157,8 @@ assuming it is a globally registered native gptel/macher tool."
                                                   (symbol-value val)
                                                 val))
                                  (error
-                                  (signal (car err) (cdr err))))))))
+                                  (message "Macher-Agent: Failed to load tool %s - %s" tool-name err)
+                                  nil))))))
                  (when tool
                    (puthash tool-name tool macher-agent-tools-registry))
                  (gethash tool-name macher-agent-tools-registry)))))

@@ -1,4 +1,4 @@
-(macher-agent-define-tool macher-agent-read-media-in-workspace-tool
+(macher-agent-make-tool macher-agent-read-media-in-workspace-tool
                           ("Read a media file (e.g. image) from the workspace into the agent's visual context."
                            "ro"
                            :args '((:name "media_path" :type string :description "The path to the media file relative to the workspace root.")))

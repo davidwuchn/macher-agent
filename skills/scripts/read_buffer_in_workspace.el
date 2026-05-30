@@ -1,4 +1,4 @@
-(macher-agent-define-tool macher-agent-read-buffer-in-workspace-tool
+(macher-agent-make-tool macher-agent-read-buffer-in-workspace-tool
                           ("Read the contents of a scoped buffer (ie a buffer in your allowed list)."
                            "ro"
                            :args '((:name "buffer_name" :type string :description "The name of the buffer to read")

@@ -1,4 +1,4 @@
-(macher-agent-define-tool macher-agent-execute-subagents-tool
+(macher-agent-make-tool macher-agent-execute-subagents-tool
                           ("Trigger 1-to-many sub-agents to begin processing. Does NOT provide new instructions. Supports an optional blocking flag to wait for their final output."
                            "orchestrate"
                            :async t
