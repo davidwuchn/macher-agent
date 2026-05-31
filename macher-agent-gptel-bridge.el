@@ -28,13 +28,12 @@ This is the single entry point for pre-flight state management."
 ;; looks like FSM can't be avoided may break in future
 (defun macher-agent--inject-media-fsm-advice (orig-fun fsm &rest args)
   "Inject pending tool media into the FSM payload right before it hits the network."
-  
-  ;; Use a standard quote (') instead of a sharp-quote (#')!
-  ;; This prevents the byte-compiler from inlining the struct type-check,
-  ;; allowing testing frameworks to cleanly mock the accessor.
-  (let* ((info (funcall 'gptel-fsm-info fsm))
-         (buf (plist-get info :buffer))
-         (pending (alist-get buf macher-agent--pending-tool-media-alist)))
+  (let* ((info (if (fboundp 'gptel-fsm-info)
+                   (funcall 'gptel-fsm-info fsm)
+                 (when (fboundp 'mock-gptel-fsm-info)
+                   (funcall 'mock-gptel-fsm-info fsm))))
+         (session (plist-get info :macher-agent-session))
+         (pending (when session (macher-agent-session-pending-media session))))
     
     (when pending
       (let* ((msg-plist (list :role "user" 
@@ -43,15 +42,17 @@ This is the single entry point for pre-flight state management."
              (gptel-context pending))
         
         ;; Have gptel natively encode the image to base64 JSON payload
-        (gptel--inject-media (plist-get info :backend) prompts)
+        (when (fboundp 'gptel--inject-media)
+          (gptel--inject-media (plist-get info :backend) prompts))
         
         ;; Inject directly into the raw API payload data
-        (gptel--inject-prompt (plist-get info :backend) 
-                              (plist-get info :data) 
-                              (car prompts))
+        (when (fboundp 'gptel--inject-prompt)
+          (gptel--inject-prompt (plist-get info :backend) 
+                                (plist-get info :data) 
+                                (car prompts)))
         
-        ;; Clear the queue for this buffer
-        (setf (alist-get buf macher-agent--pending-tool-media-alist nil 'remove) nil)))
+        ;; Clear the queue for this session
+        (setf (macher-agent-session-pending-media session) nil)))
     
     ;; Continue with the actual network request
     (apply orig-fun fsm args)))
@@ -60,23 +61,16 @@ This is the single entry point for pre-flight state management."
 
 ;; --- 2. The Post-flight Boundary (Refresh UI after LLM finishes) ---
 
-(defun macher-agent--gptel-post-response-hook (_response _info)
+(defun macher-agent--gptel-post-response-hook (_response info)
   "Refresh the VFS UI after the LLM completes a turn.
-If the context is dirty, it splits the context into file and buffer edits
-and hands them safely to the `macher` presentation layer."
+If the context is dirty, it delegates to macher-agent--process-request."
   (let ((ctx (macher-agent-current-context)))
     (when (and ctx (macher-context-dirty-p ctx) (not (bound-and-true-p macher-agent--is-subagent)))
-      (let* ((split (macher-agent--split-context ctx))
-             (file-ctx (car split))
-             (buf-ctx (cdr split)))
-        
-        ;; Native File Diffing Hand-off
-        (when (and file-ctx (fboundp 'macher--build-patch))
-          (macher--build-patch file-ctx nil))
-        
-        ;; Virtual Buffer Diffing Hand-off
-        (when (and buf-ctx (fboundp 'macher-agent--build-virtual-patch))
-          (macher-agent--build-virtual-patch buf-ctx))))))
+      ;; Build a dummy FSM structure based on info
+      (let ((fsm (if (fboundp 'gptel-make-fsm)
+                     (gptel-make-fsm :info info)
+                   nil)))
+        (macher-agent--process-request 'complete ctx fsm)))))
 
 (add-hook 'gptel-post-response-functions #'macher-agent--gptel-post-response-hook)
 
@@ -84,12 +78,31 @@ and hands them safely to the `macher` presentation layer."
 
 (defun macher-agent--setup-tools-advice (orig-fn &rest args)
   "Make sure `macher--setup-tools` works gracefully without FSM injection."
-  (let ((ctx (macher-agent-current-context)))
-    (when ctx
-      (macher-agent--auto-sync-context ctx)))
+  (let* ((fsm (car args))
+         (info (when fsm
+                 (if (fboundp 'gptel-fsm-info)
+                     (funcall 'gptel-fsm-info fsm)
+                   (when (fboundp 'mock-gptel-fsm-info)
+                     (funcall 'mock-gptel-fsm-info fsm)))))
+         (ctx (when info (plist-get info :macher--context)))
+         (fallback-ctx (unless ctx (ignore-errors (macher-agent-current-context))))
+         (final-ctx (or ctx fallback-ctx)))
+    (when final-ctx
+      (macher-agent--auto-sync-context final-ctx)
+      ;; Ensure the macher-agent-session is attached to the FSM info
+      (when fsm
+        (let ((session (or (plist-get info :macher-agent-session)
+                           (let* ((ws (macher-context-workspace final-ctx))
+                                  (proj-root (if ws (macher--workspace-root ws) default-directory))
+                                  (agent-ws (make-macher-agent-workspace :project-root proj-root)))
+                             (make-macher-agent-session :id (buffer-name) :workspace agent-ws)))))
+          (setf (gptel-fsm-info fsm) (plist-put info :macher-agent-session session))))))
   (apply orig-fn args))
 
 (advice-add 'macher--setup-tools :around #'macher-agent--setup-tools-advice)
+
+;; Override macher's default diff processing to route live buffers vs file VFS
+(setq macher-process-request-function #'macher-agent--process-request)
 
 (provide 'macher-agent-gptel-bridge)
 ;;; macher-agent-gptel-bridge.el ends here

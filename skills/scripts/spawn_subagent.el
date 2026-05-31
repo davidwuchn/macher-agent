@@ -2,11 +2,10 @@
                           ("Spawn a new sub-agent buffer to handle delegated work." "orchestrate" 
                            :args '((:name "name" :type string)))
                           (name)
-                          (let* ((ctx (macher-agent-current-context))
-                                 (dir default-directory)
-                                 (buf (macher-agent-add-subagent name dir nil ctx)))
+                          (let* ((dir default-directory)
+                                 (buf (macher-agent-add-subagent name dir nil context)))
                             
-                            (when ctx
-                              (macher-agent-scope-add-file (buffer-name buf) ctx))
+                            (when context
+                              (macher-agent-scope-add-file (buffer-name buf) context))
                             
                             (format "SUCCESS: Sub-agent created. The EXACT buffer name to use is '%s'." (buffer-name buf))))

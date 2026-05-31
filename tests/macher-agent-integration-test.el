@@ -47,8 +47,8 @@
                       ;; Safely invoke the tool whether it is flagged as :async t or not
                       (if (gptel-tool-async spawn-tool)
                           (progn
-                            (funcall spawn-fn (lambda (_) nil) "agent-france")
-                            (funcall spawn-fn (lambda (_) nil) "agent-spain"))
+                            (funcall spawn-fn "agent-france" (lambda (_) nil))
+                            (funcall spawn-fn "agent-spain" (lambda (_) nil)))
                         (funcall spawn-fn "agent-france")
                         (funcall spawn-fn "agent-spain")))
 
@@ -67,9 +67,9 @@
                       
                       ;; Execute the async delegation tool
                       (funcall delegate-fn
+                               tasks
                                (lambda (result)
-                                 (setq final-result result))
-                               tasks))
+                                 (setq final-result result))))
 
                     ;; --- D. Assertions ---
                     

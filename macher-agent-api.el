@@ -67,18 +67,7 @@ Useful for salvaging proposed edits if an agent's generation is aborted early."
     
     (if (not (and context (macher-context-dirty-p context)))
         (message "No pending edits to review.")
-      
-      ;; Replicate the exact patch-splitting logic used by the automated processor
-      (let* ((split (macher-agent--split-context context))
-             (file-ctx (car split))
-             (buf-ctx (cdr split)))
-        
-        (when file-ctx
-          (macher--build-patch file-ctx fsm))
-        
-        (when buf-ctx
-          (macher-agent--build-virtual-patch buf-ctx fsm)))
-      
+      (macher-agent--process-request 'complete context fsm)
       (message "SUCCESS: Patch review screen(s) generated for pending edits."))))
 
 (defun macher-agent--parse-yaml-array (text key)
@@ -191,6 +180,20 @@ If IS-GLOBAL is non-nil, sets :context-dir to allow script resolution."
           (when tool
             (add-to-list 'gptel-tools tool)))))))
 
+(defun macher-agent--apply-skill-model-advice (execution)
+  "Inject the skill-specific model into the gptel request if defined."
+  (let* ((action-name (macher-action-execution-action execution))
+         ;; Look up the skill metadata from the alist
+         (skill-meta (alist-get action-name macher-agent-skills-alist)))
+    
+    (when-let ((skill-model (plist-get skill-meta :model)))
+      ;; Update the gptel model buffer-locally for this request
+      (setq-local gptel-model skill-model)
+      (message "Macher-Agent: Switching model to %s for skill %s" skill-model action-name))))
+
+;; Register this function to run before any macher action is dispatched
+(add-hook 'macher-before-action-functions #'macher-agent--apply-skill-model-advice)
+
 (defun macher-agent--load-scripts-from-dir (skills-dir)
   "Load script tools from the scripts subdirectory of SKILLS-DIR."
   (let ((scripts-dir (expand-file-name "scripts" skills-dir)))
@@ -236,7 +239,12 @@ PATH can be a directory containing SKILL.md, or a direct .md file."
                      (append 
                       (when desc (list :description desc))
                       (when model (list :model (intern model)))
-                      (when has-tools (list :tools resolved-tools)))))))))))
+                      (when has-tools 
+                        (list :tools (list :function 
+                                           (lambda (current-tools)
+                                             (append current-tools
+                                                     (cl-remove-if (lambda (tool) (memq tool current-tools))
+                                                                   resolved-tools)))))))))))))))
 
 (defun macher-agent-api-register-skills-in-directory (skills-dir)
   "Scan SKILLS-DIR for SKILL.md files and load them into the core UI and registry.

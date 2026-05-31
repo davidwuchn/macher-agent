@@ -5,20 +5,18 @@
                                    (:name "content" :type string :description "The proposed new content for the buffer")))
                           (buffer_name content)
                           
-                          (let* ((context (macher-agent-current-context))
-                                 (actual-name (macher-agent-workspace-resolve-path buffer_name))
+                          (let* ((actual-name (macher-agent-workspace-resolve-path buffer_name))
                                  (task-id (buffer-name))
-                                 (deterministic-hash (secure-hash 'md5 (concat task-id ":" actual-name)))
-                                 (hidden-buf-name (format " *macher-edit-%s*" deterministic-hash)))
+                                 (expected-hash (secure-hash 'md5 (concat task-id ":" actual-name)))
+                                 (expected-buf-name (format " *macher-edit-%s*" expected-hash))
+                                 (buf (get-buffer-create expected-buf-name)))
                             
-                            ;; Decouple from live buffer to avoid autosave collisions
-                            (let ((target-buffer (get-buffer-create hidden-buf-name)))
-                              (with-current-buffer target-buffer
-                                (erase-buffer)
-                                (setq-local macher-target-filepath actual-name)
-                                (insert content)
-                                ;; Mark as modified so it can be managed
-                                (set-buffer-modified-p t)))
+                            (with-current-buffer buf
+                              (erase-buffer)
+                              (insert content)
+                              (setq-local macher-target-filepath actual-name))
+
+                            ;; Also update the context so patch generation works
+                            (macher-agent--update-context-file context actual-name content)
                             
-                            (macher-agent-context-update context actual-name content)
-                            (format "SUCCESS: Virtual edit recorded for buffer '%s' in unlinked scratchpad. A patch will be generated at the end of the turn." actual-name)))
+                            (format "SUCCESS: Virtual edit recorded for buffer '%s'. A patch will be generated at the end of the turn." actual-name)))

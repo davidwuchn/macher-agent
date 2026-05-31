@@ -104,6 +104,14 @@ This commits the virtual patches to the real buffers."
       (macher-agent--auto-sync-context ctx)
       (message "Virtual buffers applied successfully."))))
 
+(defun macher-agent--register-tools-with-macher ()
+  "Register specific macher-agent tools into the macher category 
+so the FSM natively injects the workspace context. Simple tools are bypassed."
+  (dolist (tool (gptel-get-tools))
+    (setf (gptel-tool-category tool) "macher")))
+
+(add-hook 'gptel-menu-mode-hook #'macher-agent--register-tools-with-macher)
+
 ;; Ensure manual review is triggered on aborts or errors
 (defun macher-agent--gptel-abort-hook (&rest _)
   "Salvage pending edits if a generation is aborted or times out."
@@ -114,6 +122,7 @@ This commits the virtual patches to the real buffers."
     (macher-agent-force-review)))
 
 (advice-add 'gptel-abort :after #'macher-agent--gptel-abort-hook)
+
 (add-hook 'gptel-post-response-functions
           (lambda (_response info)
             ;; If response is nil, it often indicates a failure (400/500/timeout)

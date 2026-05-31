@@ -2,9 +2,8 @@
                           ("List all buffers you currently have explicit access to. You cannot access buffers outside this list."
                            "ro")
                           ()
-                          (let* ((context (macher-agent-current-context))
-                                 (workspace (when context (macher-context-workspace context)))
-                                 (root-dir (when workspace (macher-agent-workspace-root workspace)))
+                          (let* ((workspace (when context (macher-context-workspace context)))
+                                 (root-dir (when workspace (macher--workspace-root workspace)))
                                  (active-buffers nil))
                             (when context
                               (dolist (entry (macher-context-contents context))

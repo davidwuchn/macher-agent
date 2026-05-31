@@ -9,12 +9,17 @@
                                                                                :replace_all (:type boolean :description "If true, replace all occurrences."))
                                                         :required ["old_text" "new_text"]))))
                           (buffer_name edits)
-                          (let* ((context (macher-agent-current-context))
-                                 (actual-name (macher-agent-workspace-resolve-path buffer_name))
-                                 (content (macher-agent-context-read context actual-name))
+                          (let* ((actual-name (macher-agent-workspace-resolve-path buffer_name))
                                  (task-id (buffer-name))
-                                 (deterministic-hash (secure-hash 'md5 (concat task-id ":" actual-name)))
-                                 (hidden-buf-name (format " *macher-edit-%s*" deterministic-hash)))
+                                 (expected-hash (secure-hash 'md5 (concat task-id ":" actual-name)))
+                                 (expected-buf-name (format " *macher-edit-%s*" expected-hash))
+                                 (buf (get-buffer expected-buf-name))
+                                 (content (if (buffer-live-p buf)
+                                              (with-current-buffer buf (buffer-substring-no-properties (point-min) (point-max)))
+                                            (let ((contents (assoc actual-name (macher-context-contents context))))
+                                              (if contents
+                                                  (cdr (cdr contents))
+                                                (error "Buffer '%s' not found in workspace" actual-name))))))
                             (unless (vectorp edits)
                               (error "The 'edits' parameter must be an array of objects"))
                             (cl-loop for edit across edits do
@@ -26,13 +31,13 @@
                                          (error "Each edit must contain old_text and new_text properties"))
                                        (setq content (macher--edit-string content old-text new-text replace-all-bool))))
                             
-                            ;; Decoupled ephemeral scratchpad to avoid live auto-save mutations
-                            (let ((target-buffer (get-buffer-create hidden-buf-name)))
-                              (with-current-buffer target-buffer
+                            (let ((buf (get-buffer-create expected-buf-name)))
+                              (with-current-buffer buf
                                 (erase-buffer)
-                                (setq-local macher-target-filepath actual-name)
                                 (insert content)
-                                (set-buffer-modified-p t)))
-                                
-                            (macher-agent-context-update context actual-name content)
-                            (format "SUCCESS: Virtual multi-edit recorded for buffer '%s' in unlinked scratchpad. A patch will be generated at the end of the turn." actual-name)))
+                                (setq-local macher-target-filepath actual-name)))
+
+                            ;; Also update the context so patch generation works
+                            (macher-agent--update-context-file context actual-name content)
+                            
+                            (format "SUCCESS: Virtual multi-edit recorded for buffer '%s'. A patch will be generated at the end of the turn." actual-name)))

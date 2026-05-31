@@ -46,7 +46,7 @@
                           (spy-on 'macher-agent--prepare-subagent-instructions)
                           (spy-on 'macher-agent--ensure-access)
                           
-                          (funcall tool-fn callback json-tasks)
+                          (funcall tool-fn json-tasks callback)
                           
                           (expect 'macher-agent--execute-parallel :to-have-been-called)
                           (kill-buffer buf)))

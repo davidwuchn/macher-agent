@@ -15,6 +15,9 @@
 
 (defvar macher-agent-tools-registry)
 
+(defvar macher-agent-allowed-tools nil
+  "List of custom tool names that should receive the macher-context.")
+
 ;; --- Configuration & UI Hooks ---
 
 (defcustom macher-agent-display-subagent-fn nil
@@ -29,6 +32,65 @@ If nil, the buffer executes silently in the background."
   :type '(choice (const :tag "Do Nothing" nil)
                  function)
   :group 'macher-agent)
+
+(defun macher-agent--parse-macro-args (lambda-args async)
+  "Extract required and optional args from LAMBDA-ARGS for tool generation."
+  (let ((in-opt nil) req opt)
+    (dolist (arg lambda-args)
+      (cond ((eq arg '&optional) (setq in-opt t))
+            ((memq arg '(&rest &key)) nil)
+            (in-opt (push arg opt))
+            (t (push arg req))))
+    (setq req (nreverse req)
+          opt (nreverse opt))
+    (list :clean (append req opt)
+          :gen-lambda (if async
+                          (append req '(gptel-callback))
+                        (append req (when opt '(&optional)) opt))
+          :list-args (if async req (append req opt)))))
+
+(defun macher-agent--resolve-context (passed-context)
+  "Attempt to resolve the current agent context."
+  (or passed-context
+      (ignore-errors (macher-agent-current-context))
+      (when (and (boundp 'macher--fsm-latest) macher--fsm-latest)
+        (if (fboundp 'gptel-fsm-info)
+            (plist-get (funcall 'gptel-fsm-info macher--fsm-latest) :macher--context)
+          (when (fboundp 'mock-gptel-fsm-info)
+            (plist-get (funcall 'mock-gptel-fsm-info macher--fsm-latest) :macher--context))))))
+
+(defun macher-agent--format-directives (result-data)
+  "Append pending system instructions to RESULT-DATA if any exist."
+  (let ((final-str result-data))
+    (when macher-agent--pending-instructions-queue
+      (setq final-str (concat final-str "\n\n=== SYSTEM DIRECTIVE ===\n"
+                              (string-join (nreverse macher-agent--pending-instructions-queue) "\n")))
+      (setq macher-agent--pending-instructions-queue nil))
+    final-str))
+
+(defun macher-agent--wrap-callback (gptel-cb)
+  "Create a callback wrapper that parses the result and formats directives."
+  (lambda (plist-result)
+    (let ((final-str (if (eq (plist-get plist-result :status) 'success)
+                         (plist-get plist-result :data)
+                       (plist-get plist-result :error))))
+      (when gptel-cb
+        (funcall gptel-cb (macher-agent--format-directives final-str))))))
+
+(defun macher-agent--run-in-sandbox (context base-callback body-fn)
+  "Create a sandbox, execute BODY-FN with (sandbox-dir callback), and clean up."
+  ;; Add safe nil check to fboundp evaluation
+  (let* ((workspace (when (and context (fboundp 'macher-context-workspace)) (macher-context-workspace context)))
+         (project-root (if workspace (macher--workspace-root workspace) default-directory)))
+    (macher-agent-with-sandbox project-root context
+                               (lambda (temp-dir err)
+                                 (if err
+                                     (funcall base-callback (list :status 'error :error err))
+                                   (let ((wrapped-callback
+                                          (lambda (result)
+                                            (ignore-errors (delete-directory temp-dir t))
+                                            (funcall base-callback result))))
+                                     (funcall body-fn temp-dir wrapped-callback)))))))
 
 (defun macher-agent--show-ui (buf)
   "Internal wrapper to safely trigger the display function."
@@ -174,12 +236,13 @@ Relies on macher-agent--bridge-context-advice to safely bind virtual memory."
   (push instruction macher-agent--pending-instructions-queue))
 
 (cl-defmacro macher-agent-make-tool (name-symbol (description category &key args async sandbox) lambda-args &rest body)
-  "Define a gptel tool with standardised JSON parsing and error handling."
+  "Define a gptel tool with standardised JSON parsing, error handling, and FSM compatibility."
   (let* ((name-str (replace-regexp-in-string "^macher-agent-\\|-tool$" "" (symbol-name name-symbol)))
          (name (replace-regexp-in-string "-" "_" name-str))
-         (all-lambda-args (if async (cons 'gptel-callback lambda-args) lambda-args))
          (docstring (format "Gptel tool wrapper for %s." name))
-         (clean-args (cl-remove-if (lambda (sym) (string-prefix-p "&" (symbol-name sym))) lambda-args)))
+         (arg-data (macher-agent--parse-macro-args lambda-args async))
+         (clean-args (plist-get arg-data :clean)))
+
     `(defvar ,name-symbol
        (gptel-make-tool
         :name ,name
@@ -188,61 +251,53 @@ Relies on macher-agent--bridge-context-advice to safely bind virtual memory."
         :args ,args
         :async ,async
         :function
-        (lambda ,all-lambda-args
+        (lambda (&rest all-args)
           ,docstring
-          (let* ((context (macher-agent-current-context))
-                 (parsed-args (mapcar #'macher-agent--parse-tool-arg (list ,@clean-args))))
+          (let* (;; 1. Safely isolate the callback closure (always passes functionp)
+                 (gptel-callback (when ,async (cl-find-if #'functionp all-args)))
+                 
+                 ;; 2. Safely isolate macher's injected context struct (if present)
+                 (injected-context (cl-find-if (lambda (x) (and (boundp 'macher-context-p) (fboundp 'macher-context-p) (macher-context-p x))) all-args))
+                 
+                 ;; 3. Strip out the callback and context to isolate the raw tool payload
+                 (raw-tool-args (cl-remove-if (lambda (x) 
+                                                (or (and ,async (eq x gptel-callback)) 
+                                                    (eq x injected-context))) 
+                                              all-args))
+                 
+                 ;; 4. LLMs often hallucinate prepended arguments. We align from the END 
+                 ;;    of the list to perfectly match your expected clean-args.
+                 (aligned-args (last raw-tool-args (length ',clean-args)))
+                 (parsed-args (mapcar #'macher-agent--parse-tool-arg aligned-args))
+                 
+                 ;; 5. Bind your clean arguments (e.g. 'tasks' -> the vector)
+                 ,@(cl-loop for arg in clean-args for i from 0 collect `(,arg (nth ,i parsed-args)))
+                 
+                 ;; 6. Context resolution
+                 (context (or injected-context (ignore-errors (macher-agent-current-context)))))
+
             (macher-agent--validate-tool-args ',name-symbol context ',clean-args parsed-args)
 
             ,(if async
-                 `(let ((callback (apply-partially
-                                   (lambda (gptel-cb plist-result)
-                                     (let ((final-str (if (eq (plist-get plist-result :status) 'success)
-                                                          (plist-get plist-result :data)
-                                                        (plist-get plist-result :error))))
-                                       (when macher-agent--pending-instructions-queue
-                                         (setq final-str (concat final-str
-                                                                 "\n\n=== SYSTEM DIRECTIVE ===\n"
-                                                                 (string-join (nreverse macher-agent--pending-instructions-queue) "\n")))
-                                         (setq macher-agent--pending-instructions-queue nil))
-                                       (funcall gptel-cb final-str)))
-                                   gptel-callback)))
-                    (condition-case err
-                        ,(if sandbox
-                             `(let* ((workspace (when context (macher-context-workspace context)))
-                                     (root-dir (when workspace (macher--workspace-root workspace))))
-                                (if (not root-dir)
-                                    (funcall callback (list :status 'error :error "Cannot determine workspace root."))
-                                  (macher-agent-with-sandbox root-dir
-                                                             (lambda (sandbox-dir err-msg)
-                                                               (if err-msg
-                                                                   (funcall callback (list :status 'error :error err-msg))
-                                                                 (let* ((original-callback callback)
-                                                                        (callback (lambda (res)
-                                                                                    (ignore-errors (delete-directory sandbox-dir t))
-                                                                                    (funcall original-callback res)))
-                                                                        (sandbox-dir sandbox-dir))
-                                                                   (apply (lambda ,lambda-args ,@body) parsed-args)))))))
-                           `(apply (lambda ,lambda-args ,@body) parsed-args))
-                      (error
-                       (funcall callback (list :status 'error :error (macher-agent--format-error err))))))
-
-               `(let ((result
-                       (condition-case err
-                           ,(if sandbox
-                                `(error "Synchronous tools cannot use the :sandbox flag. Set :async t.")
-                              `(list :status 'success :data (apply (lambda ,lambda-args ,@body) parsed-args)))
-                         (error
-                          (list :status 'error :error (macher-agent--format-error err))))))
-                  (let ((final-str (if (eq (plist-get result :status) 'success)
-                                       (plist-get result :data)
-                                     (plist-get result :error))))
-                    (when macher-agent--pending-instructions-queue
-                      (setq final-str (concat final-str
-                                              "\n\n=== SYSTEM DIRECTIVE ===\n"
-                                              (string-join (nreverse macher-agent--pending-instructions-queue) "\n")))
-                      (setq macher-agent--pending-instructions-queue nil))
-                    final-str)))))))))
+                 `(let ((base-callback (macher-agent--wrap-callback gptel-callback)))
+                    ,(if sandbox
+                         `(macher-agent--run-in-sandbox context base-callback
+                                                        (lambda (sandbox-dir callback)
+                                                          (condition-case err
+                                                              (progn ,@body)
+                                                            (error (funcall callback (list :status 'error :error (macher-agent--format-error err)))))))
+                       `(let ((callback base-callback))
+                          (condition-case err
+                              (progn ,@body)
+                            (error (funcall callback (list :status 'error :error (macher-agent--format-error err))))))))
+               `(condition-case err
+                    (let* ((result (progn ,@body))
+                           (base-data (if (and (listp result) (eq (plist-get result :status) 'success))
+                                          (plist-get result :data)
+                                        result)))
+                      (macher-agent--format-directives base-data))
+                  (error
+                   (macher-agent--format-error err))))))))))
 
 (defun macher-agent--format-error (err)
   "Standardise the error message string for the LLM."
