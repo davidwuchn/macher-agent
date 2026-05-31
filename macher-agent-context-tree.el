@@ -2,7 +2,7 @@
 
 (require 'cl-lib)
 (require 'ewoc)
-(require 'macher-agent-context)
+(require 'macher-agent-vfs-client)
 (eval-when-compile (require 'subr-x))
 
 ;; --- Configuration ---

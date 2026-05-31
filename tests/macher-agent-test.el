@@ -3,9 +3,7 @@
 (require 'subr-x)
 (require 'buttercup)
 (require 'macher-agent)
-(require 'macher-agent-async)
-(require 'macher-agent-context)
-(require 'macher-agent-context-tools)
+(require 'macher-agent-vfs-client)
 (require 'macher-agent-gptel-tools)
 (require 'macher-agent-orchestration)
 
@@ -19,24 +17,7 @@
            (setq macher-agent--persistent-context nil)
            (setq macher-agent-active-subagents nil))
 
-          (describe "Asynchronous Logic (macher-agent-async.el)"
-                    (it "reports an explicit error when a transition event is 'failed'"
-                        (let* ((callback-called nil)
-                               (callback (lambda (msg) (setq callback-called msg)))
-                               (payload (list :actual-name "test-agent" :callback callback :err "Panic")))
-                          (macher-agent--fsm-transition 'any 'error payload)
-                          (expect callback-called :to-equal "ERROR: Panic")))
-
-                    (it "detects and handles a killed buffer during polling"
-                        (let* ((buf (generate-new-buffer "killed-buf"))
-                               (callback-called nil)
-                               (callback (lambda (msg) (setq callback-called msg)))
-                               (payload (list :buf buf :actual-name "test-agent" :callback callback)))
-                          (kill-buffer buf)
-                          (macher-agent--fsm-transition 'polling 'check-continuation payload)
-                          (expect callback-called :to-equal "ERROR: Buffer 'test-agent' was killed."))))
-
-          (describe "Context & Security (macher-agent-context.el)"
+          (describe "Context & Security (macher-agent-vfs-client.el)"
                     (it "throws a security error if accessing a path outside of the allowed context"
                         (let ((ctx (macher--make-context :contents '(("allowed.txt" . ("old" . "new"))))))
                           (expect (macher-agent--ensure-access ctx "forbidden.txt") :to-throw 'error)))
@@ -100,6 +81,7 @@
                           ;; 1. Add one physical file and one pure buffer to the context
                           (push (cons file-path (cons "a" "b")) (macher-context-contents ctx))
                           (push (cons pure-name (cons "x" "y")) (macher-context-contents ctx))
+                          (expect (length (macher-context-contents ctx)) :to-equal 2)
                           
                           ;; 2. Run the splitter
                           (let* ((split (macher-agent--split-context ctx))
@@ -107,6 +89,7 @@
                                  (buf-ctx (cdr split)))
                             
                             ;; 3. Verify physical files went to the left (car)
+                            (expect (length (macher-context-contents file-ctx)) :to-equal 1)
                             (expect (assoc file-path (macher-context-contents file-ctx)) :to-be-truthy)
                             (expect (assoc pure-name (macher-context-contents file-ctx)) :to-be nil)
                             
@@ -117,57 +100,36 @@
                           (kill-buffer file-buf)
                           (kill-buffer pure-buf)))
 
-                    (it "suppresses diff presentation when executing as a subagent"
-                        (let* ((ctx (macher--make-context :dirty-p t))
-                               (fsm (gptel-make-fsm)))
-                          (push (cons "*subagent-edit*" (cons "a" "b")) (macher-context-contents ctx))
+                    (it "triggers the UI safely on completion without modifying the FSM"
+                        (let* ((buf (generate-new-buffer "test-bridge"))
+                               (ctx (macher--make-context :dirty-p t))
+                               (file-path (expand-file-name "test.txt")))
+                          (push (cons file-path (cons "old" "new")) (macher-context-contents ctx))
+                          
+                          (with-current-buffer buf
+                            (setq-local macher-agent--is-workspace t)
+                            (setq-local macher-agent--persistent-context ctx))
+                          
                           (spy-on 'macher--build-patch)
                           
-                          ;; When not a subagent, it should call macher--build-patch
-                          (setq-default macher-agent--is-subagent nil)
-                          (macher-agent-process-request-split 'complete ctx fsm)
+                          ;; Run our clean Post-Response hook
+                          (with-current-buffer buf
+                            (macher-agent--gptel-post-response-hook nil nil))
+                          
+                          ;; Verify macher--build-patch was called for the file edits
                           (expect 'macher--build-patch :to-have-been-called)
                           
                           ;; Reset spy
                           (spy-on 'macher--build-patch)
                           
                           ;; When a subagent, it should NOT call macher--build-patch
-                          (setq macher-agent--is-subagent t)
-                          (macher-agent-process-request-split 'complete ctx fsm)
-                          (expect 'macher--build-patch :not :to-have-been-called)
-                          (setq macher-agent--is-subagent nil)))
-
-                    (it "forcefully injects :macher--context into the FSM info plist to awaken the native UI"
-                        (let* ((buf (generate-new-buffer "test-bridge"))
-                               (fsm (gptel-make-fsm :info (list :buffer buf)))
-                               (ctx (macher--make-context :dirty-p t))
-                               (get-context (lambda () ctx)))
                           (with-current-buffer buf
-                            (setq-local macher-agent--is-workspace t))
-                          
-                          (spy-on 'macher-process-request)
-                          
-                          ;; 1. Run our Proxy Bridge
-                          (macher-agent--bridge-context-advice 
-                           (lambda (f get) nil) ; Mock the native orig-fun
-                           fsm 
-                           get-context)
-                          
-                          ;; 2. Extract the termination handler safely from the spy records.
-                          ;; FIX: spy-calls-args-for requires the exact call index (0)
-                          (let* ((args (spy-calls-args-for 'macher--add-termination-handler 0))
-                                 (term-handler (cadr args)))
-                            
-                            (funcall term-handler fsm)
-                            
-                            ;; 3. Verify the bridge successfully injected the context into the precise native slot
-                            (let ((info (gptel-fsm-info fsm)))
-                              (expect (plist-get info :macher--context) :to-be ctx))
-                            
-                            ;; 4. Verify the native UI engine was called
-                            (expect 'macher-process-request :to-have-been-called-with 'complete fsm)))))
+                            (setq macher-agent--is-subagent t)
+                            (macher-agent--gptel-post-response-hook nil nil))
+                          (expect 'macher--build-patch :not :to-have-been-called)
+                          (kill-buffer buf))))
 
-          (describe "Sandbox Execution (macher-agent-context-tools.el)"
+          (describe "Sandbox Execution (macher-agent-vfs-client.el)"
                     (describe "read_media_in_workspace"
                               (it "errors if gptel-track-media is nil"
                                   (let* ((gptel-track-media nil)
@@ -211,32 +173,43 @@
                                       (expect gptel-context :to-be nil)
                                       (expect (alist-get (current-buffer) macher-agent--pending-tool-media-alist) :to-be-truthy))))
 
-                              (it "injects pending media into FSM payload and clears the queue mid-flight"
+                              (it "injects pending media into FSM payload and clears the queue pre-flight"
                                   (let* ((buf (current-buffer))
                                          (macher-agent--pending-tool-media-alist (list (cons buf '(("/test.png" :mime "image/png")))))
-                                         (info (list :buffer buf :backend 'mock-backend :data (list :messages ["a"])))
-                                         (fsm (gptel-make-fsm :info info))
+                                         (mock-backend 'mock-backend)
+                                         (mock-data '((:role "system" :content "sys")))
+                                         (mock-info (list :buffer buf :backend mock-backend :data mock-data))
+                                         
+                                         ;; We can safely use a mock symbol again!
+                                         (mock-fsm 'mock-fsm)
+                                         
                                          (orig-called nil)
-                                         (orig-fun (lambda (f &rest _) (setq orig-called f))))
+                                         (orig-fun (lambda (fsm &rest _) (setq orig-called fsm))))
                                     
+                                    ;; Spy on the accessor to intercept the dynamic funcall
+                                    (spy-on 'gptel-fsm-info :and-return-value mock-info)
                                     (spy-on 'gptel--inject-media)
                                     (spy-on 'gptel--inject-prompt)
                                     
-                                    (macher-agent--inject-media-fsm-advice orig-fun fsm)
+                                    ;; Execute the restored advice
+                                    (macher-agent--inject-media-fsm-advice orig-fun mock-fsm)
                                     
+                                    ;; Verify injection lifecycle
+                                    (expect 'gptel-fsm-info :to-have-been-called-with mock-fsm)
                                     (expect 'gptel--inject-media :to-have-been-called)
                                     (expect 'gptel--inject-prompt :to-have-been-called)
-                                    (expect orig-called :to-equal fsm)
+                                    (expect orig-called :to-equal mock-fsm)
                                     (expect (alist-get buf macher-agent--pending-tool-media-alist) :to-be nil))))
 
                     (describe "rsync command building"
                               (it "constructs a safe rsync command with all necessary exclusions"
                                   (let* ((src "/my/project/")
                                          (dest "/tmp/sandbox/")
-                                         (cmd (macher-agent--build-rsync-cmd src dest)))
-                                    (expect cmd :to-match "^rsync -a")
-                                    (expect cmd :to-match "--exclude=\\.git/")
-                                    (expect cmd :to-match "--exclude=node_modules/")))))
+                                         (cmd-list (macher-agent--build-rsync-cmd src dest))
+                                         (cmd (nth 2 cmd-list)))
+                                    (expect cmd-list :to-be-truthy)
+                                    (expect cmd :to-match "rsync -aLC")
+                                    (expect cmd :to-match "--files-from=-")))))
 
           (describe "Interactive Commands & State (macher-agent-orchestration.el)"
                     (it "macher-agent-add-buffer-to-scope explicitly errors out if no existing session is found"
@@ -257,8 +230,7 @@
                                (ctx (macher--make-context :contents (list (cons (buffer-name buf) (cons "old" "new text"))))))
                           (with-current-buffer buf (insert "old"))
                           
-                          (setq macher--fsm-latest (gptel-make-fsm))
-                          (spy-on 'macher-agent--fsm-get-context :and-return-value ctx)
+                          (spy-on 'macher-agent-current-context :and-return-value ctx)
                           (spy-on 'macher-agent--auto-sync-context)
                           
                           (macher-agent-apply-virtual-buffers)
@@ -279,15 +251,15 @@
 
           (describe "Tool Signatures (Macro Contracts)"
                     (before-all
-                     (macher-agent-define-tool mock-async-contract-tool
-                                               ("Mock async tool" "test" :args '((:name "arg1" :type string) (:name "arg2" :type string)) :async t)
-                                               (arg1 arg2)
-                                               (funcall gptel-callback (format "Async %s %s" arg1 arg2)))
+                     (macher-agent-make-tool mock-async-contract-tool
+                                             ("Mock async tool" "test" :args '((:name "arg1" :type string) (:name "arg2" :type string)) :async t)
+                                             (arg1 arg2)
+                                             (funcall gptel-callback (format "Async %s %s" arg1 arg2)))
 
-                     (macher-agent-define-tool mock-sync-contract-tool
-                                               ("Mock sync tool" "test" :args '((:name "arg1" :type string)))
-                                               (arg1)
-                                               (format "Sync %s" arg1)))
+                     (macher-agent-make-tool mock-sync-contract-tool
+                                             ("Mock sync tool" "test" :args '((:name "arg1" :type string)))
+                                             (arg1)
+                                             (format "Sync %s" arg1)))
 
                     (it "generates exact signatures for async tools (callback + args)"
                         (let* ((tool-fn (gptel-tool-function mock-async-contract-tool))

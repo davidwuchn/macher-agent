@@ -5,13 +5,13 @@
 (require 'cl-lib)
 (require 'transient)
 
-(declare-function macher-agent-current-context "macher-agent-context")
+(declare-function macher-agent-current-context "macher-agent-vfs-client")
 (declare-function macher-agent--resolve-buffer-name "macher-agent-orchestration")
-(declare-function macher-agent--read-context-file "macher-agent-context")
-(declare-function macher-agent--merge-contexts "macher-agent-context")
-(declare-function macher-agent--clone-context "macher-agent-context")
-(declare-function macher-agent--ensure-access "macher-agent-context")
-(declare-function macher-agent-context-classify-entry "macher-agent-context")
+(declare-function macher-agent--read-context-file "macher-agent-vfs-client")
+(declare-function macher-agent--merge-contexts "macher-agent-vfs-client")
+(declare-function macher-agent--clone-context "macher-agent-vfs-client")
+(declare-function macher-agent--ensure-access "macher-agent-vfs-client")
+(declare-function macher-agent-context-classify-entry "macher-agent-vfs-client")
 
 (defvar macher-agent-tools-registry)
 
@@ -104,7 +104,6 @@ Relies on macher-agent--bridge-context-advice to safely bind virtual memory."
       (setq transform-hook
             (lambda (async-fn fsm)
               (setq-local macher--fsm-latest fsm)
-              ;; REMOVED: Manual context stapling. The Advice bridge handles this safely now.
               (funcall async-fn)))
       (add-hook 'gptel-prompt-transform-functions transform-hook nil t)
       
@@ -116,7 +115,14 @@ Relies on macher-agent--bridge-context-advice to safely bind virtual memory."
                     (progn
                       (macher-agent--hide-ui buf)
                       (funcall callback (list :status 'success :data res)))
-                  (funcall callback (list :status 'error :error (format "ERROR: Buffer '%s' stopped silently without calling submit_task_result." (buffer-name buf))))))))
+                  (funcall callback (list :status 'error :error (format "ERROR: Buffer '%s' stopped silently without calling submit_task_result." (buffer-name buf)))))
+                
+                ;; --- THE FIX: Defer destruction so gptel's sentinel can exit safely ---
+                (run-at-time 0.1 nil 
+                             (lambda () 
+                               (when (buffer-live-p buf) 
+                                 (kill-buffer buf)))))))
+      
       (add-hook 'gptel-post-response-functions response-hook nil t)
       
       (gptel-send))))
@@ -150,15 +156,24 @@ Relies on macher-agent--bridge-context-advice to safely bind virtual memory."
                        (if (string= arg-name "media_path")
                            (let* ((workspace (when context (macher-context-workspace context)))
                                   (root-dir (when workspace (macher--workspace-root workspace))))
+                             ;; Restore classification check to protect against reading arbitrary text files
                              (if (eq (macher-agent-context-classify-entry item root-dir) 'media)
                                  (when root-dir
                                    (let ((expanded (expand-file-name item root-dir)))
                                      (unless (string-prefix-p (expand-file-name root-dir) expanded)
                                        (error "SECURITY ERROR: Media path escapes workspace root directory."))))
+                               ;; If it is NOT media, fall back to strict VFS memory scope
                                (macher-agent--ensure-access context item)))
                          (macher-agent--ensure-access context item))))))))))
 
-(cl-defmacro macher-agent-define-tool (name-symbol (description category &key args async) lambda-args &rest body)
+(defvar-local macher-agent--pending-instructions-queue nil
+  "List of instruction strings to append to the tool's return payload.")
+
+(defun macher-agent-add-pending-instruction (instruction)
+  "Push an INSTRUCTION directive to steer the LLM after tool execution."
+  (push instruction macher-agent--pending-instructions-queue))
+
+(cl-defmacro macher-agent-make-tool (name-symbol (description category &key args async sandbox) lambda-args &rest body)
   "Define a gptel tool with standardised JSON parsing and error handling."
   (let* ((name-str (replace-regexp-in-string "^macher-agent-\\|-tool$" "" (symbol-name name-symbol)))
          (name (replace-regexp-in-string "-" "_" name-str))
@@ -185,21 +200,49 @@ Relies on macher-agent--bridge-context-advice to safely bind virtual memory."
                                      (let ((final-str (if (eq (plist-get plist-result :status) 'success)
                                                           (plist-get plist-result :data)
                                                         (plist-get plist-result :error))))
+                                       (when macher-agent--pending-instructions-queue
+                                         (setq final-str (concat final-str
+                                                                 "\n\n=== SYSTEM DIRECTIVE ===\n"
+                                                                 (string-join (nreverse macher-agent--pending-instructions-queue) "\n")))
+                                         (setq macher-agent--pending-instructions-queue nil))
                                        (funcall gptel-cb final-str)))
                                    gptel-callback)))
                     (condition-case err
-                        (apply (lambda ,lambda-args ,@body) parsed-args)
+                        ,(if sandbox
+                             `(let* ((workspace (when context (macher-context-workspace context)))
+                                     (root-dir (when workspace (macher--workspace-root workspace))))
+                                (if (not root-dir)
+                                    (funcall callback (list :status 'error :error "Cannot determine workspace root."))
+                                  (macher-agent-with-sandbox root-dir
+                                                             (lambda (sandbox-dir err-msg)
+                                                               (if err-msg
+                                                                   (funcall callback (list :status 'error :error err-msg))
+                                                                 (let* ((original-callback callback)
+                                                                        (callback (lambda (res)
+                                                                                    (ignore-errors (delete-directory sandbox-dir t))
+                                                                                    (funcall original-callback res)))
+                                                                        (sandbox-dir sandbox-dir))
+                                                                   (apply (lambda ,lambda-args ,@body) parsed-args)))))))
+                           `(apply (lambda ,lambda-args ,@body) parsed-args))
                       (error
                        (funcall callback (list :status 'error :error (macher-agent--format-error err))))))
 
                `(let ((result
                        (condition-case err
-                           (list :status 'success :data (apply (lambda ,lambda-args ,@body) parsed-args))
+                           ,(if sandbox
+                                `(error "Synchronous tools cannot use the :sandbox flag. Set :async t.")
+                              `(list :status 'success :data (apply (lambda ,lambda-args ,@body) parsed-args)))
                          (error
                           (list :status 'error :error (macher-agent--format-error err))))))
-                  (if (eq (plist-get result :status) 'success)
-                      (plist-get result :data)
-                    (plist-get result :error))))))))))
+                  (let ((final-str (if (eq (plist-get result :status) 'success)
+                                       (plist-get result :data)
+                                     (plist-get result :error))))
+                    (when macher-agent--pending-instructions-queue
+                      (setq final-str (concat final-str
+                                              "\n\n=== SYSTEM DIRECTIVE ===\n"
+                                              (string-join (nreverse macher-agent--pending-instructions-queue) "\n")))
+                      (setq macher-agent--pending-instructions-queue nil))
+                    final-str)))))))))
 
 (defun macher-agent--format-error (err)
   "Standardise the error message string for the LLM."
@@ -233,13 +276,20 @@ callbacks in a temporary network buffer.")
 
 (defun macher-agent--gptel-base64-encode-advice (orig-fun file)
   "Read FILE from VFS if available before encoding."
-  (let* ((ctx (macher-agent-current-context))
+  ;; Use ignore-errors here just in case this triggers outside an active agent session
+  (let* ((ctx (ignore-errors (macher-agent-current-context)))
          (workspace (when ctx (macher-context-workspace ctx)))
          (workspace-root (when workspace (macher--workspace-root workspace)))
          (actual-name (if (and workspace-root (file-name-absolute-p file))
                           (file-relative-name file workspace-root)
                         file))
-         (content (ignore-errors (macher-agent--read-context-file ctx actual-name))))
+         ;; THE FIX: Wrap the VFS read in condition-case.
+         ;; If the security layer denies access (e.g. for a physical media file),
+         ;; we silently catch the error and fallback to reading the real file.
+         (content (when ctx 
+                    (condition-case nil
+                        (macher-agent--read-context-file ctx actual-name)
+                      (error nil)))))
     (if content
         (with-temp-buffer
           (set-buffer-multibyte nil)
@@ -250,33 +300,35 @@ callbacks in a temporary network buffer.")
 
 (advice-add 'gptel--base64-encode :around #'macher-agent--gptel-base64-encode-advice)
 
-(defun macher-agent--inject-media-fsm-advice (orig-fun fsm &rest args)
-  "Inject pending tool media into the FSM payload right before it hits the network."
-  (let* ((info (gptel-fsm-info fsm))
-         (buf (plist-get info :buffer))
-         (pending (alist-get buf macher-agent--pending-tool-media-alist)))
-    
-    (when pending
-      (let* ((msg-plist (list :role "user" 
-                              :content "Tool execution complete. Here is the requested visual data:"))
-             (prompts (list msg-plist))
-             (gptel-context pending))
-        
-        ;; Have gptel natively encode the image to base64 JSON payload
-        (gptel--inject-media (plist-get info :backend) prompts)
-        
-        ;; Inject directly into the raw API payload data
-        (gptel--inject-prompt (plist-get info :backend) 
-                              (plist-get info :data) 
-                              (car prompts))
-        
-        ;; Clear the queue for this buffer
-        (setf (alist-get buf macher-agent--pending-tool-media-alist nil 'remove) nil)))
-    
-    ;; Continue with the actual network request
-    (apply orig-fun fsm args)))
-
-(advice-add 'gptel--handle-wait :around #'macher-agent--inject-media-fsm-advice)
+(defvar macher-agent-commit-buffer-tool
+  (gptel-make-tool
+   :name "write_and_commit_buffer"
+   :description "Directly overwrite an Emacs buffer and synchronise the agent's memory immediately, bypassing the patch review step."
+   :category "macher-agent-plan"
+   :args (list '(:name "buffer_name" :type string)
+               '(:name "content" :type string))
+   :function (lambda (context buffer_name content)
+               (condition-case err
+                   (let ((actual-name (macher-agent--resolve-buffer-name buffer_name)))
+                     (macher-agent--ensure-access context actual-name)
+                     (let ((target-buffer (get-buffer-create actual-name)))
+                       
+                       (with-current-buffer target-buffer
+                         ;; 1. Prevent background processes from silently flushing to disk
+                         (when (bound-and-true-p auto-save-visited-mode)
+                           (auto-save-visited-mode -1))
+                         
+                         (erase-buffer)
+                         (insert content)
+                         
+                         ;; 2. Explicitly mark as modified so the user is prompted on exit
+                         (set-buffer-modified-p t))
+                       
+                       (when context
+                         (macher-agent--update-context-file context actual-name content)
+                         (macher-agent--auto-sync-context context))
+                       (format "SUCCESS: Buffer '%s' has been directly overwritten and synchronised. Awaiting user save." actual-name)))
+                 (error (error-message-string err))))))
 
 (with-eval-after-load 'gptel-transient
   (ignore-errors
