@@ -9,7 +9,7 @@
                        (workspace-root (when workspace (macher--workspace-root workspace)))
                        (actual-name (macher-agent--resolve-buffer-name media_path))
                        (abs-path (if workspace-root
-                                     (expand-file-name actual-name workspace-root)
+                                     (macher-agent--resolve-safe-path actual-name workspace-root)
                                    (expand-file-name actual-name)))
                        (classification (macher-agent-context-classify-entry actual-name workspace-root))
                        (vfs-contents (when context (macher-context-contents context)))

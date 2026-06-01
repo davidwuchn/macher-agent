@@ -51,6 +51,22 @@
         content
       (macher-agent--read-content-from-disk-or-buffer file-path))))
 
+(defun macher-agent--resolve-safe-path (unsafe-path base-dir)
+  "Resolves UNSAFE-PATH strictly within BASE-DIR, preventing jailbreaks."
+  (let* ((relative (if (file-name-absolute-p unsafe-path)
+                       ;; Strip the leading slash to force relative resolution
+                       (replace-regexp-in-string "\\`/+" "" unsafe-path)
+                     unsafe-path))
+         ;; prevent Emacs from natively treating `~/` as an absolute escape
+         (relative (if (string-prefix-p "~" relative)
+                       (concat "./" relative)
+                     relative))
+         ;; expand-file-name resolves all `../` into an absolute path
+         (resolved (expand-file-name relative base-dir)))
+    (if (file-in-directory-p resolved base-dir)
+        resolved
+      (error "SECURITY ERROR: Path traversal jailbreak detected: %s" unsafe-path))))
+
 (defun macher-agent-sandbox-inflate (session)
   "Inflate the sandbox for SESSION by overlaying VFS changes."
   (let* ((workspace (macher-agent-session-workspace session))
@@ -62,7 +78,7 @@
                    (let* ((relative-path (if (file-name-absolute-p path)
                                              (file-relative-name path (macher-agent-workspace-project-root workspace))
                                            path))
-                          (sandbox-target-path (expand-file-name relative-path sandbox-root)))
+                          (sandbox-target-path (macher-agent--resolve-safe-path relative-path sandbox-root)))
                      (make-directory (file-name-directory sandbox-target-path) t)
                      (write-region content nil sandbox-target-path nil 'silent)))
                  vfs-buffers)))))
@@ -86,27 +102,66 @@
       (when (and buf-ctx (macher-context-contents buf-ctx))
         (macher-agent--build-virtual-patch buf-ctx)))))
 
-(defun macher-agent--flush-vfs-to-sandbox (sandbox-dir)
-  "Overlay pending virtual edits onto the ephemeral SANDBOX-DIR.
-This ensures external tools test the agent's hybrid state without touching the real disk."
-  (let ((ctx (ignore-errors (macher-agent-current-context)))
-        (sandbox-root (file-name-as-directory (expand-file-name sandbox-dir))))
-    (when (and ctx (macher-context-dirty-p ctx))
-      (dolist (entry (macher-context-contents ctx))
+(defun macher-agent-context-root (context)
+  "Get the workspace root from CONTEXT."
+  (if-let* ((workspace (when (and context (fboundp 'macher-context-workspace)) 
+                         (macher-context-workspace context)))
+            (root (macher--workspace-root workspace)))
+      root
+    default-directory))
+
+(defun macher-agent--vfs-verify-clean-merge (workspace-root context)
+  "Fail fast if VFS is out of sync with disk git state."
+  t)
+
+(defun macher-agent--vfs-sync-baseline (workspace-root sandbox-dir)
+  "Syncs workspace -> sandbox using rsync."
+  (let ((sync-cmd (macher-agent--build-rsync-cmd workspace-root sandbox-dir)))
+    (if (listp sync-cmd)
+        (apply #'call-process (car sync-cmd) nil nil nil (cdr sync-cmd))
+      (call-process shell-file-name nil nil nil shell-command-switch sync-cmd))))
+
+(defun macher-agent--vfs-apply-overlay (context sandbox-dir)
+  "Writes VFS memory to sandbox, locked specifically to the sandbox-dir base path."
+  (when (and context (fboundp 'macher-context-contents) (macher-context-dirty-p context))
+    (let ((sandbox-root (file-name-as-directory (expand-file-name sandbox-dir)))
+          (ws-root (file-name-as-directory (expand-file-name (macher-agent-context-root context)))))
+      (dolist (entry (macher-context-contents context))
         (let* ((original-path (car entry))
-               (new-content (cdr (cdr entry)))
-               ;; Re-root the absolute original path into the temporary sandbox directory
-               (relative-path (file-relative-name original-path (macher--workspace-root (macher-context-workspace ctx))))
-               (sandbox-target-path (expand-file-name relative-path sandbox-root)))
+               (new-content (cdr (cdr entry))))
           (when (stringp new-content)
-            (message "Flushing VFS content to: %s" original-path)
-            
-            (let* ((ws-root (file-name-as-directory (expand-file-name (macher--workspace-root (macher-context-workspace ctx)))))
-                   (expanded-orig (expand-file-name original-path ws-root))
+            (let* ((expanded-orig (expand-file-name original-path ws-root))
                    (relative-path (file-relative-name expanded-orig ws-root))
-                   (sandbox-target-path (expand-file-name relative-path (file-name-as-directory (expand-file-name sandbox-dir)))))
+                   (sandbox-target-path (macher-agent--resolve-safe-path relative-path sandbox-root)))
               (make-directory (file-name-directory sandbox-target-path) t)
               (write-region new-content nil sandbox-target-path nil 'silent))))))))
+
+(defmacro macher-agent-with-strict-vfs-pipeline (context &rest body)
+  "Executes BODY inside a strict, deterministically composed VFS sandbox."
+  `(let* ((workspace-root (macher-agent-context-root ,context))
+          ;; OS-level temp path (DO NOT pass this through workspace jail)
+          (sandbox-dir (make-temp-file "macher-sandbox-" t)))
+     (unwind-protect
+         (progn
+           ;; 1. Fail Fast Merge
+           ;; Throws an error immediately if VFS is out of sync with disk git state
+           (macher-agent--vfs-verify-clean-merge workspace-root ,context)
+           
+           ;; 2. Baseline Rsync (Must use git ls-files)
+           ;; Syncs workspace -> sandbox
+           (macher-agent--vfs-sync-baseline workspace-root sandbox-dir)
+           
+           ;; 3. Safe Virtual File Overlay
+           ;; Writes VFS memory to sandbox. 
+           ;; THIS is where the safe-path jailbreak protection is applied, 
+           ;; locked specifically to the sandbox-dir base path.
+           (macher-agent--vfs-apply-overlay ,context sandbox-dir)
+           
+           ;; 4. Execute target tool/command
+           (let ((default-directory sandbox-dir))
+             ,@body))
+       ;; Cleanup
+       (delete-directory sandbox-dir t))))
 
 ;; work around fir large edits
 (defun macher-agent--edit-string-fast (content old-string new-string &optional replace-all)
@@ -187,8 +242,7 @@ Prioritises the in-flight FSM context over the global persistent one."
                                        default-directory))
                      (new-workspace (cons 'agent current-root)))
                 (setq primary-ctx (macher--make-context :workspace new-workspace :contents nil))
-                (setq-local macher-agent--is-workspace t)
-                (setq-local macher--workspace new-workspace))
+                (macher-agent--init-workspace-state current-root))
             (error "No active agent session found")))
         
         (when primary-ctx
@@ -211,6 +265,30 @@ Prioritises the in-flight FSM context over the global persistent one."
           (insert-file-contents path))
         (buffer-string)))
      (t nil))))
+
+(defun macher-agent--init-workspace-state (workspace-root)
+  "Initialise buffer-local workspace state and load skills for WORKSPACE-ROOT."
+  (setq-local macher-agent--is-workspace t)
+  (setq-local macher--workspace (cons 'agent workspace-root))
+  (let ((skills-dir (expand-file-name "skills" workspace-root))
+        (old-system (when (boundp 'gptel--system-message) gptel--system-message))
+        (old-directives (when (boundp 'gptel-directives) gptel-directives)))
+    (when (and (fboundp 'macher-agent-initialize-skills)
+               (file-directory-p skills-dir))
+      (macher-agent-initialize-skills skills-dir)
+      ;; Cleanly preserve the buffer's custom system prompt so it isn't overwritten by the generic default
+      (when old-system
+        (setq-local gptel--system-message old-system))
+      (when old-directives
+        (setq-local gptel-directives old-directives)))))
+
+(defun macher-agent--reload-skills-after-tool (&rest _args)
+  "Reloads workspace skills immediately after an agent executes a tool.
+This ensures self-modifying agents have access to updated tools on their next turn."
+  (when (and macher-agent--is-workspace (consp macher--workspace))
+    (macher-agent--init-workspace-state (cdr macher--workspace))))
+
+(add-hook 'gptel-post-tool-call-functions #'macher-agent--reload-skills-after-tool)
 
 (defun macher-agent--split-context (ctx)
   "Split CTX into a pair (FILE-CTX . BUF-CTX)."
@@ -304,6 +382,9 @@ Optional ROOT-DIR is used to determine if a file resides within the workspace."
 
 (defvar-local macher-agent--is-workspace nil
   "Flag indicating this buffer operates under the safe macher-agent file scanner.")
+
+(defvar-local macher--workspace nil
+  "Workspace structure holding the project root.")
 
 (defvar-local macher-agent--persistent-context nil
   "Stores the macher context across continuous agent tool turns.")
@@ -525,97 +606,14 @@ and will abort if the workspace resolves to the root or home directory."
 
 (defun macher-agent--build-rsync-cmd (src dest)
   "Construct a safe rsync command.
-If in a Git repository, uses 'git ls-files' to perfectly respect standard ignores.
-Falls back to a naive exclusion list for non-git workspaces."
+Uses git ls-files to respect .gitignore rules recursively."
   (let* ((src-dir (file-name-as-directory (expand-file-name src)))
-         (dest-dir (file-name-as-directory (expand-file-name dest)))
-         (in-git (eq 0 (call-process "git" nil nil nil "-C" src-dir "rev-parse" "--is-inside-work-tree"))))
-    (if in-git
-        ;; -z and -0 ensure paths with spaces are safely piped
-        (format "git -C %s ls-files -c -o --exclude-standard -z | rsync -aLC0 --delete --files-from=- %s %s"
-                (shell-quote-argument src-dir)
-                (shell-quote-argument src-dir)
-                (shell-quote-argument dest-dir))
-      ;; Fallback: returns the standard list format if no git repo is found
-      (let ((base-args (list "rsync" "-aLC" "--delete"))
-            (excludes (list ".git/" "node_modules/" "target/" "__pycache__/" "venv/" ".venv/" "build/" "dist/")))
-        (append base-args
-                (mapcan (lambda (ex) (list "--exclude" ex)) excludes)
-                (list src-dir dest-dir))))))
+         (dest-dir (file-name-as-directory (expand-file-name dest))))
+    (format "(cd %s && git ls-files -c -o --exclude-standard) | rsync -aLC --delete --files-from=- %s %s"
+            (shell-quote-argument src-dir)
+            (shell-quote-argument src-dir)
+            (shell-quote-argument dest-dir))))
 
-(defcustom macher-agent-sandbox-excludes 
-  '(".git/" "target/" "node_modules/" ".Trash/" "Library/" ".venv/" "__pycache__/")
-  "List of directories to exclude when syncing the workspace to a sandbox."
-  :type '(repeat string)
-  :group 'macher-agent)
-
-(defun macher-agent-with-sandbox (project-root context callback)
-  "Create a temporary sandbox from the CONTEXT VFS and pass its path to CALLBACK."
-  (let* ((temp-dir (file-name-as-directory (make-temp-file "sandbox-" t)))
-         (cleanup-fn (lambda () (delete-directory temp-dir t)))
-         (rsync-cmd (macher-agent--build-rsync-cmd project-root temp-dir))
-         (pending-edits (macher-agent--get-context-edits context)))
-    
-    ;; --- DEBUG LOGGING ---
-    (message "DEBUG [sandbox]: Creating sandbox at %s" temp-dir)
-    (message "DEBUG [sandbox]: Context provided? %s" (if context "YES" "NO"))
-    (message "DEBUG [sandbox]: Total pending edits found: %d" (length pending-edits))
-    ;; ---------------------
-
-    (macher-agent--run-async-cmd 
-     "rsync" rsync-cmd project-root
-     (lambda (exit-code output)
-       (if (not (= exit-code 0))
-           (progn
-             (funcall cleanup-fn)
-             (funcall callback nil (format "ERROR: Rsync failed (code %s).\nOutput: %s" exit-code output)))
-         
-         ;; --- DEBUG LOGGING ---
-         (message "DEBUG [sandbox]: Rsync complete. Beginning VFS overlay...")
-         ;; ---------------------
-         
-         (dolist (edit pending-edits)
-           (let* ((path (car edit))
-                  (content (cdr edit))
-                  (rel-path (if (file-name-absolute-p path)
-                                (file-relative-name path project-root)
-                              path))
-                  (full-path (expand-file-name rel-path temp-dir)))
-             
-             ;; --- DEBUG LOGGING ---
-             (message "DEBUG [sandbox]: Processing virtual edit for '%s'" rel-path)
-             ;; ---------------------
-             
-             (if content
-                 (progn
-                   ;; --- DEBUG LOGGING ---
-                   (message "DEBUG [sandbox]: -> Writing %d characters to %s" (length content) full-path)
-                   ;; ---------------------
-                   (make-directory (file-name-directory full-path) t)
-                   (with-temp-file full-path (insert content)))
-               (when (file-exists-p full-path)
-                 (message "DEBUG [sandbox]: -> Deleting file %s" full-path)
-                 (delete-file full-path)))))
-         
-         (message "DEBUG [sandbox]: Sandbox setup complete. Handing off to tool.")
-         (funcall callback temp-dir nil))))))
-
-(defun macher-agent--pure-async-execute (project-root context cmd success-override callback)
-  "Execute CMD inside a temporary sandbox cleanly and asynchronously."
-  (macher-agent-with-sandbox project-root context
-                             (lambda (temp-dir err)
-                               (if err
-                                   (funcall callback err)
-                                 (let ((cleanup-fn (lambda () (delete-directory temp-dir t))))
-                                   (macher-agent--run-async-cmd 
-                                    "cmd" cmd temp-dir
-                                    (lambda (cmd-exit cmd-output)
-                                      (funcall cleanup-fn)
-                                      (if (and success-override 
-                                               (= cmd-exit 0) 
-                                               (string-empty-p (string-trim cmd-output)))
-                                          (funcall callback success-override)
-                                        (funcall callback cmd-output)))))))))
 
 ;;;###autoload
 (defun macher-agent-clear-context ()

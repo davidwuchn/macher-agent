@@ -13,16 +13,10 @@
                        (edits (plist-get payload :edits))
                        (context (ignore-errors (macher-agent-current-context)))
                        (actual-name (macher-agent--resolve-buffer-name buffer_name))
-                       (task-id (buffer-name))
-                       (expected-hash (secure-hash 'md5 (concat task-id ":" actual-name)))
-                       (expected-buf-name (format " *macher-edit-%s*" expected-hash))
-                       (buf (get-buffer expected-buf-name))
-                       (content (if (buffer-live-p buf)
-                                    (with-current-buffer buf (buffer-substring-no-properties (point-min) (point-max)))
-                                  (let ((contents (assoc actual-name (macher-context-contents context))))
-                                    (if contents
-                                        (cdr (cdr contents))
-                                      (error "Buffer '%s' not found in workspace" actual-name))))))
+                       (content (let ((contents (assoc actual-name (macher-context-contents context))))
+                                  (if contents
+                                      (cdr (cdr contents))
+                                    (error "Buffer '%s' not found in workspace" actual-name)))))
                   (unless (stringp buffer_name)
                     (error "Wrong type argument: stringp, %s" buffer_name))
                   (unless (vectorp edits)
@@ -36,12 +30,6 @@
                                (error "Each edit must contain old_text and new_text properties"))
                              (setq content (macher--edit-string content old-text new-text replace-all-bool))))
                   
-                  (let ((buf (get-buffer-create expected-buf-name)))
-                    (with-current-buffer buf
-                      (erase-buffer)
-                      (insert content)
-                      (setq-local macher-target-filepath actual-name)))
-
                   (when context
                     (macher-agent--update-context-file context actual-name content))
                   

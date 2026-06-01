@@ -339,36 +339,15 @@
 
                     (describe "rsync command building"
                               
-                              (it "constructs a Git-aware piped shell command when inside a Git repo"
-                                  ;; Mock Git returning 0 (success - inside a work tree)
-                                  (spy-on 'call-process :and-return-value 0)
-                                  
+                              (it "constructs a shell string using git ls-files"
                                   (let* ((src "/my/project/")
                                          (dest "/tmp/sandbox/")
                                          (cmd (macher-agent--build-rsync-cmd src dest)))
                                     
-                                    ;; It MUST return a single shell string for the pipeline.
-                                    ;; We use (stringp ...) instead of :to-be-a
                                     (expect (stringp cmd) :to-be t)
-                                    (expect cmd :to-match "git -C .* ls-files")
-                                    (expect cmd :to-match "rsync -aLC0 --delete")))
+                                    (expect (string-match-p "git ls-files" cmd) :to-be-truthy)
+                                    (expect (string-match-p "rsync -aLC --delete --files-from=-" cmd) :to-be-truthy)))))
 
-                              (it "falls back to a standard exclusion list when outside a Git repo"
-                                  ;; Mock Git returning 128 (error - not a git repository)
-                                  (spy-on 'call-process :and-return-value 128)
-                                  
-                                  (let* ((src "/my/project/")
-                                         (dest "/tmp/sandbox/")
-                                         (cmd (macher-agent--build-rsync-cmd src dest)))
-                                    
-                                    ;; It MUST fall back to a safe argument list.
-                                    ;; We use (listp ...) instead of :to-be-a
-                                    (expect (listp cmd) :to-be t)
-                                    (expect (nth 0 cmd) :to-equal "rsync")
-                                    (expect (nth 1 cmd) :to-equal "-aLC")
-                                    (expect (nth 2 cmd) :to-equal "--delete")
-                                    (expect (member "--exclude" cmd) :to-be-truthy)
-                                    (expect (member "node_modules/" cmd) :to-be-truthy)))))
           (describe "Macher-Agent Tool Category Isolation"
                     
                     (it "preserves the custom category to avoid being purged by upstream read-only presets"
@@ -389,7 +368,7 @@
                             (expect (gptel-tool-name (car filtered-tools)) :to-equal "my_custom_tool")))))
           (describe "Virtual File System (VFS) Sandbox Isolation"
                     
-                    (describe "macher-agent--flush-vfs-to-sandbox"
+                    (describe "macher-agent--vfs-apply-overlay"
                               
                               (it "reroutes virtual edits to the ephemeral sandbox, protecting the physical disk"
                                   (let* ((workspace-root "/my/project/")
@@ -401,15 +380,15 @@
                                                                          :contents '(("/my/project/src/main.rs" . ("orig" . "new content")))))
                                          (write-region-called-with nil))
                                     
-                                    ;; Mock the context provider
-                                    (spy-on 'macher-agent-current-context :and-return-value mock-ctx)
+                                    ;; Mock the context root provider (struct access)
+                                    (spy-on 'macher--workspace-root :and-return-value workspace-root)
                                     
                                     ;; Intercept the destructive write action
                                     (spy-on 'write-region :and-call-fake 
                                             (lambda (start _end filename &rest _)
                                               (push (list start filename) write-region-called-with)))
                                     
-                                    (macher-agent--flush-vfs-to-sandbox sandbox-dir)
+                                    (macher-agent--vfs-apply-overlay mock-ctx sandbox-dir)
                                     
                                     ;; The orchestrator MUST execute a file write...
                                     (expect 'write-region :to-have-been-called)
@@ -423,13 +402,49 @@
                               (it "does not flush anything if the virtual memory is clean"
                                   (let* ((mock-ctx (macher--make-context :dirty-p nil :contents nil)))
                                     
-                                    (spy-on 'macher-agent-current-context :and-return-value mock-ctx)
                                     (spy-on 'write-region)
                                     
-                                    (macher-agent--flush-vfs-to-sandbox "/tmp/sandbox-12345/")
+                                    (macher-agent--vfs-apply-overlay mock-ctx "/tmp/sandbox-12345/")
                                     
                                     ;; Ensure no ghost files are created in the sandbox
-                                    (expect 'write-region :not :to-have-been-called)))))
+                                    (expect 'write-region :not :to-have-been-called))))
+
+                    (describe "VFS Strict Pipeline Execution"
+                              (it "always executes the 3-step composition in exact order for every tool"
+                                  (let ((call-order nil))
+                                    (spy-on 'macher-agent--vfs-verify-clean-merge :and-call-fake (lambda (&rest _) (push 'merge call-order)))
+                                    (spy-on 'macher-agent--vfs-sync-baseline :and-call-fake (lambda (&rest _) (push 'sync call-order)))
+                                    (spy-on 'macher-agent--vfs-apply-overlay :and-call-fake (lambda (&rest _) (push 'overlay call-order)))
+                                    
+                                    ;; Execute a dummy tool
+                                    (let ((mock-context (macher--make-context :workspace nil :contents nil)))
+                                      (spy-on 'macher-agent-context-root :and-return-value "/my/project/")
+                                      (spy-on 'make-temp-file :and-return-value "/tmp/sandbox-12345/")
+                                      (spy-on 'delete-directory)
+                                      
+                                      (macher-agent-with-strict-vfs-pipeline mock-context
+                                                                             (shell-command-to-string "echo 'running'")))
+                                    
+                                    ;; 1. Assert they were all called
+                                    (expect 'macher-agent--vfs-verify-clean-merge :to-have-been-called)
+                                    (expect 'macher-agent--vfs-sync-baseline :to-have-been-called)
+                                    (expect 'macher-agent--vfs-apply-overlay :to-have-been-called)
+                                    
+                                    ;; 2. Assert exact execution order
+                                    (expect (reverse call-order) :to-equal '(merge sync overlay))))
+                              
+                              (it "does not mangle OS-level absolute sandbox paths during rsync"
+                                  ;; This specific test prevents the regression we just experienced
+                                  (spy-on 'macher-agent--build-rsync-cmd :and-return-value "echo dummy")
+                                  (spy-on 'delete-directory)
+                                  
+                                  (let ((mock-context (macher--make-context :workspace nil :contents nil)))
+                                    (spy-on 'macher-agent-context-root :and-return-value "/my/project/")
+                                    (macher-agent-with-strict-vfs-pipeline mock-context nil))
+                                  
+                                  ;; The destination argument to rsync MUST be an absolute path in /tmp or /var
+                                  (let ((rsync-dest-arg (nth 1 (spy-calls-args-for 'macher-agent--build-rsync-cmd 0))))
+                                    (expect (file-name-absolute-p rsync-dest-arg) :to-be t)))))
           (describe "Interactive Commands & State (macher-agent-orchestration.el)"
                     (it "macher-agent-add-buffer-to-scope explicitly errors out if no existing session is found"
                         (let ((buf (generate-new-buffer "lazy-target")))

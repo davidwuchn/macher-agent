@@ -157,24 +157,7 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
 
 ;; --- Sandbox Tools ---
 
-(defun macher-agent-sync-to-persistent-sandbox (sandbox-dir pending-edits workspace)
-  "Write uncommitted VFS memory directly to the persistent sandbox, bypassing shell overhead."
-  (let ((coding-system-for-write 'utf-8-unix)
-        (workspace-root (when workspace (expand-file-name (macher--workspace-root workspace)))))
-    (dolist (edit pending-edits)
-      (let* ((original-path (car edit))
-             (content (cdr (cdr edit)))
-             (relative-path (if workspace-root 
-                                (file-relative-name original-path workspace-root)
-                              original-path))
-             (full-path (expand-file-name relative-path sandbox-dir)))
-        (make-directory (file-name-directory full-path) t)
-        (if content
-            (with-temp-buffer
-              (insert content)
-              (write-region nil nil full-path nil 'silent))
-          (when (file-exists-p full-path)
-            (delete-file full-path)))))))
+
 
 (defun macher-agent--run-async-cmd (name cmd dir callback)
   "Executes a command using explicit lexical capture for background safety."
@@ -192,28 +175,21 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
                      (kill-buffer out-buf)
                      (funcall callback exit-code output)))))))
 
-(defvar-local macher-agent--persistent-sandbox-dir nil)
+
 (defun macher-agent--run-in-persistent-sandbox (context command on-success on-error)
-  (unless macher-agent--persistent-sandbox-dir
-    (let ((sandbox (make-temp-file "macher-sandbox-" t)))
-      (setq-local macher-agent--persistent-sandbox-dir sandbox)
-      (when-let* ((workspace (when context (macher-context-workspace context)))
-                  (root (macher--workspace-root workspace)))
-        ;; One-time bootstrap: Sync the physical workspace files using the single source of truth
-        (let ((sync-cmd (macher-agent--build-rsync-cmd (expand-file-name root) sandbox)))
-          (if (listp sync-cmd)
-              (apply #'call-process (car sync-cmd) nil nil nil (cdr sync-cmd))
-            (call-process shell-file-name nil nil nil shell-command-switch sync-cmd))))))
-  (macher-agent-sync-to-persistent-sandbox 
-   macher-agent--persistent-sandbox-dir 
-   (and context (macher-context-contents context))
-   (and context (macher-context-workspace context)))
-  (macher-agent--run-async-cmd 
-   "sandbox" command macher-agent--persistent-sandbox-dir 
-   (lambda (exit-code output) 
-     (if (= exit-code 0) 
-         (funcall on-success output) 
-       (funcall on-error (list :status 'error :error output))))))
+  ;; The strict VFS pipeline creates a fresh sandbox per execution.
+  ;; We wrap the execution to capture the output synchronously, as the sandbox 
+  ;; is destroyed immediately after the body completes via unwind-protect.
+  (condition-case err
+      (macher-agent-with-strict-vfs-pipeline context
+        (let* ((output-buf (generate-new-buffer " *macher-sandbox-out*"))
+               (exit-code (call-process shell-file-name nil output-buf nil shell-command-switch command))
+               (output (with-current-buffer output-buf (buffer-string))))
+          (kill-buffer output-buf)
+          (if (= exit-code 0)
+              (funcall on-success output)
+            (funcall on-error (list :status 'error :error output)))))
+    (error (funcall on-error (list :status 'error :error (error-message-string err))))))
 
 ;; --- VFS and JIT Reloading ---
 
@@ -227,21 +203,8 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
       (with-temp-buffer (insert-file-contents file-path) (buffer-string)))
      (t nil))))
 
-(defun macher-agent--jit-reload-skills (&rest _)
-  "Intercept gptel-send to recompile presets from the VFS."
-  (when (bound-and-true-p macher-agent--is-workspace)
-    (let* ((ctx (ignore-errors (macher-agent-current-context)))
-           (workspace (when ctx (macher-context-workspace ctx)))
-           (skills-dir (when workspace (expand-file-name "skills" (macher--workspace-root workspace)))))
-      (when (and skills-dir (file-directory-p skills-dir))
-        (when (local-variable-p 'gptel-directives) (kill-local-variable 'gptel-directives))
-        ;; Ensure macher-agent-initialize-skills utilizes macher-agent--read-file-vfs-aware
-        (macher-agent-initialize-skills skills-dir)
-        (when-let* ((preset (bound-and-true-p gptel--system-message-preset))
-                    (new-sys-msg (alist-get preset gptel-directives)))
-          (setq-local gptel--system-message (if (listp new-sys-msg) (plist-get new-sys-msg :system) new-sys-msg)))))))
 
-(advice-add 'gptel-send :before #'macher-agent--jit-reload-skills)
+
 
 ;; --- Additional Legacy Tooling Support ---
 

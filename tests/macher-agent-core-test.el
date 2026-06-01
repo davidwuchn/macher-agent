@@ -142,4 +142,41 @@
           (expect built-vfs-diff :to-be t)
           (expect built-virtual-diff :to-be t)))))
 
-)
+  (describe "5. Sandbox Security & Path Traversal (Jailbreaks)"
+    
+    (before-each
+      (setq sandbox-root "/tmp/macher-sandbox/"))
+
+    (it "REGRESSION: completely neutralises absolute path injections"
+      ;; The LLM or VFS hallucinates an absolute path to overwrite a system file
+      (let* ((malicious-path "/etc/passwd")
+             (resolved (macher-agent--resolve-safe-path malicious-path sandbox-root)))
+        
+        ;; It MUST reroute into the sandbox instead of touching the real /etc/passwd
+        (expect resolved :to-equal "/tmp/macher-sandbox/etc/passwd")
+        (expect (file-in-directory-p resolved sandbox-root) :to-be t)))
+
+    (it "prevents relative path traversal (Directory Climbing)"
+      ;; The LLM tries to use `../` to climb out of the sandbox
+      (let ((malicious-path "../../../../etc/passwd"))
+        (expect (macher-agent--resolve-safe-path malicious-path sandbox-root)
+                :to-throw 'error)))
+
+    (it "prevents tilde (~) home directory escapes"
+      ;; Emacs `expand-file-name` natively treats `~/` as an absolute escape
+      (let* ((malicious-path "~/.ssh/id_rsa")
+             (resolved (macher-agent--resolve-safe-path malicious-path sandbox-root)))
+        
+        (expect resolved :to-equal "/tmp/macher-sandbox/~/.ssh/id_rsa")
+        (expect (file-in-directory-p resolved sandbox-root) :to-be t))))
+
+  (describe "6. Agent Orchestration & Sub-agent Delegation"
+    
+    (it "handles missing buffers gracefully and returns the buffer_name in the error payload"
+      (let* ((callback-result nil)
+             (task '(:buffer_name "non_existent_agent" :instructions "Do something"))
+             (callback (lambda (res) (setq callback-result res))))
+        (macher-agent-spawn-task task callback)
+        (expect (plist-get callback-result :status) :to-be 'error)
+        (expect (plist-get callback-result :buffer_name) :to-equal "non_existent_agent")
+        (expect (plist-get callback-result :error) :to-match "ERROR: Sub-agent buffer 'non_existent_agent' not found.")))))

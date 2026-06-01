@@ -94,23 +94,11 @@
                                (tool-fn (gptel-tool-function macher-agent-write-buffer-in-workspace-tool)))
                           (spy-on 'macher-agent-current-context :and-return-value ctx)
                           
-                          ;; Mock buffer-name to provide a deterministic task-id
-                          (spy-on 'buffer-name :and-return-value "test-task")
-                          
                           (funcall tool-fn "*new-virtual-asset*" "Ghost content")
                           
                           (expect (assoc "*new-virtual-asset*" (macher-context-contents ctx)) :not :to-be nil)
-                          
-                          ;; Assert that the buffer WAS created using the deterministic hash logic
-                          (let* ((expected-hash (secure-hash 'md5 (concat "test-task" ":" "*new-virtual-asset*")))
-                                 (expected-buf-name (format " *macher-edit-%s*" expected-hash))
-                                 (buf (get-buffer expected-buf-name)))
-                            (expect (buffer-live-p buf) :to-be t)
-                            ;; Assert it's unlinked (not visiting a file) and contains the content
-                            (with-current-buffer buf
-                              (expect (buffer-file-name) :to-be nil)
-                              (expect (buffer-substring-no-properties (point-min) (point-max)) :to-equal "Ghost content")
-                              (expect macher-target-filepath :to-equal "*new-virtual-asset*")))))
+                          (let ((contents (assoc "*new-virtual-asset*" (macher-context-contents ctx))))
+                            (expect (cdr (cdr contents)) :to-equal "Ghost content"))))
                     
                     (it "rejects fuzzy security matching in read_buffer_in_workspace"
                         (let* ((ctx (macher--make-context :contents '(("*scratch*" . ("" . "content")))))
@@ -136,26 +124,19 @@
                           (let* ((response (funcall tool-fn "test-buf" "New virtual content")))
                             (expect response :to-match "SUCCESS")
                             (expect (macher-context-dirty-p ctx) :to-be t)
-                            (expect (cdr (cdr (assoc "test-buf" (macher-context-contents ctx)))) :to-equal "New virtual content")))))
+                            (expect (cdr (cdr (assoc "test-buf" (macher-context-contents ctx)))) :to-equal "New virtual content"))))
 
                     (it "multi_edit_buffer_in_workspace uses a decoupled deterministic scratchpad"
                         (let* ((ctx (macher--make-context :contents '(("test-file.rs" . ("line1\nline2" . "line1\nline2")))))
                                (tool-fn (gptel-tool-function macher-agent-multi-edit-buffer-in-workspace-tool)))
                           (spy-on 'macher-agent-current-context :and-return-value ctx)
-                          (spy-on 'buffer-name :and-return-value "test-task-multi")
                           
                           (let* ((edits (vector (list :old_text "line2" :new_text "line3")))
                                  (response (funcall tool-fn "test-file.rs" edits)))
                             (expect response :to-match "SUCCESS")
                             
-                            (let* ((expected-hash (secure-hash 'md5 (concat "test-task-multi" ":" "test-file.rs")))
-                                   (expected-buf-name (format " *macher-edit-%s*" expected-hash))
-                                   (buf (get-buffer expected-buf-name)))
-                              (expect (buffer-live-p buf) :to-be t)
-                              (with-current-buffer buf
-                                (expect (buffer-file-name) :to-be nil)
-                                (expect (buffer-substring-no-properties (point-min) (point-max)) :to-equal "line1\nline3")
-                                (expect macher-target-filepath :to-equal "test-file.rs"))))))
+                            (let ((contents (assoc "test-file.rs" (macher-context-contents ctx))))
+                              (expect (cdr (cdr contents)) :to-equal "line1\nline3"))))))
 
           (describe "Agent Skills (macher-agent-skills.el)"
                     (it "parses SKILL.md files correctly extracting frontmatter and markdown body"

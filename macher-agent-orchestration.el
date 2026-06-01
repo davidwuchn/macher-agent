@@ -4,6 +4,7 @@
 
 (declare-function macher-agent--set-system-message "macher-agent-gptel-tools" (msg))
 (declare-function macher-agent-current-context "macher-agent-vfs-client")
+(declare-function macher-agent--init-workspace-state "macher-agent-vfs-client")
 (declare-function macher-agent--auto-sync-context "macher-agent-vfs-client" (&optional ctx fsm))
 
 (defun macher-agent-execute-parallel (tasks final-callback)
@@ -31,8 +32,8 @@
          (instructions (if (listp task) (plist-get task :instructions) ""))
          (preset (if (listp task) (plist-get task :preset) nil))
          (buf (get-buffer buf-name)))
-    (if (not (buffer-live-p buf))
-        (funcall callback (list :status 'error :error (format "ERROR: Sub-agent buffer '%s' not found." buf-name)))
+    (if (not buf)
+        (funcall callback (list :status 'error :error (format "ERROR: Sub-agent buffer '%s' not found." buf-name) :buffer_name buf-name))
       (macher-agent--prepare-subagent-instructions buf instructions preset)
       (with-current-buffer buf
         (macher-agent--show-ui buf)
@@ -96,9 +97,8 @@ background and establishes the workspace directory to FULL-DIR alongside
 the inherited CONTEXT."
   (with-current-buffer buf
     (setq default-directory full-dir)
-    (setq-local macher-agent--is-workspace t)
+    (macher-agent--init-workspace-state full-dir)
     (setq-local macher-agent--is-subagent t)
-    (setq-local macher--workspace (cons 'agent full-dir))
     (when context
       (setq-local macher-agent--persistent-context context))
     
