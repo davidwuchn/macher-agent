@@ -157,13 +157,17 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
 
 ;; --- Sandbox Tools ---
 
-(defun macher-agent-sync-to-persistent-sandbox (sandbox-dir pending-edits)
+(defun macher-agent-sync-to-persistent-sandbox (sandbox-dir pending-edits workspace)
   "Write uncommitted VFS memory directly to the persistent sandbox, bypassing shell overhead."
-  (let ((coding-system-for-write 'utf-8-unix))
+  (let ((coding-system-for-write 'utf-8-unix)
+        (workspace-root (when workspace (expand-file-name (macher--workspace-root workspace)))))
     (dolist (edit pending-edits)
-      (let* ((rel-path (car edit))
+      (let* ((original-path (car edit))
              (content (cdr (cdr edit)))
-             (full-path (expand-file-name rel-path sandbox-dir)))
+             (relative-path (if workspace-root 
+                                (file-relative-name original-path workspace-root)
+                              original-path))
+             (full-path (expand-file-name relative-path sandbox-dir)))
         (make-directory (file-name-directory full-path) t)
         (if content
             (with-temp-buffer
@@ -202,7 +206,8 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
             (call-process shell-file-name nil nil nil shell-command-switch sync-cmd))))))
   (macher-agent-sync-to-persistent-sandbox 
    macher-agent--persistent-sandbox-dir 
-   (and context (macher-context-contents context)))
+   (and context (macher-context-contents context))
+   (and context (macher-context-workspace context)))
   (macher-agent--run-async-cmd 
    "sandbox" command macher-agent--persistent-sandbox-dir 
    (lambda (exit-code output) 
