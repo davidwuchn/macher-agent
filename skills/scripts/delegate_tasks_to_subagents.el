@@ -1,28 +1,22 @@
 (macher-agent-make-tool macher-agent-delegate-tasks-to-subagents-tool
-                        ("Delegate tasks to multiple sub-agents asynchronously." "orchestrate"
-                         :args '((:name "tasks" :type array :description "An array of task objects to delegate to sub-agents."
-                                        :items (:type object
-                                                      :properties (
-                                                                   :buffer_name (:type string :description "The exact name of the target sub-agent buffer.")
-                                                                   :instructions (:type string :description "The task instructions for this sub-agent to execute.")
-                                                                   :preset (:type string :description "MUST ALWAYS BE exactly '@macher-agent-worker'."))
-                                                      :required ["preset" "buffer_name" "instructions"]))) 
-                         :async t)
-                        (tasks)
-                        (let ((buffers nil))
-                          
-                          (cl-loop for task across tasks
-                                   for buf-name = (plist-get task :buffer_name)
-                                   for instructions = (plist-get task :instructions)
-                                   for preset = (plist-get task :preset)
-                                   for buf = (get-buffer buf-name)
-                                   do (if (buffer-live-p buf)
-                                          (progn
-                                            (push buf buffers)
-                                            ;; Pass the instructions AND the preset to the prep function
-                                            (macher-agent-prepare-instructions buf instructions preset))
-                                        (error "Sub-agent buffer '%s' not found. You must spawn it first." buf-name)))
-                          
-                          (if (null buffers)
-                              (funcall callback (list :status 'error :error "ERROR: The 'tasks' array was empty."))
-                            (macher-agent-execute-parallel (nreverse buffers) callback))))
+  "Delegate tasks to multiple sub-agents asynchronously."
+  :category "orchestrate"
+  :args '((:name "tasks" :type array :description "An array of task objects to delegate to sub-agents."
+                 :items (:type object
+                               :properties (:buffer_name (:type string)
+                                            :instructions (:type string)
+                                            :preset (:type string))
+                               :required ["preset" "buffer_name" "instructions"])))
+  :command-fn (lambda (payload)
+                (let ((tasks (plist-get payload :tasks)))
+                  (cons :delegate tasks)))
+  :success-fn (lambda (results)
+                (let ((output (list "All sub-agents completed. Outputs:\n")))
+                  (cl-loop for res in results
+                           do (push (format "=== Response from %s ===\n%s\n" 
+                                            (plist-get res :buffer_name)
+                                            (if (eq (plist-get res :status) 'success)
+                                                (plist-get res :data)
+                                              (plist-get res :error)))
+                                    output))
+                  (string-join (nreverse output) "\n"))))

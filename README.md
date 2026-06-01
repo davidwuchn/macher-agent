@@ -42,7 +42,7 @@ graph TD
 ```
 
 - `gptel` (LLM/UI) provides the chat interface, API communication, and tool-call parsing. `gptel` is treated as a complete black box.
-- `macher-agent` (harness) sits in the middle. It safely parses agent tools, orchestrates sub-agents, and bridges the LLM UI with the file system.
+- `macher-agent` (harness) sits in the middle. It parses agent tools, orchestrates sub-agents, and bridges the LLM UI with the file system.
 - `macher` (ephemeral context) serves as the Virtual File System (VFS) engine. It tracks all edits in hidden memory buffers and strictly bounds all agent actions.
 
 The agent interacts with a `macher` context rather than live files. This environment records file and buffer modifications. These changes are presented as a diff patch (through ediff) for your review before any disk modifications occur. If the agent needs to use an external CLI tool (like `rg` or `cargo`), `macher-agent` automatically overlays the context onto a temporary directory to allow safe execution.
@@ -70,35 +70,34 @@ The agent interacts with a `macher` context rather than live files. This environ
 
 ## Tool Creation and The Sandbox
 
-`macher-agent` provides a DSL for defining tools: `macher-agent-make-tool`. This macro mirrors `gptel-make-tool` but adds automatic async execution, error handling, and hooks into the `macher` context.
+`macher-agent` provides a declarative DSL for defining tools: `macher-agent-make-tool`. This macro handles `condition-case` errors automatically, and bridges directly into the `macher` context middleware.
 
-Here is an example demonstrating a tool that executes a shell command safely across the workspace. It uses the `:sandbox t` flag to execute the command inside a temporary, virtual overlay director. The framework handles building and cleaning up the sandbox, and exposes a `sandbox-dir` local variable to your handler.
+Here is an example demonstrating a tool that executes a shell command safely across the workspace. By simply returning a string from your `:command-fn`, the execution router implicitly treats it as a shell command and executes it inside a temporary virtual sandbox.
 
 ```elisp
 (macher-agent-make-tool macher-agent-cargo-check-tool
-  ("Run 'cargo check' to compile the project."
-   "rust"
-   :async t
-   :sandbox t)
-  ()
-  (macher-agent--run-async-cmd
-   "cargo-check" "rtk cargo check </dev/null 2>&1" sandbox-dir
-   (lambda (exit-code output)
-     (if (= exit-code 0)
-         (funcall gptel-callback (concat "SUCCESS: The code compiled perfectly with no errors.\n" output))
-       (funcall gptel-callback output)))))
+  "Run 'cargo check' to compile the project."
+  :category "rust"
+  :args nil
+  :command-fn (lambda (_payload)
+                "rtk cargo check </dev/null 2>&1")
+  :success-fn (lambda (output)
+                (if (string-match-p "error\\[" output)
+                    output
+                  (concat "SUCCESS: The code compiled perfectly with no errors.\n\n=== COMPILER OUTPUT ===\n" output))))
 ```
 
 ## Agent Skills and Registration
 
 Agent Skills are defined via folders containing a `SKILL.md` file. 
 
-A skill includes YAML or JSON frontmatter specifying a name, description, and an array of required tools (`allowed-tools`). The Markdown body provides the system prompt. 
+A skill includes YAML or JSON frontmatter specifying a name, description, an optional model override, and an array of required tools (`allowed-tools`). The Markdown body provides the system prompt. 
 
 ### Custom User Skills
-You can build custom skills and Emacs Lisp tools inside your global skills directory (for example`~/.config/emacs/skills/`). 
-* If a skill specifies `allowed-tools: ["my_tool"]`, `macher-agent` will automatically search for `~/.config/emacs/skills/scripts/my_tool.el`.
-* All custom `.el` tools *must* use the `macher-agent-make-tool` macro (not the standard `gptel-make-tool`) to ensure they are properly registered into the `macher-agent-tools-registry`.
+You can build custom skills and Emacs Lisp tools inside your global skills directory (for example `~/.config/emacs/skills/`). 
+- If a skill specifies `allowed-tools: ["my_tool"]`, `macher-agent` will automatically search for `~/.config/emacs/skills/scripts/my_tool.el`.
+- Script files must contain exactly one `macher-agent-make-tool` call and are dynamically evaluated with strict lexical scoping.
+- If a `model` property is provided (for example`model: "Qwen3.6-35B-A3B"`), it is extracted and bound locally to `gptel-model` for that specific agent, ensuring requests are automatically routed to the correct LLM backend.
 
 ### Example Skill
 
@@ -108,7 +107,7 @@ Below is an example of a `SKILL.md` file that overrides the default model and re
 ---
 name: "python-test-runner"
 description: "Runs unit tests and analyses failures. Trigger this when asked to verify Python code or run tests."
-model: "qwen3.6-35b-a3b-gguf"
+model: "Qwen3.6-35B-A3B"
 allowed-tools:
   - "run_pytest"
 ---
@@ -121,14 +120,15 @@ You are an expert quality assurance engineer. When asked to verify code, use the
 
 `macher-agent` can safely steer the LLM and pass multi-modal media without polluting the Emacs UI:
 
-1. If a tool or user needs to direct the agent's *next* thought (for example "Do not guess. Read the file."), it can call `(macher-agent-add-pending-instruction "...")` while executing. `macher-agent` will automatically append this as a `=== SYSTEM DIRECTIVE ===` block to the tool's output.
-2. The `macher` context intercepts images generated or downloaded by tools. The agent injects the media directly into the LLM's pre-flight payload, completely bypassing `gptel`'s text-buffer limitations and letting agents read images as needed.
+- `M-x macher-agent-inject-thought` allows the injecting of throughts during agent continuations
+- `macher-agent` dynamically reads agent skills llowing agents to iteratively build and reload `.el` tools from the virtual file system before their payload hits the network.
+- The `macher` context intercepts images generated or downloaded by tools. The agent injects the media directly into the LLM's pre-flight payload letting agents read images as needed.
 
 ## Orchestrating Workflows
 
 You can run workflows autonomously or manually.
 
-In an autonomous setup, a planner agent creates sub-agents, delegates tasks, and waits for a response via tool calls. The parent agent can run these sub-agents in the background.
+In an autonomous setup, a planner agent creates sub-agents, delegates tasks, and waits for a response via tool calls. The parent agent can run these sub-agents in the background using the event-bus orchestrator (`macher-agent-execute-parallel`), guaranteeing the sub-agents share the parent's uncommitted VFS memory.
 
 Alternatively, you can create sub-agents manually using interactive commands. You type instructions into the sub-agent buffer and trigger it. The sub-agent runs asynchronously and generates a patch.
 
@@ -144,20 +144,19 @@ Alternatively, you can create sub-agents manually using interactive commands. Yo
 | `M-x macher-agent-apply-patch`           | Evaluates and applies the patch buffer.                                  |
 | `M-x macher-agent-insert-patch`          | Inserts the workspace patch into the chat buffer.                        |
 | `M-x macher-agent-apply-virtual-buffers` | Applies the virtual edits directly.                                      |
-| `M-x macher-agent-load-workspace-skills` | Scans the workspace for SKILL.md files and loads them.                   |
+| `M-x macher-agent-initialize-skills`     | Scans the skills directory, compiling presets and tools into memory.     |
 
 ### LLM Tools
 
 | Tool                                   | Description                                                     |
 |----------------------------------------|-----------------------------------------------------------------|
 | `spawn_subagent`                       | Creates a sub-agent inheriting the parent's virtual state.      |
-| `delegate_task_to_subagents`           | Dispatches instructions to sub-agents and waits for a response. |
+| `delegate_tasks_to_subagents`          | Dispatches instructions to sub-agents and waits for a response. |
 | `execute_subagents`                    | Starts sub-agent processing.                                    |
 | `submit_task_result`                   | Submits final output from a worker to the parent.               |
 | `write_buffer_in_workspace`            | Modifies a buffer via the virtual context.                      |
-| `write_and_commit_buffer_in_workspace` | Overwrites a buffer and syncs the context.                      |
 | `multi_edit_buffer_in_workspace`       | Performs string replacements in a buffer.                       |
 | `read_buffer_in_workspace`             | Retrieves buffer contents from the persistent context.          |
-| `read_media_in_workspace`              | Reads an image into the agent's context. |
+| `read_media_in_workspace`              | Reads an image into the agent's context.                        |
 | `list_buffers_in_workspace`            | Lists active agent buffers in scope.                            |
 | `search_in_workspace`                  | Searches across accessible agent workspace.                     |

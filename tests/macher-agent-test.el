@@ -290,11 +290,8 @@
                                          (tool-fn (gptel-tool-function macher-agent-read-media-in-workspace-tool)))
                                     (spy-on 'macher-agent-current-context :and-return-value ctx)
                                     (spy-on 'macher-agent-context-classify-entry :and-return-value 'file)
-                                    (let ((err-msg nil))
-                                      (condition-case err
-                                          (funcall tool-fn "unauthorized_script.sh")
-                                        (error (setq err-msg (error-message-string err))))
-                                      (expect err-msg :to-match "SECURITY ERROR"))))
+                                    (let ((result (funcall tool-fn "unauthorized_script.sh")))
+                                      (expect result :to-match "SECURITY ERROR"))))
                               (it "stages media in the session pending-media instead of polluting gptel-context"
                                   (let* ((gptel-track-media t)
                                          (gptel-context nil)
@@ -474,14 +471,18 @@
           (describe "Tool Signatures (Macro Contracts)"
                     (before-all
                      (macher-agent-make-tool mock-async-contract-tool
-                                             ("Mock async tool" "test" :args '((:name "arg1" :type string) (:name "arg2" :type string)) :async t)
-                                             (arg1 arg2)
-                                             (funcall gptel-callback (format "Async %s %s" arg1 arg2)))
+                                             "Mock async tool"
+                                             :category "test"
+                                             :args (list (list :name "arg1" :type 'string) (list :name "arg2" :type 'string))
+                                             :command-fn (lambda (payload)
+                                                           (format "Async %s %s" (plist-get payload :arg1) (plist-get payload :arg2))))
 
                      (macher-agent-make-tool mock-sync-contract-tool
-                                             ("Mock sync tool" "test" :args '((:name "arg1" :type string)))
-                                             (arg1)
-                                             (format "Sync %s" arg1)))
+                                             "Mock sync tool"
+                                             :category "test"
+                                             :args (list (list :name "arg1" :type 'string))
+                                             :command-fn (lambda (payload)
+                                                           (format "Sync %s" (plist-get payload :arg1)))))
 
                     (it "generates variadic signatures for async tools to safely absorb FSM contexts"
                         (let* ((tool-fn (gptel-tool-function mock-async-contract-tool))

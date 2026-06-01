@@ -42,13 +42,13 @@
                           
                           (spy-on 'macher-agent-current-context :and-return-value (macher--make-context))
                           (spy-on 'json-parse-string :and-return-value expected-vector)
-                          (spy-on 'macher-agent--execute-parallel)
+                          (spy-on 'macher-agent-execute-parallel)
                           (spy-on 'macher-agent--prepare-subagent-instructions)
                           (spy-on 'macher-agent--ensure-access)
                           
                           (funcall tool-fn json-tasks callback)
                           
-                          (expect 'macher-agent--execute-parallel :to-have-been-called)
+                          (expect 'macher-agent-execute-parallel :to-have-been-called)
                           (kill-buffer buf)))
 
                     (it "reports an error if gptel-send aborts or fails silently"
@@ -63,7 +63,7 @@
                                     (with-current-buffer buf
                                       (run-hook-with-args 'gptel-post-response-functions (point-min) (point-max)))))
 
-                          (macher-agent--dispatch-and-wait buf callback)
+                          (macher-agent-spawn-task buf callback)
                           
                           (expect (plist-get callback-called :status) :to-equal 'error)
                           (expect (plist-get callback-called :error) :to-match "stopped silently")
@@ -77,16 +77,15 @@
                           
                           (spy-on 'macher-agent-current-context :and-return-value (macher--make-context))
                           ;; Mock the dispatcher to instantly return a success payload rather than firing the network
-                          (spy-on 'macher-agent--dispatch-and-wait :and-call-fake
-                                  (lambda (b cb)
-                                    (funcall cb (list :status 'success :data (format "Output from %s" (buffer-name b))))))
+                          (cl-letf (((symbol-function 'macher-agent-spawn-task)
+                                     (lambda (b cb)
+                                       (funcall cb (list :status 'success :data (format "Output from %s" (buffer-name b)))))))
+                            (macher-agent-execute-parallel (list buf1 buf2) callback))
                           
-                          (macher-agent--execute-parallel (list buf1 buf2) callback)
-                          
-                          (expect (plist-get callback-called :status) :to-equal 'success)
-                          (expect (plist-get callback-called :data) :to-match "All sub-agents completed.")
-                          (expect (plist-get callback-called :data) :to-match "Output from worker1")
-                          (expect (plist-get callback-called :data) :to-match "Output from worker2")
+                          (expect (length callback-called) :to-equal 2)
+                          (expect (plist-get (nth 0 callback-called) :status) :to-equal 'success)
+                          (expect (plist-get (nth 0 callback-called) :data) :to-match "Output from worker1")
+                          (expect (plist-get (nth 1 callback-called) :data) :to-match "Output from worker2")
                           (kill-buffer buf1)
                           (kill-buffer buf2)))
 
@@ -117,12 +116,8 @@
                         (let* ((ctx (macher--make-context :contents '(("*scratch*" . ("" . "content")))))
                                (tool-fn (gptel-tool-function macher-agent-read-buffer-in-workspace-tool)))
                           (spy-on 'macher-agent-current-context :and-return-value ctx)
-                          (let ((threw nil))
-                            (condition-case err
-                                (funcall tool-fn "scratch")
-                              (error (setq threw t)
-                                     (expect (error-message-string err) :to-match "SECURITY ERROR.*scratch.*")))
-                            (expect threw :to-be t))))
+                          (let ((result (funcall tool-fn "scratch")))
+                            (expect result :to-match "SECURITY ERROR.*scratch.*"))))
 
                     (it "submit_task_result sets the final result buffer-locally"
                         (let* ((buf (generate-new-buffer "worker-buf"))

@@ -26,10 +26,6 @@
   "Add BUFFER-NAME to the current agent CONTEXT scope headlessly."
   (macher-agent--add-buffer-to-scope-headless buffer-name context))
 
-(defun macher-agent-execute-parallel (tasks callback)
-  "Execute TASKS in parallel subagents."
-  (macher-agent--execute-parallel tasks callback))
-
 (defun macher-agent-prepare-instructions (buf instructions preset)
   "Prepare instructions for a given BUF with INSTRUCTIONS and PRESET."
   (macher-agent--prepare-subagent-instructions buf instructions preset))
@@ -141,7 +137,7 @@ assuming it is a globally registered native gptel/macher tool."
                                (condition-case err
                                    (while t
                                      (let ((form (read (current-buffer))))
-                                       (setq val (eval form lexical-binding))))
+                                       (setq val (eval form t))))
                                  (end-of-file (if (and (symbolp val) (boundp val))
                                                   (symbol-value val)
                                                 val))

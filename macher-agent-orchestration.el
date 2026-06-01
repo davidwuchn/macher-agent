@@ -6,6 +6,53 @@
 (declare-function macher-agent-current-context "macher-agent-vfs-client")
 (declare-function macher-agent--auto-sync-context "macher-agent-vfs-client" (&optional ctx fsm))
 
+(defun macher-agent-execute-parallel (tasks final-callback)
+  "Cooperatively fan-out tasks and resolve via a lexical latch."
+  (let* ((task-list (append tasks nil))
+         (total (length task-list))
+         (completed 0)
+         (results (make-list total nil)))
+    (if (= total 0)
+        (funcall final-callback nil)
+      (cl-loop for task in task-list
+               for index from 0
+               do (let ((idx index)) ; Lexical binding inside the loop is mandatory
+                    (macher-agent-spawn-task 
+                     task 
+                     (lambda (result)
+                       (setf (nth idx results) result)
+                       (cl-incf completed)
+                       (when (= completed total)
+                         (funcall final-callback results)))))))))
+
+(defun macher-agent-spawn-task (task callback)
+  "Spawn a task inside a target subagent."
+  (let* ((buf-name (if (listp task) (plist-get task :buffer_name) task))
+         (instructions (if (listp task) (plist-get task :instructions) ""))
+         (preset (if (listp task) (plist-get task :preset) nil))
+         (buf (get-buffer buf-name)))
+    (if (not (buffer-live-p buf))
+        (funcall callback (list :status 'error :error (format "ERROR: Sub-agent buffer '%s' not found." buf-name)))
+      (macher-agent--prepare-subagent-instructions buf instructions preset)
+      (with-current-buffer buf
+        (macher-agent--show-ui buf)
+        (let ((response-hook nil)
+              (transform-hook nil))
+          (setq transform-hook
+                (lambda (async-fn fsm)
+                  (setq-local macher--fsm-latest fsm)
+                  (funcall async-fn)))
+          (add-hook 'gptel-prompt-transform-functions transform-hook nil t)
+          (setq response-hook
+                (lambda (_response _info)
+                  (let ((res (buffer-local-value 'macher-agent--final-result buf)))
+                    (if res
+                        (funcall callback (list :status 'success :data res :buffer_name buf-name))
+                      (funcall callback (list :status 'error :error (format "ERROR: Buffer '%s' stopped silently." buf-name) :buffer_name buf-name)))
+                    (run-at-time 0.1 nil (lambda () (when (buffer-live-p buf) (kill-buffer buf)))))))
+          (add-hook 'gptel-post-response-functions response-hook nil t)
+          (gptel-send))))))
+
 (defvar macher-agent-subagent-setup-hook nil
   "Hook run after a sub-agent buffer is fully initialized.")
 
