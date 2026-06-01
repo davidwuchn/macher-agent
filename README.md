@@ -116,12 +116,36 @@ allowed-tools:
 You are an expert quality assurance engineer. When asked to verify code, use the `run_pytest` tool to execute the test suite in the virtual workspace. If tests fail, analyse the output and propose fixes.
 ```
 
+### Skill Templating
+
+You can use `org-mode` macros for prompt templating within your `SKILL.md` files. This is useful for maintaining standardised version numbers, sharing common prompt snippets across multiple skills, or injecting context dynamically without duplicating text.
+
+`macher-agent` evaluates the `#+MACRO:` definitions and expands them in the markdown body before setting the final `gptel` system prompt.
+
+**Example:**
+```markdown
+#+MACRO: version 0.1.0
+---
+name: macro-skill
+description: A skill with macro support
+allowed-tools: []
+---
+
+This is a test of macro expansion. Version: {{{version}}}
+```
+
 ## Advanced Context (Media and Instructions)
 
 `macher-agent` can safely steer the LLM and pass multi-modal media without polluting the Emacs UI:
 
-- `M-x macher-agent-inject-thought` allows the injecting of throughts during agent continuations
-- `macher-agent` dynamically reads agent skills llowing agents to iteratively build and reload `.el` tools from the virtual file system before their payload hits the network.
+### Interactive Steering (Injecting Thoughts)
+
+Because the architecture relies on asynchronous Emacs process sentinels for execution (like sandboxed shell commands), the Emacs command loop remains completely responsive while the agent is "processing" a long-running tool.
+
+If an agent is busy running a background task, you can interactively push instructions to the queue. When the background tool finishes, the middleware will dequeue your manually injected instructions and bundle them into the next LLM request.
+
+- `M-x macher-agent-inject-thought` allows injecting thoughts and steering the agent mid-flight.
+- `macher-agent` dynamically reads agent skills allowing agents to iteratively build and reload `.el` tools from the virtual file system before their payload hits the network.
 - The `macher` context intercepts images generated or downloaded by tools. The agent injects the media directly into the LLM's pre-flight payload letting agents read images as needed.
 
 ## Orchestrating Workflows

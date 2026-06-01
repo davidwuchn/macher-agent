@@ -270,7 +270,7 @@ Also loads any Elisp script tools found in the 'scripts' subdirectory."
   :group 'macher-agent)
 
 (defun macher-agent-initialize-skills (&optional dir)
-  "Initialize agent skills from DIR or `macher-agent-global-skills-directory`."
+  "Initialise agent skills from DIR or `macher-agent-global-skills-directory`."
   (let ((target-dir (or dir macher-agent-global-skills-directory)))
     (when (and target-dir (file-directory-p target-dir))
       (macher-agent-api-register-skills-in-directory target-dir))))

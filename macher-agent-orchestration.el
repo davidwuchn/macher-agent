@@ -54,7 +54,7 @@
           (gptel-send))))))
 
 (defvar macher-agent-subagent-setup-hook nil
-  "Hook run after a sub-agent buffer is fully initialized.")
+  "Hook run after a sub-agent buffer is fully initialised.")
 
 (defun macher-agent--add-buffer-to-scope-headless (buf-name persistent-context)
   "Headless core logic for adding BUF-NAME to PERSISTENT-CONTEXT.

@@ -116,11 +116,11 @@
         (expect (macher-agent-session-pending-media session) :to-be nil))))
 
   (describe "5. Diff Splitting Behaviour"
-    (it "asserts that live buffer modifications are split from VFS disk modifications"
+    (it "asserts that virtual buffer modifications are split from physical file modifications"
       (let* ((workspace (make-macher-agent-workspace :project-root "/mock/proj/"))
              (context (macher--make-context :workspace (cons 'project "/mock/proj/")
                                             :contents '(("/mock/proj/disk-file.el" . ("old" . "new"))
-                                                        ("/mock/proj/live-buffer.el" . ("old" . "new")))))
+                                                        ("*scratch*" . ("old" . "new")))))
              (fsm 'mock-fsm))
         
         (spy-on 'gptel-fsm-info :and-return-value (list :macher-agent-session (make-macher-agent-session :workspace workspace)))
@@ -128,21 +128,18 @@
         (setf (macher-context-dirty-p context) t)
         
         (let ((built-vfs-diff nil)
-              (built-live-diff nil))
-          
-          (spy-on 'find-buffer-visiting :and-call-fake
-                  (lambda (path) (if (string= path "/mock/proj/live-buffer.el") (current-buffer) nil)))
+              (built-virtual-diff nil))
           
           (spy-on 'macher--build-patch :and-call-fake
                   (lambda (ctx fsm) (setq built-vfs-diff t)))
-          (spy-on 'macher-agent--build-live-diff :and-call-fake
-                  (lambda (buf old new) (setq built-live-diff t)))
+          (spy-on 'macher-agent--build-virtual-patch :and-call-fake
+                  (lambda (ctx) (setq built-virtual-diff t)))
           
           ;; The rewritten process request function
           (macher-agent--process-request 'complete context fsm)
           
           ;; Both diff streams should be processed
           (expect built-vfs-diff :to-be t)
-          (expect built-live-diff :to-be t)))))
+          (expect built-virtual-diff :to-be t)))))
 
 )

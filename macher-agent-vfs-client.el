@@ -67,41 +67,24 @@
                      (write-region content nil sandbox-target-path nil 'silent)))
                  vfs-buffers)))))
 
-(defun macher-agent--build-live-diff (buffer old-content new-content)
-  "Route a live buffer modification to a separate diff UI."
-  ;; To be fully implemented with Ediff or custom UI.
-  (ignore buffer old-content new-content))
-
 (defun macher-agent--process-request (reason context fsm)
   "Categorise uncommitted changes to File VFS Diff or Live Buffer Diff."
   (when context
-    (let ((file-contents nil)
-          (buf-contents nil))
-      ;; Check for macher-context-contents depending on whether it's a list or macher-context struct
-      (dolist (entry (if (listp context)
-                         (plist-get context :contents)
-                       (macher-context-contents context)))
-        (let ((path (car entry)))
-          (if (find-buffer-visiting path)
-              (push entry buf-contents)
-            (push entry file-contents))))
+    (let* ((normalized-ctx (if (listp context)
+                               (let ((ctx-struct (macher--make-context :workspace nil :contents nil)))
+                                 (setf (macher-context-workspace ctx-struct) (plist-get context :workspace))
+                                 (setf (macher-context-contents ctx-struct) (plist-get context :contents))
+                                 ctx-struct)
+                             context))
+           (split (macher-agent--split-context normalized-ctx))
+           (file-ctx (car split))
+           (buf-ctx (cdr split)))
       
-      (when file-contents
-        (let ((file-ctx (if (listp context)
-                            (copy-tree context)
-                          (macher-agent--clone-context context))))
-          (if (listp file-ctx)
-              (setq file-ctx (plist-put file-ctx :contents (nreverse file-contents)))
-            (setf (macher-context-contents file-ctx) (nreverse file-contents)))
-          (macher--build-patch file-ctx fsm)))
+      (when (and file-ctx (macher-context-contents file-ctx))
+        (macher--build-patch file-ctx fsm))
       
-      (when buf-contents
-        (dolist (entry (nreverse buf-contents))
-          (let* ((path (car entry))
-                 (contents (cdr entry))
-                 (old (car contents))
-                 (new (cdr contents)))
-            (macher-agent--build-live-diff (find-buffer-visiting path) old new)))))))
+      (when (and buf-ctx (macher-context-contents buf-ctx))
+        (macher-agent--build-virtual-patch buf-ctx)))))
 
 (defun macher-agent--flush-vfs-to-sandbox (sandbox-dir)
   "Overlay pending virtual edits onto the ephemeral SANDBOX-DIR.

@@ -9,10 +9,10 @@
 (declare-function macher-agent--split-context "macher-agent-vfs-client")
 (declare-function macher-agent--build-virtual-patch "macher-agent-vfs-client")
 
-;; --- 1. The Pre-flight Boundary (Initialize VFS before LLM call) ---
+;; --- 1. The Pre-flight Boundary (Initialise VFS before LLM call) ---
 
 (defun macher-agent--gptel-pre-send-advice (orig-fun &rest args)
-  "Ensure the agent VFS is synchronized before sending a request to the LLM.
+  "Ensure the agent VFS is synchronised before sending a request to the LLM.
 This is the single entry point for pre-flight state management."
   ;; Dynamically bind the flag to allow lazy initialisation only during a send
   (let* ((macher-agent--allow-lazy-init t)
