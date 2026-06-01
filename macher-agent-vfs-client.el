@@ -224,10 +224,14 @@ Prioritises the in-flight FSM context over the global persistent one."
       (when ctx
         (dolist (entry (macher-context-contents ctx))
           (let* ((path (car entry))
+                 (content-pair (cdr entry))
+                 (orig (car content-pair))
+                 (new (cdr content-pair))
                  (class (macher-agent-context-classify-entry path root)))
-            (if (eq class 'buffer)
-                (push entry buf-contents)
-              (push entry file-contents))))))
+            (unless (equal orig new)
+              (if (eq class 'buffer)
+                  (push entry buf-contents)
+                (push entry file-contents)))))))
     (when file-ctx (setf (macher-context-contents file-ctx) (nreverse file-contents)))
     (when buf-ctx (setf (macher-context-contents buf-ctx) (nreverse buf-contents)))
     (cons file-ctx buf-ctx)))
@@ -395,7 +399,9 @@ and will abort if the workspace resolves to the root or home directory."
     
     (if (not (equal orig current-state))
         (if (equal new current-state)
-            nil
+            (progn
+              (setcar content-pair current-state)
+              t)
           (progn
             (setcar content-pair current-state)
             (setcdr content-pair current-state)

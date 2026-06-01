@@ -191,7 +191,15 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
 (defvar-local macher-agent--persistent-sandbox-dir nil)
 (defun macher-agent--run-in-persistent-sandbox (context command on-success on-error)
   (unless macher-agent--persistent-sandbox-dir
-    (setq-local macher-agent--persistent-sandbox-dir (make-temp-file "macher-sandbox-" t)))
+    (let ((sandbox (make-temp-file "macher-sandbox-" t)))
+      (setq-local macher-agent--persistent-sandbox-dir sandbox)
+      (when-let* ((workspace (when context (macher-context-workspace context)))
+                  (root (macher--workspace-root workspace)))
+        ;; One-time bootstrap: Sync the physical workspace files using the single source of truth
+        (let ((sync-cmd (macher-agent--build-rsync-cmd (expand-file-name root) sandbox)))
+          (if (listp sync-cmd)
+              (apply #'call-process (car sync-cmd) nil nil nil (cdr sync-cmd))
+            (call-process shell-file-name nil nil nil shell-command-switch sync-cmd))))))
   (macher-agent-sync-to-persistent-sandbox 
    macher-agent--persistent-sandbox-dir 
    (and context (macher-context-contents context)))

@@ -206,19 +206,19 @@
                                       (expect (cadr entry) :to-equal "user physical edit")
                                       (expect (cddr entry) :to-equal "user physical edit"))))
 
-                              (it "JIT FLUSH BYPASS: preserves virtual edits if the physical mutation perfectly matches the virtual delta"
+                              (it "fast-forwards virtual memory if the physical mutation perfectly matches the virtual delta (patch applied)"
                                   (let* ((content-pair (cons "original state" "agent edit"))
                                          (entry (cons "test.el" content-pair)))
                                     
-                                    ;; Mock the state immediately after `macher-agent--flush-vfs-to-disk` runs.
+                                    ;; Mock the state immediately after the user applies the patch.
                                     ;; The disk now matches the agent's unapplied edit perfectly.
                                     (spy-on 'macher-agent--read-content-from-disk-or-buffer :and-return-value "agent edit")
                                     
                                     (let ((mutated (macher-agent--sync-context-entry entry)))
-                                      ;; The system MUST recognise this is its own flush, not a hostile edit!
-                                      ;; It returns nil (no conflict) and keeps the original baseline intact for the final diff.
-                                      (expect mutated :to-be nil)
-                                      (expect (cadr entry) :to-equal "original state")
+                                      ;; The system MUST recognise the patch was applied and fast-forward the baseline.
+                                      ;; It returns t (mutated) and updates orig to match new, preventing duplicate patches.
+                                      (expect mutated :to-be t)
+                                      (expect (cadr entry) :to-equal "agent edit")
                                       (expect (cddr entry) :to-equal "agent edit")))))
 
                     )
