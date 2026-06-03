@@ -1,6 +1,7 @@
 ;;; macher-agent-api-test.el --- Tests for public API -*- lexical-binding: t; -*-
 
 (require 'ert)
+(require 'cl-lib)
 (require 'macher-agent-api)
 
 (ert-deftest macher-agent-api-contract-test ()

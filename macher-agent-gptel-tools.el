@@ -4,6 +4,7 @@
 (require 'json)
 (require 'cl-lib)
 (require 'transient)
+(require 'macher-agent-vfs-client)
 
 (declare-function macher-agent-current-context "macher-agent-vfs-client")
 (declare-function macher-agent--resolve-buffer-name "macher-agent-orchestration")
@@ -12,8 +13,6 @@
 (declare-function macher-agent--clone-context "macher-agent-vfs-client")
 (declare-function macher-agent--ensure-access "macher-agent-vfs-client")
 (declare-function macher-agent-context-classify-entry "macher-agent-vfs-client")
-
-(defvar macher-agent-tools-registry)
 
 (defvar macher-agent-allowed-tools nil
   "List of custom tool names that should receive the macher-context.")
@@ -58,6 +57,8 @@ If nil, the buffer executes silently in the background."
     (let ((final-str (if (eq (plist-get plist-result :status) 'success)
                          (plist-get plist-result :data)
                        (plist-get plist-result :error))))
+      (when (eq (plist-get plist-result :status) 'error)
+        (message "MACHER AGENT ERROR: %S" final-str))
       (if gptel-cb
           (funcall gptel-cb (macher-agent--format-directives final-str))
         (macher-agent--format-directives final-str)))))
@@ -87,32 +88,30 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
 
 (defun macher-agent--middleware-pipeline (all-args schema next-fn)
   "Extracts context, isolates callbacks, and perfectly aligns the payload payload."
-  (let* (;; 1. Safely isolate the callback closure
-         (callback (cl-find-if #'functionp all-args))
-         ;; 2. Safely isolate macher's injected context struct (if routed via FSM)
+  (let* ((callback (cl-find-if #'functionp all-args))
          (injected-context (cl-find-if (lambda (x) (and (boundp 'macher-context-p) 
                                                         (fboundp 'macher-context-p) 
                                                         (macher-context-p x))) 
                                        all-args))
-         ;; 3. Strip structural arguments to isolate the raw LLM payload
-         (raw-tool-args (cl-remove-if (lambda (x) (or (eq x callback) (eq x injected-context))) all-args))
-         ;; 4. Align from the END to silently discard LLM hallucinations
+         ;; Safely remove ONLY the callback and injected context, preserving positional nil values
+         (raw-tool-args (cl-remove-if (lambda (x) 
+                                        (or (and callback (eq x callback)) 
+                                            (and injected-context (eq x injected-context)))) 
+                                      all-args))
          (aligned-args (last raw-tool-args (length schema)))
-         ;; 5. Context priority: FSM Context > Local Context > Global Search
          (context (or injected-context (ignore-errors (macher-agent-current-context))))
          (payload nil))
 
-    ;; Map args to a plist dynamically based on the schema
     (cl-loop for arg-def in schema
              for i from 0
              for arg-key = (intern (concat ":" (plist-get arg-def :name)))
              for val = (nth i aligned-args)
              do (setq payload (plist-put payload arg-key val)))
-
+    
     (funcall next-fn payload context (or callback (lambda (res) res)))))
 
 (cl-defmacro macher-agent-make-tool (name-symbol description &key category args command-fn success-fn output-filter-fn)
-  "Declarative tool definition. All execution mechanics are delegated to the middleware."
+  "Declarative tool definition. Execution delegated to middleware with strict parsing and dynamic arity."
   (let ((name (replace-regexp-in-string "^macher-agent-\\|-tool$" "" (symbol-name name-symbol))))
     `(defvar ,name-symbol
        (gptel-make-tool
@@ -120,44 +119,54 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
         :description ,description :category ,(or category "macher-agent") :args ,args :async t
         :function
         (lambda (&rest all-args)
-          (macher-agent--middleware-pipeline
-           all-args ,args
-           (lambda (payload context raw-callback)
-             (let ((callback (macher-agent--wrap-callback raw-callback)))
-               (condition-case err
-                   (let* ((action (funcall ,command-fn payload))
-                          (on-success 
-                           (lambda (raw-result)
-                             (let* ((success-data (if ,success-fn (funcall ,success-fn raw-result) raw-result))
-                                    (final-data (if ,output-filter-fn (funcall ,output-filter-fn success-data) success-data)))
-                               (funcall callback (list :status 'success :data final-data))))))
-                     ;; Pass to the execution router
-                     (macher-agent--execute-action action context on-success callback))
-                 (error
-                  (funcall callback (list :status 'error :error (error-message-string err)))))))))))))
+          (let* ((callback (cl-find-if #'functionp all-args))
+                 (context (ignore-errors (macher-agent-current-context)))
+                 (root (if context (macher-agent-context-root context) default-directory))
+                 (arg-names (ignore-errors (mapcar (lambda (a) (intern (concat ":" (plist-get a :name)))) ,args)))
+                 (payload nil))
+            
+            ;; 1. Safely map positional args, EXPLICITLY discarding the callback closure!
+            (cl-loop for k in arg-names
+                     for v in (cl-remove-if #'functionp all-args)
+                     do (setq payload (plist-put payload k v)))
+            
+            (let ((wrap-cb (macher-agent--wrap-callback callback)))
+              (condition-case err
+                  (let* (;; 2. Dynamic Arity Routing (fixes list_buffers_in_workspace)
+                         (action (let* ((arity (func-arity ,command-fn))
+                                        (max-args (cdr arity)))
+                                   (if (or (eq max-args 'many) (>= max-args 3))
+                                       (funcall ,command-fn payload context root)
+                                     (funcall ,command-fn payload))))
+                         (on-success 
+                          (lambda (raw-result)
+                            (let* ((success-data (if ,success-fn (funcall ,success-fn raw-result) raw-result))
+                                   (final-data (if ,output-filter-fn (funcall ,output-filter-fn success-data) success-data)))
+                              (funcall wrap-cb (list :status 'success :data final-data))))))
+                    
+                    ;; 3. Route to shell sandbox or return lisp-result
+                    (macher-agent--execute-action action context on-success wrap-cb))
+                (error
+                 (funcall wrap-cb (list :status 'error :error (error-message-string err))))))))))))
 
 (defun macher-agent--execute-action (action context on-success on-error)
   "Routes the declarative ACTION to the appropriate asynchronous backend."
   (pcase action
-    ;; String -> Run Sandboxed Shell Command
     ((pred stringp)
      (macher-agent--run-in-persistent-sandbox context action on-success on-error))
-    ;; Delegation Task -> Route to Fan-Out Orchestrator
     (`(:delegate . ,tasks)
      (macher-agent-execute-parallel tasks on-success))
-    ;; Nohup -> Fire and Forget
     (`(:nohup . ,cmd)
      (macher-agent--run-async-cmd "detached" cmd default-directory (lambda (_ _)))
      (funcall on-success "SUCCESS: Process started."))
-    ;; Explicit Lisp Return bypasses sandbox string check
     (`(:lisp-result . ,val)
      (funcall on-success val))
-    ;; Direct Lisp Return
+    ;; Gracefully trap malformed tools returning closures due to parenthesis nesting errors
+    ((pred functionp)
+     (funcall on-error (list :status 'error :error "Tool evaluation failed. The command block returned a closure instead of a valid action payload. Check the tool definition for parenthesis nesting errors.")))
     (_ (funcall on-success action))))
 
 ;; --- Sandbox Tools ---
-
-
 
 (defun macher-agent--run-async-cmd (name cmd dir callback)
   "Executes a command using explicit lexical capture for background safety."
@@ -168,27 +177,22 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
      :buffer out-buf
      :command (list shell-file-name shell-command-switch cmd)
      :sentinel (lambda (proc _event)
-                 ;; 'callback' is safely lexically captured here.
                  (when (memq (process-status proc) '(exit signal))
                    (let ((output (with-current-buffer out-buf (buffer-string)))
                          (exit-code (process-exit-status proc)))
                      (kill-buffer out-buf)
                      (funcall callback exit-code output)))))))
 
-
 (defun macher-agent--run-in-persistent-sandbox (context command on-success on-error)
-  ;; The strict VFS pipeline creates a fresh sandbox per execution.
-  ;; We wrap the execution to capture the output synchronously, as the sandbox 
-  ;; is destroyed immediately after the body completes via unwind-protect.
   (condition-case err
       (macher-agent-with-strict-vfs-pipeline context
-        (let* ((output-buf (generate-new-buffer " *macher-sandbox-out*"))
-               (exit-code (call-process shell-file-name nil output-buf nil shell-command-switch command))
-               (output (with-current-buffer output-buf (buffer-string))))
-          (kill-buffer output-buf)
-          (if (= exit-code 0)
-              (funcall on-success output)
-            (funcall on-error (list :status 'error :error output)))))
+                                             (let* ((output-buf (generate-new-buffer " *macher-sandbox-out*"))
+                                                    (exit-code (call-process shell-file-name nil output-buf nil shell-command-switch command))
+                                                    (output (with-current-buffer output-buf (buffer-string))))
+                                               (kill-buffer output-buf)
+                                               (if (= exit-code 0)
+                                                   (funcall on-success output)
+                                                 (funcall on-error (list :status 'error :error output)))))
     (error (funcall on-error (list :status 'error :error (error-message-string err))))))
 
 ;; --- VFS and JIT Reloading ---
@@ -202,9 +206,6 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
      ((file-exists-p file-path)
       (with-temp-buffer (insert-file-contents file-path) (buffer-string)))
      (t nil))))
-
-
-
 
 ;; --- Additional Legacy Tooling Support ---
 
@@ -233,12 +234,18 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
       (format "ERROR: %s" msg))))
 
 (defun macher-agent--prepare-subagent-instructions (buf instructions &optional preset)
-  "Insert INSTRUCTIONS into BUF for the delegated sub-agent without the hardcoded preset."
+  "Insert INSTRUCTIONS into BUF and strictly bind its preset system message."
   (with-current-buffer buf
-    (goto-char (point-max))
+    ;; 1. Erase the buffer so it ONLY contains the assigned task prompt
+    (erase-buffer)
+    
+    ;; 2. Bind the preset so the JIT engine injects the correct system message
+    (when preset
+      (let ((clean-preset (replace-regexp-in-string "^@" "" preset)))
+        (setq-local macher-agent--active-skill-sym (intern clean-preset))))
+    
+    ;; 3. Insert the explicit LLM instructions
     (unless (string-empty-p instructions)
-      (macher-agent--insert-hidden preset)
-      (macher-agent--insert-hidden "\n\n=== DELEGATED TASK ===\n")
       (insert (substring-no-properties instructions)))))
 
 (defvar-local macher-agent--final-result nil
@@ -251,22 +258,16 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
 (declare-function gptel-context-remove "gptel-context" (file))
 
 (defvar macher-agent--pending-tool-media-alist nil
-  "Global alist mapping buffers to their pending media.
-This guarantees media survives even if the process filter evaluates tool 
-callbacks in a temporary network buffer.")
+  "Global alist mapping buffers to their pending media.")
 
 (defun macher-agent--gptel-base64-encode-advice (orig-fun file)
   "Read FILE from VFS if available before encoding."
-  ;; Use ignore-errors here just in case this triggers outside an active agent session
   (let* ((ctx (ignore-errors (macher-agent-current-context)))
          (workspace (when ctx (macher-context-workspace ctx)))
-         (workspace-root (when workspace (macher--workspace-root workspace)))
+         (workspace-root (when workspace (macher-agent--get-workspace-root workspace)))
          (actual-name (if (and workspace-root (file-name-absolute-p file))
                           (file-relative-name file workspace-root)
                         file))
-         ;; THE FIX: Wrap the VFS read in condition-case.
-         ;; If the security layer denies access (e.g. for a physical media file),
-         ;; we silently catch the error and fallback to reading the real file.
          (content (when ctx 
                     (condition-case nil
                         (macher-agent--read-context-file ctx actual-name)
@@ -282,31 +283,29 @@ callbacks in a temporary network buffer.")
 (advice-add 'gptel--base64-encode :around #'macher-agent--gptel-base64-encode-advice)
 
 (macher-agent-make-tool macher-agent-commit-buffer-tool
-  "Directly overwrite an Emacs buffer and synchronise the agent's memory immediately, bypassing the patch review step."
-  :category "plan"
-  :args (list '(:name "buffer_name" :type string)
-              '(:name "content" :type string))
-  :command-fn (lambda (payload)
-                (let ((buffer_name (plist-get payload :buffer_name))
-                      (content (plist-get payload :content))
-                      (context (ignore-errors (macher-agent-current-context))))
-                  (let ((actual-name (macher-agent--resolve-buffer-name buffer_name)))
-                     (macher-agent--ensure-access context actual-name)
-                     (let ((target-buffer (get-buffer-create actual-name)))
-                       (with-current-buffer target-buffer
-                         (when (bound-and-true-p auto-save-visited-mode)
-                           (auto-save-visited-mode -1))
-                         (erase-buffer)
-                         (insert content)
-                         (set-buffer-modified-p t))
-                       (when context
-                         (macher-agent--update-context-file context actual-name content)
-                         (macher-agent--auto-sync-context context))
-                       (cons :lisp-result (format "SUCCESS: Buffer '%s' has been directly overwritten and synchronised. Awaiting user save." actual-name)))))))
+                        "Directly overwrite an Emacs buffer and synchronise the agent's memory immediately, bypassing the patch review step."
+                        :category "plan"
+                        :args (list '(:name "buffer_name" :type string)
+                                    '(:name "content" :type string))
+                        :command-fn (lambda (payload context _root)
+                                      (let ((buffer_name (plist-get payload :buffer_name))
+                                            (content (plist-get payload :content)))
+                                        (let ((actual-name (macher-agent--resolve-buffer-name buffer_name)))
+                                          (macher-agent--ensure-access context actual-name)
+                                          (let ((target-buffer (get-buffer-create actual-name)))
+                                            (with-current-buffer target-buffer
+                                              (when (bound-and-true-p auto-save-visited-mode)
+                                                (auto-save-visited-mode -1))
+                                              (erase-buffer)
+                                              (insert content)
+                                              (set-buffer-modified-p t))
+                                            (when context
+                                              (macher-agent--update-context-file context actual-name content)
+                                              (macher-agent--auto-sync-context context))
+                                            (cons :lisp-result (format "SUCCESS: Buffer '%s' has been directly overwritten and synchronised. Awaiting user save." actual-name)))))))
 
 (with-eval-after-load 'gptel-transient
   (ignore-errors
-    ;; Disable history serialization for heavy gptel menu variables
     (transient-suffix-put 'gptel-menu 'gptel--infix-tools :save-history nil)
     (transient-suffix-put 'gptel-menu 'gptel--infix-system-message :save-history nil)))
 

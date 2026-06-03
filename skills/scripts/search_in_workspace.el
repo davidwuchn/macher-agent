@@ -2,7 +2,7 @@
   "Search for a regular expression pattern within the strictly bounded workspace."
   :category "ro"
   :args '((:name "pattern" :type string :description "The regex pattern to search for"))
-  :command-fn (lambda (payload)
+  :command-fn (lambda (payload _context _root)
                 (let ((pattern (plist-get payload :pattern)))
                   (if (or (string-empty-p (string-trim pattern))
                           (string-equal pattern ".*")

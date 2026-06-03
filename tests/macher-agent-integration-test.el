@@ -1,9 +1,14 @@
 ;;; macher-agent-integration-test.el --- Tests for macher-agent-skills -*- lexical-binding: t -*-
 (require 'buttercup)
+(require 'macher-agent-macher-bridge)
 (require 'macher-agent)
 
 (describe "Macher-Agent Orchestration Integration"
           (before-each
+           (spy-on 'macher-agent-current-context :and-return-value
+                   (let ((ctx (macher-agent--make-vfs-context :workspace (cons 'agent (make-macher-agent-workspace :project-root "/mock/proj")) :contents nil)))
+                     (macher-agent-initialize-skills ctx macher-agent-bundled-skills-directory)
+                     ctx))
            ;; 1. Mock the LLM: Intercept gptel-send to act as the AI for the sub-agents
            (spy-on 'gptel-send :and-call-fake
                    (lambda (&rest _)
@@ -28,12 +33,7 @@
 
           (it "executes the full workflow: spawn -> delegate -> await responses -> return combined result"
               (let* ((master-buf (get-buffer-create "*orchestrator-test*"))
-                     (final-result nil)
-                     ;; Dynamically fetch the tools from the registry or fallback to the defvars
-                     (spawn-tool (or (gethash "spawn_subagent" macher-agent-tools-registry)
-                                     (bound-and-true-p macher-agent-spawn-subagent-tool)))
-                     (delegate-tool (or (gethash "delegate_tasks_to_subagents" macher-agent-tools-registry)
-                                        (bound-and-true-p macher-agent-delegate-tasks-to-subagents-tool))))
+                     (final-result nil))
                 
                 (with-current-buffer master-buf
                   
@@ -41,17 +41,24 @@
                   ;; We bind the dynamic flag to allow lazy initialisation, perfectly mirroring 
                   ;; gptel-send's pre-flight advice.
                   (let ((macher-agent--allow-lazy-init t))
+                    (let* ((spawn-tool (or (gethash "spawn_subagent" (macher-agent-workspace-tools-registry (macher-agent--get-context-workspace (macher-agent-current-context))))
+                                           (bound-and-true-p macher-agent-spawn-subagent-tool)))
+                           (delegate-tool (or (gethash "delegate_tasks_to_subagents" (macher-agent-workspace-tools-registry (macher-agent--get-context-workspace (macher-agent-current-context))))
+                                              (bound-and-true-p macher-agent-delegate-tasks-to-subagents-tool))))
                     
                     ;; --- B. Spawn Sub-agents via Tool ---
                     (let ((spawn-fn (gptel-tool-function spawn-tool)))
                       ;; Safely invoke the tool whether it is flagged as :async t or not
                       (if (gptel-tool-async spawn-tool)
                           (progn
-                            (funcall spawn-fn "agent-france" (lambda (_) nil))
-                            (funcall spawn-fn "agent-spain" (lambda (_) nil)))
+                            (funcall spawn-fn "agent-france" (lambda (res) (setq final-result (cons 'spawn1 res))))
+                            (funcall spawn-fn "agent-spain" (lambda (res) (setq final-result (cons 'spawn2 res)))))
                         (funcall spawn-fn "agent-france")
                         (funcall spawn-fn "agent-spain")))
 
+                    (unless (buffer-live-p (get-buffer "*macher-agent: agent-france*"))
+                      (error "SPAWN FAILED! final-result=%S spawn-tool=%S" final-result spawn-tool))
+                    
                     (expect (buffer-live-p (get-buffer "*macher-agent: agent-france*")) :to-be t)
                     (expect (buffer-live-p (get-buffer "*macher-agent: agent-spain*")) :to-be t)
 
@@ -85,4 +92,4 @@
                     
                     ;; 3. The orchestrator hook should have cleanly destroyed the worker buffers
                     (expect (buffer-live-p (get-buffer "*macher-agent: agent-france*")) :to-be nil)
-                    (expect (buffer-live-p (get-buffer "*macher-agent: agent-spain*")) :to-be nil))))))
+                    (expect (buffer-live-p (get-buffer "*macher-agent: agent-spain*")) :to-be nil)))))))

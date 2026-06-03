@@ -8,12 +8,11 @@
                                             :new_text (:type string :description "Text to replace the old_text with")
                                             :replace_all (:type boolean :description "If true, replace all occurrences."))
                                :required ["old_text" "new_text"])))
-  :command-fn (lambda (payload)
+  :command-fn (lambda (payload context _root)
                 (let* ((buffer_name (plist-get payload :buffer_name))
                        (edits (plist-get payload :edits))
-                       (context (ignore-errors (macher-agent-current-context)))
                        (actual-name (macher-agent--resolve-buffer-name buffer_name))
-                       (content (let ((contents (assoc actual-name (macher-context-contents context))))
+                       (content (let ((contents (assoc actual-name (macher-agent--get-context-contents context))))
                                   (if contents
                                       (cdr (cdr contents))
                                     (error "Buffer '%s' not found in workspace" actual-name)))))
@@ -28,7 +27,7 @@
                                   (replace-all-bool (and replace-all (not (eq replace-all :json-false)))))
                              (unless (and old-text new-text)
                                (error "Each edit must contain old_text and new_text properties"))
-                             (setq content (macher--edit-string content old-text new-text replace-all-bool))))
+                             (setq content (macher-agent--edit-string-fast content old-text new-text replace-all-bool))))
                   
                   (when context
                     (macher-agent--update-context-file context actual-name content))
