@@ -29,30 +29,15 @@
                          (funcall final-callback results)))))))))
 
 (defun macher-agent-spawn-task (task callback)
-  "Spawn a task inside a target subagent, heavily protected against deadlocks."
-  (let* ((raw-buf-name (if (listp task) (plist-get task :buffer_name) task))
-         (safe-buf-name (if (stringp raw-buf-name) raw-buf-name (format "unnamed-subagent-%s" (random 1000))))
-         (buf-name (if (string-match-p "^\\*macher-agent:" safe-buf-name) safe-buf-name (format "*macher-agent: %s*" safe-buf-name)))
+  "Spawn a task inside a target subagent."
+  (let* ((buf-name (if (listp task) (plist-get task :buffer_name) task))
          (instructions (if (listp task) (plist-get task :instructions) ""))
          (preset (if (listp task) (plist-get task :preset) nil))
-         (ctx (macher-agent-current-context))
-         ;; CAPTURE PARENT CREDENTIALS TO PREVENT PROMPTING DEADLOCKS
-         (parent-backend gptel-backend)
-         (parent-model gptel-model)
          (buf (get-buffer buf-name)))
-    
-    (unless buf
-      (setq buf (macher-agent-add-subagent (replace-regexp-in-string "^\\*macher-agent:[ ]*" "" safe-buf-name) default-directory nil ctx preset))
-      (when ctx (macher-agent--add-buffer-to-scope-headless (buffer-name buf) ctx)))
-    
     (if (not buf)
-        (funcall callback (list :status 'error :error (format "ERROR: Failed to spawn sub-agent '%s'." buf-name) :buffer_name buf-name))
+        (funcall callback (list :status 'error :error (format "ERROR: Sub-agent buffer '%s' not found." buf-name) :buffer_name buf-name))
       (macher-agent--prepare-subagent-instructions buf instructions preset)
       (with-current-buffer buf
-        ;; INJECT PARENT CREDENTIALS
-        (when parent-backend (setq-local gptel-backend parent-backend))
-        (when parent-model (setq-local gptel-model parent-model))
-        
         (macher-agent--show-ui buf)
         (let ((response-hook nil)
               (transform-hook nil))
@@ -61,21 +46,15 @@
                   (setq-local macher--fsm-latest fsm)
                   (funcall async-fn)))
           (add-hook 'gptel-prompt-transform-functions transform-hook nil t)
-          
           (setq response-hook
-                (lambda (_response _info)
+                (lambda (_beg _end)
                   (let ((res (buffer-local-value 'macher-agent--final-result buf)))
                     (if res
                         (funcall callback (list :status 'success :data res :buffer_name buf-name))
-                      (let ((salvaged-text (with-current-buffer buf (buffer-substring-no-properties (point-min) (point-max)))))
-                        (funcall callback (list :status 'success :data salvaged-text :buffer_name buf-name))))
-                    (run-at-time 0.5 nil (lambda () (when (buffer-live-p buf) (kill-buffer buf)))))))
+                      (funcall callback (list :status 'error :error (format "ERROR: Buffer '%s' stopped silently." buf-name) :buffer_name buf-name)))
+                    (run-at-time 0.1 nil (lambda () (when (buffer-live-p buf) (kill-buffer buf)))))))
           (add-hook 'gptel-post-response-functions response-hook nil t)
-          
-          (condition-case err
-              (gptel-send)
-            (error
-             (funcall callback (list :status 'error :error (format "Failed to start sub-agent: %s" err) :buffer_name buf-name)))))))))
+          (gptel-send))))))
 
 (defvar macher-agent-subagent-setup-hook nil)
 
@@ -109,9 +88,7 @@
     (when context
       (setq-local macher-agent--persistent-context context))
     
-    ;; Set the Anchor
     (setq-local macher-agent--active-skill-sym (if preset (intern preset) '\@macher-agent-worker))
-    ;; Prefill System Prompt natively based on anchor
     (let ((meta (or (alist-get macher-agent--active-skill-sym macher-agent-global-skills-alist)
                     (when context (alist-get macher-agent--active-skill-sym (macher-agent-workspace-skills-alist (macher-agent--get-context-workspace context)))))))
       (setq-local gptel--system-message (or (plist-get meta :system) "")))
@@ -154,23 +131,23 @@
       (macher-agent--auto-sync-context ctx)
       (message "Virtual buffers applied successfully."))))
 
-(defun macher-agent--gptel-abort-hook (&rest _)
-  (when (and (boundp 'macher-agent--persistent-context)
-             macher-agent--persistent-context
-             (macher-agent--get-context-dirty-p macher-agent--persistent-context))
-    (message "Generation aborted/failed. Salvaging pending virtual edits...")
-    (macher-agent-force-review)))
+(defun macher-agent--prepare-subagent-instructions (buf instructions &optional preset)
+  "Insert INSTRUCTIONS into BUF and strictly bind its preset system message."
+  (with-current-buffer buf
+    (erase-buffer)
+    (when preset
+      (let* ((clean-preset (replace-regexp-in-string "^@+" "" preset))
+             (preset-sym (intern clean-preset)))
+        (setq-local macher-agent--active-skill-sym preset-sym)))
+    (unless (string-empty-p instructions)
+      (insert (substring-no-properties instructions)))))
 
-(advice-add 'gptel-abort :after #'macher-agent--gptel-abort-hook)
-
-(add-hook 'gptel-post-response-functions
-          (lambda (_response info)
-            (unless _response
-              (macher-agent--gptel-abort-hook))))
-
-(add-hook 'gptel-pre-response-functions
-          (lambda (&rest _)
-            (let ((ctx (macher-agent-current-context)))
-              (when ctx (macher-agent--auto-sync-context ctx)))))
+(add-hook 'gptel-pre-response-hook
+          (lambda ()
+            (let ((ctx (ignore-errors (macher-agent-current-context))))
+              (when ctx (macher-agent--auto-sync-context ctx)))
+            (when (fboundp 'macher-agent--compose-active-skills)
+              (macher-agent--compose-active-skills))))
 
 (provide 'macher-agent-orchestration)
+;;; macher-agent-orchestration.el ends here

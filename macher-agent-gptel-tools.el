@@ -123,28 +123,27 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
                  (context (ignore-errors (macher-agent-current-context)))
                  (root (if context (macher-agent-context-root context) default-directory))
                  (arg-names (ignore-errors (mapcar (lambda (a) (intern (concat ":" (plist-get a :name)))) ,args)))
-                 (payload nil))
+                 (payload nil)
+                 (cmd-eval ,command-fn)
+                 (succ-eval ,success-fn)
+                 (filter-eval ,output-filter-fn))
             
-            ;; 1. Safely map positional args, EXPLICITLY discarding the callback closure!
             (cl-loop for k in arg-names
                      for v in (cl-remove-if #'functionp all-args)
                      do (setq payload (plist-put payload k v)))
             
             (let ((wrap-cb (macher-agent--wrap-callback callback)))
               (condition-case err
-                  (let* (;; 2. Dynamic Arity Routing (fixes list_buffers_in_workspace)
-                         (action (let* ((arity (func-arity ,command-fn))
+                  (let* ((action (let* ((arity (func-arity cmd-eval))
                                         (max-args (cdr arity)))
                                    (if (or (eq max-args 'many) (>= max-args 3))
-                                       (funcall ,command-fn payload context root)
-                                     (funcall ,command-fn payload))))
+                                       (funcall cmd-eval payload context root)
+                                     (funcall cmd-eval payload))))
                          (on-success 
                           (lambda (raw-result)
-                            (let* ((success-data (if ,success-fn (funcall ,success-fn raw-result) raw-result))
-                                   (final-data (if ,output-filter-fn (funcall ,output-filter-fn success-data) success-data)))
+                            (let* ((success-data (if succ-eval (funcall succ-eval raw-result) raw-result))
+                                   (final-data (if filter-eval (funcall filter-eval success-data) success-data)))
                               (funcall wrap-cb (list :status 'success :data final-data))))))
-                    
-                    ;; 3. Route to shell sandbox or return lisp-result
                     (macher-agent--execute-action action context on-success wrap-cb))
                 (error
                  (funcall wrap-cb (list :status 'error :error (error-message-string err))))))))))))
