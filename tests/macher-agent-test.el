@@ -334,13 +334,21 @@
       (describe "rsync command building"
         
         (it "constructs a shell string using git ls-files"
+          ;; Intercept call-process to return 0 (success).
+          ;; This simulates a valid git repository and bypasses the physical directory check.
+          (spy-on 'call-process :and-return-value 0)
+          
           (let* ((src "/my/project/")
                  (dest "/tmp/sandbox/")
                  (cmd (macher-agent--build-rsync-cmd src dest)))
             
             (expect (stringp cmd) :to-be t)
             (expect (string-match-p "git ls-files" cmd) :to-be-truthy)
-            (expect (string-match-p "rsync -aLC --delete --files-from=-" cmd) :to-be-truthy)))))
+            (expect (string-match-p "rsync -aLC --delete --files-from=-" cmd) :to-be-truthy)
+            
+            ;; Optional but good practice: verify our mock was actually triggered
+            (expect 'call-process :to-have-been-called-with
+                    "git" nil nil nil "rev-parse" "--is-inside-work-tree")))))
 
     (describe "Macher-Agent Tool Category Isolation"
       
