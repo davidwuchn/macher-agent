@@ -9,23 +9,93 @@
 (declare-function macher-agent--split-context "macher-agent-vfs-client")
 (declare-function macher-agent--build-virtual-patch "macher-agent-vfs-client")
 
-;; --- 1. The Pre-flight Boundary (Initialise VFS before LLM call) ---
+(defun macher-agent--track-directive-selection (orig-fun sym val scope)
+  "Intercept gptel directive selection to sync our buffer-local skill anchor."
+  (apply orig-fun sym val scope)
+  (when (and (eq sym 'gptel--system-message)
+             (eq scope 'gptel--set-buffer-locally))
+    (let ((skill-sym (macher-agent--get-system-message-name val)))
+      (if skill-sym
+          (setq-local macher-agent--active-skill-sym (intern skill-sym))
+        (setq-local macher-agent--active-skill-sym nil)))))
+
+(defun macher-agent--compose-active-skills ()
+  "JIT Composition: Rebuild buffer-local state right before the LLM request fires."
+  (let ((target-sym (or (bound-and-true-p gptel-directive) 
+                        (bound-and-true-p macher-agent--active-skill-sym))))
+    (when-let* ((profile (macher-agent-resolve-skill-profile target-sym))
+                (skill-data (plist-get profile :data)))
+      
+      ;; FIX: Extracted from when-let* to prevent silent aborts
+      (let* ((tools (plist-get skill-data :tools))
+             (safe-skill-data (macher-agent-sanitise-skill-data skill-data)))
+        
+        (when safe-skill-data
+          (let ((gptel--known-presets (list (cons (or target-sym 'temp) safe-skill-data))))
+            (gptel--apply-preset (or target-sym 'temp) (lambda (sym val) (set (make-local-variable sym) val)))))
+        
+        (when (boundp 'gptel-tools)
+          (let ((buffer-tools gptel-tools))
+            ;; Combine the currently active buffer tools with the preset tools
+            (setq-local gptel-tools (macher-agent-deduplicate-tools (append buffer-tools tools)))))))))
 
 (defun macher-agent--gptel-pre-send-advice (orig-fun &rest args)
-  "Ensure the agent VFS is synchronised before sending a request to the LLM.
-This is the single entry point for pre-flight state management."
-  ;; Dynamically bind the flag to allow lazy initialisation only during a send
+  "Ensure the agent VFS is synchronised and skills are composed before sending."
   (let* ((macher-agent--allow-lazy-init t)
          (ctx (macher-agent-current-context)))
-    (when ctx
-      (macher-agent--auto-sync-context ctx)))
+    (when ctx (macher-agent--auto-sync-context ctx))
+    (macher-agent--compose-active-skills))
   (apply orig-fun args))
 
-(advice-add 'gptel-send :around #'macher-agent--gptel-pre-send-advice)
+(defun macher-agent-gptel-transmit (task-context callbacks)
+  "Facade to transmit network request using a strictly explicit TASK-CONTEXT."
+  (let* ((target-buffer (macher-agent-task-context-target-buffer task-context))
+         (sys-msg (macher-agent-task-context-system-message task-context))
+         (success-cb (plist-get callbacks :on-success))
+         (error-cb (plist-get callbacks :on-error)))
+    (with-current-buffer target-buffer
+      (let* ((transform-hook
+              (lambda (async-fn fsm)
+                (setq-local macher--fsm-latest fsm)
+                (funcall async-fn)))
+             (response-hook
+              (lambda (_beg _end)
+                (let ((res (buffer-local-value 'macher-agent--final-result target-buffer)))
+                  (if res
+                      (when success-cb (funcall success-cb res))
+                    (when error-cb (funcall error-cb "Buffer stopped silently.")))))))
+        (cl-letf (((default-value 'gptel-prompt-transform-functions) (list transform-hook))
+                  ((default-value 'gptel-post-response-functions) (list response-hook))
+                  (gptel--system-message sys-msg))
+          (gptel-send))))))
 
-;; --- 1.5 Media Lifecycle (Inject media before request) ---
+(defun macher-agent--setup-tools-advice (orig-fn &rest args)
+  "Make sure `macher--setup-tools` works gracefully without FSM injection."
+  (let* ((fsm (car args))
+         (info (when fsm
+                 (if (fboundp 'gptel-fsm-info)
+                     (funcall 'gptel-fsm-info fsm)
+                   (when (fboundp 'mock-gptel-fsm-info)
+                     (funcall 'mock-gptel-fsm-info fsm)))))
+         (ctx (when info (plist-get info :macher--context)))
+         (fallback-ctx (unless ctx (ignore-errors (macher-agent-current-context))))
+         (final-ctx (or ctx fallback-ctx)))
+    (when final-ctx
+      (macher-agent--auto-sync-context final-ctx)
+      (when fsm
+        (let ((session (or (plist-get info :macher-agent-session)
+                           (let* ((ws (macher-agent--get-context-workspace final-ctx))
+                                  (proj-root (if ws (macher-agent--get-workspace-root ws) default-directory))
+                                  (agent-ws (make-macher-agent-workspace :project-root proj-root)))
+                             (make-macher-agent-session :id (buffer-name) :workspace agent-ws)))))
+          (setf (gptel-fsm-info fsm) (plist-put info :macher-agent-session session))))))
+  (apply orig-fn args))
 
-;; looks like FSM can't be avoided may break in future
+
+(setq macher-process-request-function #'macher-agent--process-request)
+
+;; --- Media Injection Hook ---
+
 (defun macher-agent--inject-media-fsm-advice (orig-fun fsm &rest args)
   "Inject pending tool media into the FSM payload right before it hits the network."
   (let* ((info (if (fboundp 'gptel-fsm-info)
@@ -51,7 +121,7 @@ This is the single entry point for pre-flight state management."
                                 (plist-get info :data) 
                                 (car prompts)))
         
-        ;; Clear the queue for this session
+        ;; Clear the queue for this session so we don't send the image twice
         (setf (macher-agent-session-pending-media session) nil)))
     
     ;; Continue with the actual network request
@@ -59,50 +129,37 @@ This is the single entry point for pre-flight state management."
 
 (advice-add 'gptel--handle-wait :around #'macher-agent--inject-media-fsm-advice)
 
-;; --- 2. The Post-flight Boundary (Refresh UI after LLM finishes) ---
+(defun macher-agent--make-safe-callback (orig-cb)
+  "Closure generator: captures orig-cb so it survives async network delays."
+  (lambda (response &rest cb-args)
+    (apply orig-cb (or response "") cb-args)))
 
-(defun macher-agent--gptel-post-response-hook (_response info)
-  "Refresh the VFS UI after the LLM completes a turn.
-If the context is dirty, it delegates to macher-agent--process-request."
-  (let ((ctx (macher-agent-current-context)))
-    (when (and ctx (macher-context-dirty-p ctx) (not (bound-and-true-p macher-agent--is-subagent)))
-      ;; Build a dummy FSM structure based on info
-      (let ((fsm (if (fboundp 'gptel-make-fsm)
-                     (gptel-make-fsm :info info)
-                   nil)))
-        (macher-agent--process-request 'complete ctx fsm)))))
+(defvar macher-agent--captured-buffer-tools nil
+  "Dynamic snapshot of buffer tools.")
 
-(add-hook 'gptel-post-response-functions #'macher-agent--gptel-post-response-hook)
+(defun macher-agent--merge-preset-and-buffer-tools (fsm)
+  "Transform hook to natively merge buffer tools and preset tools.
+   Runs in the temp prompt buffer immediately after presets have overwritten gptel-tools."
+  (let* ((info (gptel-fsm-info fsm))
+         (orig-buf (plist-get info :buffer))
+         ;; gptel-tools here represents what the preset injected
+         (preset-tools gptel-tools)
+         ;; Reach back to the chat buffer to get the tools you ticked in the menu
+         (buffer-tools (buffer-local-value 'gptel-tools orig-buf)))
+    
+    (when (or buffer-tools preset-tools)
+      ;; Merge them and overwrite the temp buffer's tools. 
+      ;; gptel will natively pick this up when it builds the network payload!
+      (setq-local gptel-tools
+                  (macher-agent-deduplicate-tools (append buffer-tools preset-tools))))))
 
-;; --- 3. Clean FSM Context Adapter (No FSM injection) ---
+(add-hook 'gptel-prompt-transform-functions #'macher-agent--merge-preset-and-buffer-tools t)
 
-(defun macher-agent--setup-tools-advice (orig-fn &rest args)
-  "Make sure `macher--setup-tools` works gracefully without FSM injection."
-  (let* ((fsm (car args))
-         (info (when fsm
-                 (if (fboundp 'gptel-fsm-info)
-                     (funcall 'gptel-fsm-info fsm)
-                   (when (fboundp 'mock-gptel-fsm-info)
-                     (funcall 'mock-gptel-fsm-info fsm)))))
-         (ctx (when info (plist-get info :macher--context)))
-         (fallback-ctx (unless ctx (ignore-errors (macher-agent-current-context))))
-         (final-ctx (or ctx fallback-ctx)))
-    (when final-ctx
-      (macher-agent--auto-sync-context final-ctx)
-      ;; Ensure the macher-agent-session is attached to the FSM info
-      (when fsm
-        (let ((session (or (plist-get info :macher-agent-session)
-                           (let* ((ws (macher-context-workspace final-ctx))
-                                  (proj-root (if ws (macher--workspace-root ws) default-directory))
-                                  (agent-ws (make-macher-agent-workspace :project-root proj-root)))
-                             (make-macher-agent-session :id (buffer-name) :workspace agent-ws)))))
-          (setf (gptel-fsm-info fsm) (plist-put info :macher-agent-session session))))))
-  (apply orig-fn args))
+(defun macher-agent--protect-nil-responses (orig-fun response info &optional raw)
+  "Prevent nil string crashes at the point of insertion."
+  (funcall orig-fun (or response "") info raw))
 
-(advice-add 'macher--setup-tools :around #'macher-agent--setup-tools-advice)
-
-;; Override macher's default diff processing to route live buffers vs file VFS
-(setq macher-process-request-function #'macher-agent--process-request)
+(advice-add 'gptel--insert-response :around #'macher-agent--protect-nil-responses)
+(advice-add 'gptel-curl--stream-insert-response :around #'macher-agent--protect-nil-responses)
 
 (provide 'macher-agent-gptel-bridge)
-;;; macher-agent-gptel-bridge.el ends here
