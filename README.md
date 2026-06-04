@@ -175,10 +175,13 @@ Alternatively, you can create sub-agents manually using interactive commands. Yo
 | `M-x macher-agent-add-buffer-to-scope`   | Adds an existing Emacs buffer to the agent's context.                    |
 | `M-x macher-agent-clear-context`         | Clears the virtual memory and pending edits.                             |
 | `M-x macher-agent-branch-chat`           | Branch chat in new buffer.                                               |
+| `M-x macher-agent-inject-thought`        | Inject thought into next agent continuation (queues additions)           |
 | `M-x macher-agent-apply-patch`           | Evaluates and applies the patch buffer.                                  |
 | `M-x macher-agent-insert-patch`          | Inserts the workspace patch into the chat buffer.                        |
 | `M-x macher-agent-apply-virtual-buffers` | Applies the virtual edits directly.                                      |
 | `M-x macher-agent-initialize-skills`     | Scans the skills directory, compiling presets and tools into memory.     |
+
+
 
 ### LLM Tools
 
