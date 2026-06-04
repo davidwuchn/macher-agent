@@ -25,6 +25,14 @@
 (defvar macher-agent-context-mutated-hook nil)
 (defvar macher-agent--allow-lazy-init nil)
 
+(defun macher-agent-vfs-get-node (workspace path)
+  "Retrieve a node's content from the virtual file system."
+  (gethash path (macher-agent-workspace-vfs-buffers workspace)))
+
+(defun macher-agent-vfs-set-node (workspace path content)
+  "Set a node's content in the virtual file system."
+  (puthash path content (macher-agent-workspace-vfs-buffers workspace)))
+
 (defun macher-agent-vfs-write (workspace file-path content)
   (let* ((tracker (macher-agent-workspace-mtime-tracker workspace))
          (original-mtime (gethash file-path tracker))
@@ -98,20 +106,41 @@
 (defun macher-agent--vfs-verify-clean-merge (workspace-root context) t)
 
 (defun macher-agent--build-rsync-cmd (src dest)
-  "Construct a resilient rsync command that gracefully degrades if git is missing."
+  "Construct an rsync command driven by Git. Throws an error if Git is unavailable."
   (let* ((src-dir (file-name-as-directory (expand-file-name src)))
          (dest-dir (file-name-as-directory (expand-file-name dest))))
-    (format "if (cd %s && git rev-parse --is-inside-work-tree >/dev/null 2>&1); then (cd %s && git ls-files -c -o --exclude-standard) | rsync -aLC --delete --files-from=- %s %s; else rsync -aLC --delete --exclude='.git' --exclude='node_modules' --exclude='target' %s %s; fi"
+    
+    (unless (executable-find "git")
+      (error "Macher-Agent: Git executable not found in PATH"))
+    
+    (unless (eq 0 (let ((default-directory src-dir))
+                    (call-process "git" nil nil nil "rev-parse" "--is-inside-work-tree")))
+      (error "Macher-Agent: Source directory is not inside a Git repository: %s" src-dir))
+    
+    (format "(cd %s && git ls-files -c -o --exclude-standard) | rsync -aLC --delete --files-from=- %s %s"
             (shell-quote-argument src-dir)
-            (shell-quote-argument src-dir)
-            (shell-quote-argument src-dir)
-            (shell-quote-argument dest-dir)
             (shell-quote-argument src-dir)
             (shell-quote-argument dest-dir))))
 
 (defun macher-agent--vfs-sync-baseline (workspace-root sandbox-dir)
   (let ((sync-cmd (macher-agent--build-rsync-cmd workspace-root sandbox-dir)))
     (call-process shell-file-name nil nil nil shell-command-switch sync-cmd)))
+
+(defun macher-agent--edit-string-fast (content old-text new-text replace-all)
+  "Replace OLD-TEXT with NEW-TEXT in CONTENT.
+If REPLACE-ALL is nil, errors if OLD-TEXT occurs more than once."
+  (let ((count 0)
+        (start 0))
+    (while (string-match (regexp-quote old-text) content start)
+      (setq count (1+ count))
+      (setq start (match-end 0)))
+    (cond
+     ((= count 0)
+      (error "Text not found: %s" old-text))
+     ((and (> count 1) (not replace-all))
+      (error "Multiple matches found for text. Set replace_all to true or provide more context: %s" old-text))
+     (t
+      (replace-regexp-in-string (regexp-quote old-text) new-text content t t)))))
 
 (defun macher-agent--vfs-apply-overlay (context sandbox-dir)
   (when (and context (macher-agent--get-context-dirty-p context))

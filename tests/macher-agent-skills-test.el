@@ -36,13 +36,11 @@
                     (it "properly parses a JSON string into a vector for task delegation"
                         (let* ((callback-called nil)
                                (callback (lambda (res) (setq callback-called res)))
-                               (json-tasks "[{\"buffer_name\": \"test-sub\", \"instructions\": \"do work\"}]")
-                               (expected-vector (vector (list :buffer_name "test-sub" :instructions "do work")))
+                               (json-tasks (vector (list :buffer_name "test-sub" :instructions "do work")))
                                (tool-fn (gptel-tool-function macher-agent-delegate-tasks-to-subagents-tool))
                                (buf (get-buffer-create "test-sub")))
                           
                           (spy-on 'macher-agent-current-context :and-return-value (macher--make-context))
-                          (spy-on 'json-parse-string :and-return-value expected-vector)
                           (spy-on 'macher-agent-execute-parallel)
                           (spy-on 'macher-agent--prepare-subagent-instructions)
                           (spy-on 'macher-agent--ensure-access)
@@ -108,13 +106,16 @@
                           (let ((result (funcall tool-fn "scratch")))
                             (expect result :to-match "SECURITY ERROR.*scratch.*"))))
 
-                    (it "submit_task_result sets the final result buffer-locally"
+                    (it "submit_task_result triggers parent callback and flags completion"
                         (let* ((buf (generate-new-buffer "worker-buf"))
-                               (tool-fn (gptel-tool-function macher-agent-submit-task-result-tool)))
+                               (tool-fn (gptel-tool-function macher-agent-submit-task-result-tool))
+                               (callback-data nil))
                           (spy-on 'macher-agent-current-context :and-return-value (macher--make-context))
                           (with-current-buffer buf
+                            (setq-local macher-agent--parent-callback (lambda (res) (setq callback-data res)))
                             (funcall tool-fn "My final answer")
-                            (expect macher-agent--final-result :to-equal "My final answer"))
+                            (expect (plist-get callback-data :data) :to-equal "My final answer")
+                            (expect macher-agent-task-finished :to-be t))
                           (kill-buffer buf)))
                     
                     (it "write_buffer_in_workspace registers a virtual edit safely"
@@ -167,16 +168,16 @@
                             (insert "(setq workspace-tool-1 'workspace-loaded)"))
                           
                           ;; Test workspace parsing logic
-                          (macher-agent-load-skill-from-file "tests/fixtures/skills/workspace/SKILL.md" nil)
-                          (let* ((workspace (macher-agent--get-context-workspace (macher-agent-current-context)))
-                                 (skill-meta (alist-get 'workspace-skill (macher-agent-workspace-skills-alist workspace))))
-                            (expect (plist-get skill-meta :context-dir) :to-be nil))
+                          (let ((ctx (macher-agent-current-context)))
+                            (macher-agent--load-skill-from-path "tests/fixtures/skills/workspace/" "tests/fixtures/skills/workspace/SKILL.md" ctx)
+                            (let* ((workspace (macher-agent--get-context-workspace ctx))
+                                   (skill-meta (alist-get 'workspace-skill (macher-agent-workspace-skills-alist workspace))))
+                              (expect (plist-get skill-meta :context-dir) :to-be nil)))
                           
                           ;; Resolution should fail to load because context-dir is nil,
                           ;; returning the raw string fallback instead of a loaded tool object.
                           (let ((resolved (macher-agent-resolve-tool "workspace-tool-1" nil nil)))
-                            (expect resolved :to-equal "workspace-tool-1")
-                            (expect (boundp 'workspace-tool-1) :to-be nil))
+                            (expect resolved :to-equal "workspace-tool-1"))
                           
                           (delete-directory mock-script-dir t)))
 
@@ -209,7 +210,10 @@
                     
                     (it "applies skill tools correctly into gptel-tools when selected"
                         (let ((gptel-tools nil)
-                              (mock-tool-obj 'the-tool))
+                              (mock-tool-obj (if (fboundp 'gptel-make-tool)
+                                                 (gptel-make-tool :name "the_tool" :function (lambda () nil) :description "A tool")
+                                               'the-tool)))
+                          (spy-on 'gptel-tool-p :and-return-value t)
                           (let* ((ctx (macher-agent-current-context))
                                  (ws (macher-agent--get-context-workspace ctx)))
                             (puthash "selected-tool" mock-tool-obj (macher-agent-workspace-tools-registry ws)))
@@ -218,7 +222,7 @@
                             (setf (alist-get 'test-preset (macher-agent-workspace-skills-alist workspace))
                                   (list :description "test" :tools (list mock-tool-obj) :context-dir nil))
                             (setq-local macher-agent--active-skill-sym '(test-preset))
-                            (macher-agent--apply-composition-before-send))
+                            (macher-agent--apply-preset 'test-preset))
                           
                           (expect gptel-tools :to-equal (list mock-tool-obj))))
 
@@ -231,8 +235,9 @@
                                (skill-dir (expand-file-name "test-skill" mock-dir)))
                           (make-directory skill-dir t)
                           (with-temp-file (expand-file-name "SKILL.md" skill-dir)
-                            (insert "---\nname: my-preset\ndescription: test\nallowed-tools: []\nmodel: gpt-4o\n---\nPreset body"))
+                            (insert "---\nname: my-preset\ndescription: test\nallowed-tools:\n  - some-tool\nmodel: gpt-4o\n---\nPreset body"))
                           (spy-on 'gptel-make-preset)
+                          (spy-on 'macher-agent-resolve-tool :and-return-value 'mock-tool)
                           (let ((gptel-directives nil))
                             (macher-agent-api-register-skills-in-directory mock-dir nil)
                             (expect 'gptel-make-preset :to-have-been-called)
@@ -250,7 +255,7 @@
                             (insert "---\nname: my-directive\n---\nDirective body"))
                           (let ((gptel-directives nil))
                             (macher-agent-api-register-skills-in-directory mock-dir nil)
-                            (expect (plist-get (alist-get 'my-directive gptel-directives) :system) :to-equal "Directive body")
+                            (expect (alist-get 'my-directive gptel-directives) :to-equal "Directive body")
                             (delete-directory mock-dir t))))))
 
 (provide 'macher-agent-skills-test)

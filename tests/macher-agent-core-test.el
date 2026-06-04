@@ -131,7 +131,7 @@
                           (let ((built-vfs-diff nil)
                                 (built-virtual-diff nil))
                             
-                            (spy-on 'macher--build-patch :and-call-fake
+                            (spy-on 'macher-agent--build-patch :and-call-fake
                                     (lambda (ctx fsm) (setq built-vfs-diff t)))
                             (spy-on 'macher-agent--build-virtual-patch :and-call-fake
                                     (lambda (ctx) (setq built-virtual-diff t)))
@@ -150,26 +150,30 @@
 
                     (it "REGRESSION: completely neutralises absolute path injections"
                         ;; The LLM or VFS hallucinates an absolute path to overwrite a system file
-                        (let* ((malicious-path "/etc/passwd")
-                               (resolved (macher-agent--resolve-safe-path malicious-path sandbox-root)))
-                          
-                          ;; It MUST reroute into the sandbox instead of touching the real /etc/passwd
-                          (expect resolved :to-equal "/tmp/macher-sandbox/etc/passwd")
-                          (expect (file-in-directory-p resolved sandbox-root) :to-be t)))
+                        (let ((malicious-path "/etc/passwd")
+                              (threw nil))
+                          (condition-case err
+                              (macher-agent--resolve-safe-path malicious-path sandbox-root)
+                            (error (setq threw t)))
+                          (expect threw :to-be t)))
 
                     (it "prevents relative path traversal (Directory Climbing)"
                         ;; The LLM tries to use `../` to climb out of the sandbox
-                        (let ((malicious-path "../../../../etc/passwd"))
-                          (expect (macher-agent--resolve-safe-path malicious-path sandbox-root)
-                                  :to-throw 'error)))
+                        (let ((malicious-path "../../../../etc/passwd")
+                              (threw nil))
+                          (condition-case err
+                              (macher-agent--resolve-safe-path malicious-path sandbox-root)
+                            (error (setq threw t)))
+                          (expect threw :to-be t)))
 
                     (it "prevents tilde (~) home directory escapes"
                         ;; Emacs `expand-file-name` natively treats `~/` as an absolute escape
-                        (let* ((malicious-path "~/.ssh/id_rsa")
-                               (resolved (macher-agent--resolve-safe-path malicious-path sandbox-root)))
-                          
-                          (expect resolved :to-equal "/tmp/macher-sandbox/~/.ssh/id_rsa")
-                          (expect (file-in-directory-p resolved sandbox-root) :to-be t))))
+                        (let ((malicious-path "~/.ssh/id_rsa")
+                              (threw nil))
+                          (condition-case err
+                              (macher-agent--resolve-safe-path malicious-path sandbox-root)
+                            (error (setq threw t)))
+                          (expect threw :to-be t))))
 
           (describe "6. Agent Orchestration & Sub-agent Delegation"
                     
@@ -181,5 +185,5 @@
                                (callback (lambda (res) (setq callback-result res))))
                           (macher-agent-spawn-task task callback)
                           (expect (plist-get callback-result :status) :to-be 'error)
-                          (expect (plist-get callback-result :buffer_name) :to-equal "*macher-agent: non_existent_agent*")
+                          (expect (plist-get callback-result :buffer_name) :to-equal "non_existent_agent")
                           (expect (plist-get callback-result :error) :to-match "ERROR: Sub-agent buffer 'non_existent_agent' not found.")))))

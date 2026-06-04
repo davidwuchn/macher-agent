@@ -27,4 +27,4 @@
                                                  (content (if contents (cdr (cdr contents))
                                                             (with-current-buffer (get-buffer actual-name)
                                                               (buffer-substring-no-properties (point-min) (point-max))))))
-                                            +                      (cons :lisp-result (macher--read-string content parsed-offset parsed-limit show_line_numbers)))))))
+                                            (make-macher-agent-tool-response :type 'lisp-result :payload (macher--read-string content parsed-offset parsed-limit show_line_numbers)))))))

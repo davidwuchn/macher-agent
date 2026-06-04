@@ -11,5 +11,5 @@
                         (when (memq classification '(buffer external))
                           (push buf-name active-buffers)))))
                   (if active-buffers
-                      (cons :lisp-result (mapconcat #'identity (nreverse active-buffers) "\n"))
-                    (cons :lisp-result "No buffers are currently in your scope.")))))
+                      (make-macher-agent-tool-response :type 'lisp-result :payload (mapconcat #'identity (nreverse active-buffers) "\n"))
+                    (make-macher-agent-tool-response :type 'lisp-result :payload "No buffers are currently in your scope.")))))

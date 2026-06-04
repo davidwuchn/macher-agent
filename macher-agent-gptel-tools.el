@@ -14,6 +14,10 @@
 (declare-function macher-agent--ensure-access "macher-agent-vfs-client")
 (declare-function macher-agent-context-classify-entry "macher-agent-vfs-client")
 
+(cl-defstruct macher-agent-tool-response
+  type
+  payload)
+
 (defvar macher-agent-allowed-tools nil
   "List of custom tool names that should receive the macher-context.")
 
@@ -144,26 +148,34 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
                             (let* ((success-data (if succ-eval (funcall succ-eval raw-result) raw-result))
                                    (final-data (if filter-eval (funcall filter-eval success-data) success-data)))
                               (funcall wrap-cb (list :status 'success :data final-data))))))
+                    (unless (macher-agent-tool-response-p action)
+                      (error "Tool contract violation: command must return a macher-agent-tool-response struct"))
                     (macher-agent--execute-action action context on-success wrap-cb))
                 (error
                  (funcall wrap-cb (list :status 'error :error (error-message-string err))))))))))))
 
 (defun macher-agent--execute-action (action context on-success on-error)
   "Routes the declarative ACTION to the appropriate asynchronous backend."
-  (pcase action
-    ((pred stringp)
-     (macher-agent--run-in-persistent-sandbox context action on-success on-error))
-    (`(:delegate . ,tasks)
-     (macher-agent-execute-parallel tasks on-success))
-    (`(:nohup . ,cmd)
-     (macher-agent--run-async-cmd "detached" cmd default-directory (lambda (_ _)))
-     (funcall on-success "SUCCESS: Process started."))
-    (`(:lisp-result . ,val)
-     (funcall on-success val))
-    ;; Gracefully trap malformed tools returning closures due to parenthesis nesting errors
-    ((pred functionp)
-     (funcall on-error (list :status 'error :error "Tool evaluation failed. The command block returned a closure instead of a valid action payload. Check the tool definition for parenthesis nesting errors.")))
-    (_ (funcall on-success action))))
+  (if (not (macher-agent-tool-response-p action))
+      (pcase action
+        ((pred functionp)
+         (funcall on-error (list :status 'error :error "Tool evaluation failed. The command block returned a closure instead of a valid action payload.")))
+        (_ (funcall on-error (list :status 'error :error "Invalid tool response format."))))
+    (let ((type (macher-agent-tool-response-type action))
+          (payload (macher-agent-tool-response-payload action)))
+      (pcase type
+        ('process
+         (if (stringp payload)
+             (macher-agent--run-in-persistent-sandbox context payload on-success on-error)
+           (funcall on-error (list :status 'error :error "Process payload must be a string."))))
+        ('delegate
+         (macher-agent-execute-parallel payload on-success))
+        ('nohup
+         (macher-agent--run-async-cmd "detached" payload default-directory (lambda (_ _)))
+         (funcall on-success "SUCCESS: Process started."))
+        ('lisp-result
+         (funcall on-success payload))
+        (_ (funcall on-success payload))))))
 
 ;; --- Sandbox Tools ---
 
@@ -232,21 +244,6 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
         msg
       (format "ERROR: %s" msg))))
 
-(defun macher-agent--prepare-subagent-instructions (buf instructions &optional preset)
-  "Insert INSTRUCTIONS into BUF and strictly bind its preset system message."
-  (with-current-buffer buf
-    ;; 1. Erase the buffer so it ONLY contains the assigned task prompt
-    (erase-buffer)
-    
-    ;; 2. Bind the preset so the JIT engine injects the correct system message
-    (when preset
-      (let ((clean-preset (replace-regexp-in-string "^@" "" preset)))
-        (setq-local macher-agent--active-skill-sym (intern clean-preset))))
-    
-    ;; 3. Insert the explicit LLM instructions
-    (unless (string-empty-p instructions)
-      (insert (substring-no-properties instructions)))))
-
 (defvar-local macher-agent--final-result nil
   "Stores the clean, synthesised final answer from the sub-agent.")
 
@@ -301,7 +298,9 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
                                             (when context
                                               (macher-agent--update-context-file context actual-name content)
                                               (macher-agent--auto-sync-context context))
-                                            (cons :lisp-result (format "SUCCESS: Buffer '%s' has been directly overwritten and synchronised. Awaiting user save." actual-name)))))))
+                                            (make-macher-agent-tool-response
+                                             :type 'lisp-result
+                                             :payload (format "SUCCESS: Buffer '%s' has been directly overwritten and synchronised. Awaiting user save." actual-name)))))))
 
 (with-eval-after-load 'gptel-transient
   (ignore-errors

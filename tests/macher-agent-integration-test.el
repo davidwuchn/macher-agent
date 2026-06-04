@@ -18,17 +18,17 @@
                        ;; simulate the LLM successfully using the submit_task_result tool
                        (cond
                         ((string-match-p "agent-france" name)
-                         (macher-agent-submit-task-result "The capital of France is Paris.")
-                         ;; THE FIX: Pass integer buffer positions instead of strings to satisfy gptel's native hooks
-                         (run-hook-with-args 'gptel-post-response-functions (point-min) (point-max)))
+                         (macher-agent-submit-task-result "The capital of France is Paris."))
                         
                         ((string-match-p "agent-spain" name)
-                         (macher-agent-submit-task-result "The capital of Spain is Madrid.")
-                         (run-hook-with-args 'gptel-post-response-functions (point-min) (point-max)))))))
+                         (macher-agent-submit-task-result "The capital of Spain is Madrid."))))))
 
            ;; 2. Mock timers: Force deferred buffer cleanups to happen synchronously
            (spy-on 'run-at-time :and-call-fake
                    (lambda (_time _repeat fn &rest args)
+                     (apply fn args)))
+           (spy-on 'run-with-idle-timer :and-call-fake
+                   (lambda (_secs _repeat fn &rest args)
                      (apply fn args))))
 
           (it "executes the full workflow: spawn -> delegate -> await responses -> return combined result"
@@ -56,18 +56,18 @@
                         (funcall spawn-fn "agent-france")
                         (funcall spawn-fn "agent-spain")))
 
-                    (unless (buffer-live-p (get-buffer "*macher-agent: agent-france*"))
+                    (unless (buffer-live-p (get-buffer "agent-france"))
                       (error "SPAWN FAILED! final-result=%S spawn-tool=%S" final-result spawn-tool))
                     
-                    (expect (buffer-live-p (get-buffer "*macher-agent: agent-france*")) :to-be t)
-                    (expect (buffer-live-p (get-buffer "*macher-agent: agent-spain*")) :to-be t)
+                    (expect (buffer-live-p (get-buffer "agent-france")) :to-be t)
+                    (expect (buffer-live-p (get-buffer "agent-spain")) :to-be t)
 
                     ;; --- C. Delegate Tasks via Tool ---
                     (let ((tasks (vector
-                                  (list :buffer_name "*macher-agent: agent-france*"
+                                  (list :buffer_name "agent-france"
                                         :instructions "What is the capital of France?"
                                         :preset "@macher-agent-worker")
-                                  (list :buffer_name "*macher-agent: agent-spain*"
+                                  (list :buffer_name "agent-spain"
                                         :instructions "What is the capital of Spain?"
                                         :preset "@macher-agent-worker")))
                           (delegate-fn (gptel-tool-function delegate-tool)))
@@ -84,12 +84,13 @@
                     (expect final-result :to-be-truthy)
                     
                     ;; 2. It should contain the beautifully formatted outputs from BOTH sub-agents
-                    (expect final-result :to-match "=== Response from \\*macher-agent: agent-france\\* ===")
+                    (expect final-result :to-match "=== Response from agent-france ===")
                     (expect final-result :to-match "The capital of France is Paris.")
                     
-                    (expect final-result :to-match "=== Response from \\*macher-agent: agent-spain\\* ===")
+                    (expect final-result :to-match "=== Response from agent-spain ===")
                     (expect final-result :to-match "The capital of Spain is Madrid.")
                     
                     ;; 3. The orchestrator hook should have cleanly destroyed the worker buffers
-                    (expect (buffer-live-p (get-buffer "*macher-agent: agent-france*")) :to-be nil)
-                    (expect (buffer-live-p (get-buffer "*macher-agent: agent-spain*")) :to-be nil)))))))
+                    (macher-agent--reap-buffers-on-idle)
+                    (expect (buffer-live-p (get-buffer "agent-france")) :to-be nil)
+                    (expect (buffer-live-p (get-buffer "agent-spain")) :to-be nil)))))))

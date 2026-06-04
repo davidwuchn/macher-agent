@@ -9,7 +9,7 @@
                                         (let ((tasks (cl-loop for buf in (append buffer_names nil)
                                                               collect (list :buffer_name buf :instructions "" :preset nil))))
                                           (if (and blocking (not (eq blocking :json-false)))
-                                              (cons :delegate (vconcat tasks))
+                                              (make-macher-agent-tool-response :type 'delegate :payload (vconcat tasks))
                                             (progn
                                               (cl-loop for buf in (append buffer_names nil) do
                                                        (let* ((actual-name (macher-agent--resolve-buffer-name buf))
@@ -17,7 +17,7 @@
                                                          (when (buffer-live-p target-buffer)
                                                            (with-current-buffer target-buffer
                                                              (gptel-send)))))
-                                              (cons :lisp-result (format "Triggered %d sub-agents asynchronously." (length buffer_names))))))))
+                                              (make-macher-agent-tool-response :type 'lisp-result :payload (format "Triggered %d sub-agents asynchronously." (length buffer_names))))))))
                         :success-fn (lambda (results)
                                       (if (stringp results)
                                           results

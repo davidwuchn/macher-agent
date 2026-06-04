@@ -1,0 +1,1 @@
+(setq mock-tool-load 'loaded-tool-object)

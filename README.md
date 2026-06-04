@@ -72,7 +72,7 @@ The agent interacts with a `macher` context rather than live files. This environ
 
 `macher-agent` provides a declarative DSL for defining tools: `macher-agent-make-tool`. This macro handles `condition-case` errors automatically, and bridges directly into the `macher` context middleware.
 
-Here is an example demonstrating a tool that executes a shell command safely across the workspace. By simply returning a string from your `:command-fn`, the execution router implicitly treats it as a shell command and executes it inside a temporary virtual sandbox.
+Here is an example demonstrating a tool that executes a shell command safely across the workspace. Your `:command-fn` must return a `macher-agent-tool-response` struct. For shell commands, set the type to `'process`. For synchronous Emacs Lisp results, set the type to `'lisp-result`.
 
 ```elisp
 (macher-agent-make-tool macher-agent-cargo-check-tool
@@ -80,7 +80,7 @@ Here is an example demonstrating a tool that executes a shell command safely acr
   :category "rust"
   :args nil
   :command-fn (lambda (_payload)
-                "rtk cargo check </dev/null 2>&1")
+                (make-macher-agent-tool-response :type 'process :payload "rtk cargo check </dev/null 2>&1"))
   :success-fn (lambda (output)
                 (if (string-match-p "error\\[" output)
                     output
