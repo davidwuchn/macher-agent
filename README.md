@@ -34,7 +34,7 @@ graph TD
 
     gptel --> |gated| world
     macher --> files
-    macher-context --> |ediff| world
+    macher-context --> |diff-mode/ediff/vdiff| world
     macher-agent --> buffer
     macher-agent --> media
     macher-context -->|macher-agent<br /> continuations + tools| macher-context 
@@ -56,9 +56,18 @@ The agent interacts with a `macher` context rather than live files. This environ
 ```elisp
 (use-package macher-agent
   :after (gptel macher)
+  :bind (("C-c m" . macher-agent-inject-thought))
+  :preface
+  ;; Define our custom ediff handler before the package loads
+  (defun my-macher-agent-ediff-display (buffer)
+    "Automatically trigger ediff for agent results instead of diff-mode."
+    (require 'ediff)
+    (pop-to-buffer buffer)
+    (call-interactively 'ediff-patch-buffer))
   :custom
   ;; You can place custom SKILL.md and .el scripts in this directory:
   (macher-agent-global-skills-directory (expand-file-name "skills" user-emacs-directory))
+  (macher-agent-patch-display-function #'my-macher-agent-ediff-display)
   :config
   ;; Initialise skills to populate gptel-directives and macher-agent-tools-registry
   (macher-agent-initialize-skills))
@@ -165,6 +174,7 @@ Alternatively, you can create sub-agents manually using interactive commands. Yo
 | `M-x macher-agent-add-subagent`          | Prompts for a name and directory, creating an isolated sub-agent buffer. |
 | `M-x macher-agent-add-buffer-to-scope`   | Adds an existing Emacs buffer to the agent's context.                    |
 | `M-x macher-agent-clear-context`         | Clears the virtual memory and pending edits.                             |
+| `M-x macher-agent-branch-chat`           | Branch chat in new buffer.                                               |
 | `M-x macher-agent-apply-patch`           | Evaluates and applies the patch buffer.                                  |
 | `M-x macher-agent-insert-patch`          | Inserts the workspace patch into the chat buffer.                        |
 | `M-x macher-agent-apply-virtual-buffers` | Applies the virtual edits directly.                                      |

@@ -6,7 +6,22 @@
 (declare-function macher-agent-workspace-project-root "macher-agent-vfs-client")
 (declare-function macher-agent-workspace-p "macher-agent-vfs-client")
 (declare-function macher-agent--prepare-patch-buffer "macher-agent-vfs-client")
+(declare-function macher-agent--build-virtual-patch "macher-agent-vfs-client")
 (declare-function macher--generate-patch-diff "macher")
+
+(defcustom macher-agent-patch-display-function #'macher-agent-default-patch-display
+  "Function used to display the generated patch buffer.
+It is called with one argument: the target patch buffer."
+  :type 'function
+  :group 'macher-agent)
+
+(defun macher-agent-default-patch-display (buffer)
+  "Default function to display the agent's patch BUFFER using diff-mode."
+  (with-current-buffer buffer
+    (unless (derived-mode-p 'diff-mode)
+      (diff-mode))
+    (goto-char (point-min)))
+  (display-buffer buffer))
 
 (defun macher-agent--get-workspace-root (ws)
   "Safely extract the root directory from any workspace representation."
@@ -46,7 +61,7 @@
 (advice-add 'macher--workspace-hash :around #'macher-agent--fix-workspace-hash)
 
 (defun macher-agent--build-patch (context &optional _fsm)
-  "Build the standard patch deterministically, bypassing LLM text."
+  "Build the standard patch deterministically, combining physical files and VFS buffers."
   (let* ((raw-workspace (if (fboundp 'macher-agent--get-context-workspace)
                             (macher-agent--get-context-workspace context)
                           (macher-context-workspace context)))
@@ -71,13 +86,25 @@
           (when (and (recordp context) (eq (type-of context) 'macher-context))
             (setf (macher-context-workspace context) valid-workspace))
 
-          ;; 1. Generate native unified diff
-          (let ((diff-text (when (fboundp 'macher--generate-patch-diff)
-                             (macher--generate-patch-diff context))))
-            (when (and (stringp diff-text) (not (string-empty-p diff-text)))
+          ;; 1. Generate core physical file diff
+          (let* ((file-diff (when (fboundp 'macher--generate-patch-diff)
+                              (macher--generate-patch-diff context)))
+                 ;; 2. Generate live VFS buffer diff
+                 (buffer-diff (when (fboundp 'macher-agent--build-virtual-patch)
+                                (macher-agent--build-virtual-patch context)))
+                 ;; 3. Combine the split patches safely
+                 (diff-text (concat 
+                             (if (and file-diff (not (string-empty-p file-diff))) file-diff "")
+                             (if (and file-diff buffer-diff 
+                                      (not (string-empty-p file-diff)) 
+                                      (not (string-empty-p buffer-diff))) 
+                                 "\n" "")
+                             (if (and buffer-diff (not (string-empty-p buffer-diff))) buffer-diff ""))))
+            
+            (when (not (string-empty-p diff-text))
               (insert diff-text)))
 
-          ;; 2. RESTORE METADATA: Generate Patch ID and Workspace details
+          ;; 4. RESTORE METADATA: Generate Patch ID and Workspace details
           (let* ((patch-id (let ((res ""))
                              (dotimes (_ 8 res)
                                (let ((idx (random 36)))
@@ -105,13 +132,10 @@
               (insert (format "# PROMPT for patch ID %s:\n" patch-id))
               (insert "# -----------------------------\n")
               (insert (replace-regexp-in-string "^" "# " prompt))
-              (insert "\n")))
-          
-          (unless (derived-mode-p 'diff-mode)
-            (diff-mode))
-          (goto-char (point-min)))
+              (insert "\n"))))
         
-        (display-buffer target-buffer)
+        ;; Delegate the UI rendering to the user's preferred function
+        (funcall macher-agent-patch-display-function target-buffer)
         target-buffer))))
 
 ;; Ensure our deterministic override takes precedence

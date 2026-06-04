@@ -30,6 +30,9 @@
 (defvar macher-agent-global-skills-alist nil
   "Global registry for all loaded macher-agent skills metadata (presets/tools).")
 
+(defvar-local macher-agent-parent-buffer nil
+  "Stores the name of the buffer this chat branched from.")
+
 (defvar-local macher-agent--active-skill-sym nil
   "The active skill symbol for this buffer. Acts as the anchor for FSM composition.")
 
@@ -421,5 +424,35 @@
      (or (and proj (if (fboundp 'project-root) (project-root proj) (cdr proj)))
          (and (fboundp 'vc-root-dir) (let ((default-directory d)) (vc-root-dir)))
          d))))
+
+(defun macher-agent-branch-chat (new-name)
+  "Clone the current chat, establishing lineage and inheriting all agent state."
+  (interactive "sNew branch name: ")
+  (let* ((parent-buf (current-buffer))
+         (parent-name (buffer-name parent-buf))
+         (parent-mode major-mode)
+         (content (buffer-string))
+         (active-skill macher-agent--active-skill-sym)
+         (active-backend gptel-backend)
+         (active-model gptel-model)
+         (active-sys gptel--system-message))
+    
+    (with-current-buffer (generate-new-buffer new-name)
+      (funcall parent-mode)
+      (gptel-mode)
+      (insert content)
+
+      ;; meta data to allow users to render buffer trees
+      (setq-local macher-agent-parent-buffer parent-name)
+      
+      (when active-skill (setq-local macher-agent--active-skill-sym active-skill))
+      (when active-backend (setq-local gptel-backend active-backend))
+      (when active-model (setq-local gptel-model active-model))
+      (when active-sys (setq-local gptel--system-message active-sys))
+      
+      (macher-agent--compose-active-skills)
+      
+      (switch-to-buffer (current-buffer)))))
+
 
 (provide 'macher-agent-api)
