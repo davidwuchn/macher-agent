@@ -5,13 +5,14 @@
 
 (declare-function macher-agent-workspace-project-root "macher-agent-vfs-client")
 (declare-function macher-agent-workspace-p "macher-agent-vfs-client")
+(declare-function macher-agent-current-context "macher-agent-vfs-client")
+(declare-function macher-agent--get-context-contents "macher-agent-vfs-client")
 (declare-function macher-agent--prepare-patch-buffer "macher-agent-vfs-client")
-(declare-function macher-agent--build-virtual-patch "macher-agent-vfs-client")
-(declare-function macher--generate-patch-diff "macher")
+
+;; --- UI Configuration ---
 
 (defcustom macher-agent-patch-display-function #'macher-agent-default-patch-display
-  "Function used to display the generated patch buffer.
-It is called with one argument: the target patch buffer."
+  "Function used to display the generated patch buffer."
   :type 'function
   :group 'macher-agent)
 
@@ -23,15 +24,7 @@ It is called with one argument: the target patch buffer."
     (goto-char (point-min)))
   (display-buffer buffer))
 
-(defun macher-agent--sanitize-diff-headers (diff-text)
-  "Strip standard a/ and b/ prefixes from unified diff headers to prevent nesting bugs.
-Handles standard paths and git-quoted paths for filenames with spaces."
-  (if (not (stringp diff-text))
-      diff-text
-    (let ((s diff-text))
-      (setq s (replace-regexp-in-string "^--- \\(\"?\\)a/" "--- \\1" s))
-      (setq s (replace-regexp-in-string "^\\+\\+\\+ \\(\"?\\)b/" "+++ \\1" s))
-      s)))
+;; --- Workspace Helpers ---
 
 (defun macher-agent--get-workspace-root (ws)
   "Safely extract the root directory from any workspace representation."
@@ -55,48 +48,99 @@ Handles standard paths and git-quoted paths for filenames with spaces."
     (macher--workspace-name ws))
    (t "unknown")))
 
+;; --- The "Nuclear" GNU Diff Generators ---
+
+(defun macher-agent--diff-texts (rel-path old-text new-text)
+  "Compare two strings and return a perfect GNU unified diff hunk using Unix diff."
+  (let ((t1 (make-temp-file "macher-old-"))
+        (t2 (make-temp-file "macher-new-"))
+        (diff-str ""))
+    (with-temp-file t1 (insert (or old-text "")))
+    (with-temp-file t2 (insert (or new-text "")))
+    (let* ((label-old (if old-text rel-path "/dev/null"))
+           (label-new rel-path)
+           ;; Manually labeling guarantees no b/ folder bugs!
+           (cmd (format "diff -u --label %s --label %s %s %s"
+                        (shell-quote-argument label-old)
+                        (shell-quote-argument label-new)
+                        (shell-quote-argument t1)
+                        (shell-quote-argument t2))))
+      (setq diff-str (shell-command-to-string cmd)))
+    (delete-file t1)
+    (delete-file t2)
+    diff-str))
+
+(defun macher-agent--generate-gnu-diff (context &rest _args)
+  "Completely override the core macher generator to prevent recursive stack crashes."
+  (let* ((contents (macher-agent--get-context-contents context))
+         (raw-ws (if (fboundp 'macher-agent--get-context-workspace)
+                     (macher-agent--get-context-workspace context)
+                   (macher-context-workspace context)))
+         (valid-ws (cond ((and (consp raw-ws) (symbolp (car raw-ws))) raw-ws)
+                         ((and (recordp raw-ws) (eq (type-of raw-ws) 'macher-agent-workspace))
+                          (cons 'project (macher-agent-workspace-project-root raw-ws)))
+                         (t nil)))
+         (root-dir (macher-agent--get-workspace-root valid-ws))
+         (diff-output ""))
+    (dolist (entry contents)
+      (let* ((rel-path (car entry))
+             ;; Safely unpack the cons cell if optimistic concurrency data is present
+             (file-data (cdr entry))
+             (new-text (if (consp file-data) (cdr file-data) file-data))
+             (abs-path (expand-file-name rel-path (or root-dir default-directory)))
+             ;; Treat missing files as empty strings for diffing additions
+             (old-text (if (file-exists-p abs-path)
+                           (with-temp-buffer
+                             (insert-file-contents abs-path)
+                             (buffer-substring-no-properties (point-min) (point-max)))
+                         "")))
+        (when (and (stringp new-text) (not (string= old-text new-text)))
+          (let ((hunk (macher-agent--diff-texts rel-path old-text new-text)))
+            (unless (string-empty-p hunk)
+              (setq diff-output (concat diff-output hunk "\n")))))))
+    diff-output))
+
+(defun macher-agent--generate-virtual-gnu-diff ()
+  "Generate a GNU diff for live buffers stored in the VFS."
+  (let ((diff-output "")
+        (vfs-ctx (ignore-errors (macher-agent-current-context))))
+    (when vfs-ctx
+      (dolist (entry (macher-agent--get-context-contents vfs-ctx))
+        (let* ((buf-name (car entry))
+               ;; Safely unpack the cons cell
+               (file-data (cdr entry))
+               (new-text (if (consp file-data) (cdr file-data) file-data))
+               ;; Treat missing buffers as empty strings for diffing additions
+               (old-text (if (get-buffer buf-name)
+                             (with-current-buffer buf-name
+                               (buffer-substring-no-properties (point-min) (point-max)))
+                           "")))
+          (when (and (stringp new-text) (not (string= old-text new-text)))
+            (setq diff-output (concat diff-output
+                                      (macher-agent--diff-texts buf-name old-text new-text)
+                                      "\n"))))))
+    diff-output))
+
+;; --- Core Crash Fixes ---
+
+(defun macher-agent--safe-workspace-hash (workspace &rest _args)
+  "Nuke the core recursive hashing function which causes assq-delete-all depth crashes."
+  (let ((path (cond
+               ((and (recordp workspace) (eq (type-of workspace) 'macher-agent-workspace))
+                (macher-agent-workspace-project-root workspace))
+               ((and (consp workspace) (eq (car workspace) 'agent) (recordp (cdr workspace)))
+                (macher-agent-workspace-project-root (cdr workspace)))
+               ((and (consp workspace) (eq (car workspace) 'project))
+                (cdr workspace))
+               (t (format "%s" workspace)))))
+    (md5 (or path "unknown-workspace"))))
+
+(advice-add 'macher--workspace-hash :override #'macher-agent--safe-workspace-hash)
+
+;; --- Safe UI Builder ---
+
 (defalias 'macher-agent--get-buffer 'macher--get-buffer)
 (defalias 'macher-agent--patch-buffer-setup 'macher--patch-buffer-setup)
-
-;; --- CORE CRASH FIXES ---
-
-(defun macher-agent--fix-workspace-hash (orig-fn workspace &rest args)
-  "Prevent `macher--workspace-hash` from crashing on the agent workspace struct."
-  (if (and (consp workspace)
-           (eq (car workspace) 'agent)
-           (recordp (cdr workspace))
-           (eq (type-of (cdr workspace)) 'macher-agent-workspace))
-      (apply orig-fn (cons 'project (macher-agent-workspace-project-root (cdr workspace))) args)
-    (apply orig-fn workspace args)))
-
-(advice-add 'macher--workspace-hash :around #'macher-agent--fix-workspace-hash)
-
-(defun macher-agent--fix-generate-patch-diff (orig-fn context &rest args)
-  "Intercept `macher--generate-patch-diff` to ensure it always receives a core-compatible list.
-This prevents async process sentinels from crashing when parsing LLM outputs in the background."
-  (if (and (recordp context) (eq (type-of context) 'macher-context))
-      (let* ((orig-ws (macher-context-workspace context))
-             (core-ws (cond
-                       ;; If it's the raw struct
-                       ((and (recordp orig-ws) (eq (type-of orig-ws) 'macher-agent-workspace))
-                        (cons 'project (macher-agent-workspace-project-root orig-ws)))
-                       ;; If it's an ('agent . struct) cons cell
-                       ((and (consp orig-ws) (eq (car orig-ws) 'agent) (recordp (cdr orig-ws)))
-                        (cons 'project (macher-agent-workspace-project-root (cdr orig-ws))))
-                       ;; Otherwise leave it alone
-                       (t orig-ws))))
-        (unwind-protect
-            (progn
-              ;; Temporarily downgrade to a safe list for the core engine
-              (setf (macher-context-workspace context) core-ws)
-              (apply orig-fn context args))
-          ;; Always restore the struct so downstream agent logic functions normally
-          (setf (macher-context-workspace context) orig-ws)))
-    (apply orig-fn context args)))
-
-(advice-add 'macher--generate-patch-diff :around #'macher-agent--fix-generate-patch-diff)
-
-;; --- PATCH BUILDER ---
 
 (defun macher-agent--build-patch (context &optional _fsm)
   "Build the standard patch deterministically, splitting file and virtual diffs."
@@ -117,21 +161,12 @@ This prevents async process sentinels from crashing when parsing LLM outputs in 
                      (dotimes (_ 8 res)
                        (let ((idx (random 36)))
                          (setq res (concat res (substring "abcdefghijklmnopqrstuvwxyz0123456789" idx (1+ idx))))))))
-         (root-dir (if (fboundp 'macher--workspace-root)
-                       (ignore-errors (macher--workspace-root valid-workspace))
-                     default-directory))
-         (proj-name (if (fboundp 'macher--workspace-name)
-                        (ignore-errors (macher--workspace-name valid-workspace))
-                      (file-name-nondirectory (directory-file-name (or root-dir "")))))
+         (proj-name (macher-agent--get-workspace-name valid-workspace))
          (prompt (when (recordp context) (ignore-errors (macher-context-prompt context))))
          
-         ;; Fetch and sanitise diffs (the new advice-add ensures the core call doesn't crash)
-         (file-diff (macher-agent--sanitize-diff-headers 
-                     (when (fboundp 'macher--generate-patch-diff)
-                       (macher--generate-patch-diff context))))
-         (virtual-diff (macher-agent--sanitize-diff-headers 
-                        (when (fboundp 'macher-agent--build-virtual-patch)
-                          (macher-agent--build-virtual-patch context)))))
+         ;; Fetch our flat Unix diffs
+         (file-diff (macher-agent--generate-gnu-diff context))
+         (virtual-diff (macher-agent--generate-virtual-gnu-diff)))
 
     ;; 1. HANDLE VIRTUAL DIFF IN A DEDICATED BUFFER
     (when (and virtual-diff (not (string-empty-p virtual-diff)))
@@ -163,6 +198,9 @@ This prevents async process sentinels from crashing when parsing LLM outputs in 
         (let ((inhibit-read-only t))
           (erase-buffer)
           
+          (when (and (recordp context) (eq (type-of context) 'macher-context))
+            (setf (macher-context-workspace context) valid-workspace))
+
           (insert (format "# Patch ID: %s (PHYSICAL FILES)\n# Project: %s\n" patch-id (or proj-name "Unknown")))
           
           (if (and file-diff (not (string-empty-p file-diff)))
@@ -187,6 +225,8 @@ This prevents async process sentinels from crashing when parsing LLM outputs in 
 
 (cl-defun macher-agent--make-vfs-context (&key workspace contents)
   (macher--make-context :workspace workspace :contents contents))
+
+;; --- Struct Accessors ---
 
 (defun macher-agent--get-context-workspace (ctx)
   (let ((ws (and ctx (fboundp 'macher-context-workspace) (macher-context-workspace ctx))))
