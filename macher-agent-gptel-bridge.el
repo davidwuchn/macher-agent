@@ -70,29 +70,21 @@
           (gptel-send))))))
 
 (defun macher-agent--setup-tools-advice (orig-fn &rest args)
-  "Make sure `macher--setup-tools` works gracefully without FSM injection."
+  "Sync the VFS and inject the sandbox session before tools are executed."
   (let* ((fsm (car args))
-         (info (when fsm
-                 (if (fboundp 'gptel-fsm-info)
-                     (funcall 'gptel-fsm-info fsm)
-                   (when (fboundp 'mock-gptel-fsm-info)
-                     (funcall 'mock-gptel-fsm-info fsm)))))
-         (ctx (when info (plist-get info :macher--context)))
-         (fallback-ctx (unless ctx (ignore-errors (macher-agent-current-context))))
-         (final-ctx (or ctx fallback-ctx)))
-    (when final-ctx
-      (macher-agent--auto-sync-context final-ctx)
+         (info (when fsm (gptel-fsm-info fsm)))
+         (ctx (bound-and-true-p macher-agent--persistent-context)))
+    (when ctx
+      (when (fboundp 'macher-agent--auto-sync-context)
+        (macher-agent--auto-sync-context ctx))
       (when fsm
         (let ((session (or (plist-get info :macher-agent-session)
-                           (let* ((ws (macher-agent--get-context-workspace final-ctx))
+                           (let* ((ws (macher-agent--get-context-workspace ctx))
                                   (proj-root (if ws (macher-agent--get-workspace-root ws) default-directory))
                                   (agent-ws (make-macher-agent-workspace :project-root proj-root)))
                              (make-macher-agent-session :id (buffer-name) :workspace agent-ws)))))
           (setf (gptel-fsm-info fsm) (plist-put info :macher-agent-session session))))))
   (apply orig-fn args))
-
-
-(setq macher-process-request-function #'macher-agent--process-request)
 
 ;; --- Media Injection Hook ---
 

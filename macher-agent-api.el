@@ -81,7 +81,8 @@
         (fsm (bound-and-true-p macher--fsm-latest)))
     (if (not (and context (macher-agent--get-context-dirty-p context)))
         (message "No pending edits to review.")
-      (macher-agent--process-request 'complete context fsm)
+      ;; Route directly to the upstream builder (which we intercept to split the UI)
+      (macher--build-patch context fsm)
       (message "SUCCESS: Patch review screen(s) generated for pending edits."))))
 
 ;; --- Parsers & Loaders ---

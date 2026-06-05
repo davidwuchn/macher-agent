@@ -77,26 +77,6 @@
                      (write-region content nil sandbox-target-path nil 'silent)))
                  vfs-buffers)))))
 
-(defun macher-agent--process-request (reason context fsm)
-  (when context
-    (let* ((normalized-ctx (if (listp context)
-                               (let ((ctx-struct (macher-agent--make-vfs-context :workspace nil :contents nil)))
-                                 (macher-agent--set-context-workspace ctx-struct (plist-get context :workspace))
-                                 (macher-agent--set-context-contents ctx-struct (plist-get context :contents))
-                                 (when (and (fboundp 'macher-context-prompt) (plist-member context :prompt))
-                                   (setf (macher-context-prompt ctx-struct) (plist-get context :prompt)))
-                                 ctx-struct)
-                             context))
-           (split (macher-agent--split-context normalized-ctx))
-           (file-ctx (car split))
-           (buf-ctx (cdr split)))
-      
-      (when (and file-ctx (macher-agent--get-context-contents file-ctx))
-        (macher-agent--build-patch file-ctx fsm))
-      
-      (when (and buf-ctx (macher-agent--get-context-contents buf-ctx))
-        (macher-agent--build-virtual-patch buf-ctx)))))
-
 (defun macher-agent-context-root (context)
   (if-let* ((workspace (when context (macher-agent--get-context-workspace context)))
             (root (macher-agent--get-workspace-root workspace)))
@@ -442,47 +422,6 @@ If REPLACE-ALL is nil, errors if OLD-TEXT occurs more than once."
               (insert (format "=== VFS ENTRY: %s ===\n" path))
               (insert new-content)
               (insert "\n=======================\n\n"))))))))
-
-(defun macher-agent--build-virtual-patch (buf-ctx)
-  (cl-letf (((symbol-function 'macher-patch-buffer)
-             (lambda (&optional workspace create)
-               (let* ((root-dir (if (and (consp workspace) (eq (car workspace) 'agent))
-                                    (macher-agent-workspace-project-root (cdr workspace))
-                                  workspace))
-                      (result (macher-agent--get-buffer "virtual-buffers-patch" root-dir create)))
-                 (when result
-                   (let ((target-buffer (car result))
-                         (created-p (cdr result)))
-                     (when created-p
-                       (with-current-buffer target-buffer
-                         (macher-agent--patch-buffer-setup)
-                         (run-hooks 'macher-patch-buffer-setup-hook)
-                         (macher-agent--inject-patch-metadata target-buffer buf-ctx)))
-                     target-buffer))))))
-    (macher-agent--build-patch buf-ctx nil)))
-
-(defun macher-agent--inject-patch-metadata (buffer context)
-  (with-current-buffer buffer
-    (let* ((workspace (when context (macher-agent--get-context-workspace context)))
-           (proj-name (if workspace (macher-agent--get-workspace-name workspace) "unknown"))
-           (initial-text (buffer-string))
-           (patch-id
-            (let ((chars "abcdefghijklmnopqrstuvwxyz0123456789") (result ""))
-              (dotimes (_ 8 result)
-                (let ((idx (random (length chars))))
-                  (setq result (concat result (substring chars idx (1+ idx))))))))
-           (prompt (macher-agent--get-context-prompt context))
-           (header (format "# Patch ID: %s\n# Project: %s\n" patch-id proj-name)))
-      (goto-char (point-min))
-      (insert header)
-      (when (string-empty-p initial-text)
-        (insert "\n# No changes were made to any files.\n"))
-      (goto-char (point-max))
-      (when prompt
-        (insert "# -----------------------------\n"
-                (format "# PROMPT for patch ID %s:\n" patch-id)
-                "# -----------------------------\n"
-                (replace-regexp-in-string "^" "# " prompt) "\n")))))
 
 (defun macher-agent-apply-patch ()
   (interactive)
