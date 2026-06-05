@@ -37,26 +37,38 @@
                        (when (= completed total)
                          (funcall final-callback results)))))))))
 
-(defvar macher-agent--garbage-queue nil
-  "List of buffers queued for background garbage collection.")
-
 (defun macher-agent--reap-buffers-on-idle ()
-  "Silently reap any sub-agent buffers queued in the garbage queue."
-  (while macher-agent--garbage-queue
-    (let ((buf (pop macher-agent--garbage-queue)))
-      (when (buffer-live-p buf)
-        (ignore-errors
-          (let ((kill-buffer-query-functions nil))
-            (kill-buffer buf)))))))
+  "An indestructible garbage collector that natively aborts hidden gptel networks."
+  (condition-case nil
+      (dolist (buf (buffer-list))
+        (when (buffer-live-p buf)
+          (with-current-buffer buf
+            (when (and (bound-and-true-p macher-agent--is-subagent)
+                       (bound-and-true-p macher-agent--ready-to-reap))
+              
+              (set-buffer-modified-p nil)
+              
+              (when (fboundp 'gptel-abort)
+                (gptel-abort))
+              
+              (dolist (proc (process-list))
+                (when (eq (process-buffer proc) buf)
+                  (set-process-query-on-exit-flag proc nil)
+                  (set-process-sentinel proc nil)
+                  (delete-process proc)))
+              
+              (let ((kill-buffer-query-functions nil)
+                    (kill-buffer-hook nil))
+                (kill-buffer buf))))))
+    ((error quit) nil)))
 
-;; Ensure the timer is running
+;; --- Resurrect and lock the timer ---
 (defvar macher-agent--reaper-timer nil)
-(when macher-agent--reaper-timer 
+(when (timerp macher-agent--reaper-timer)
   (cancel-timer macher-agent--reaper-timer))
+
 (setq macher-agent--reaper-timer 
       (run-with-idle-timer 0.5 t #'macher-agent--reap-buffers-on-idle))
-
-(run-with-idle-timer 0.5 t #'macher-agent--reap-buffers-on-idle)
 
 (defun macher-agent--apply-preset (preset)
   "Apply the PRESET directive securely, flawlessly merging buffer and preset tools."
@@ -74,6 +86,9 @@
       (make-local-variable 'gptel-tools)
       (setq gptel-tools (macher-agent-deduplicate-tools (append gptel-tools tools))))))
 
+(put 'macher-agent--is-subagent 'permanent-local t)
+(put 'macher-agent--ready-to-reap 'permanent-local t)
+
 (defun macher-agent-spawn-task (task callback)
   "Spawn a task inside a target subagent."
   (let* ((buf-name (if (listp task) (plist-get task :buffer_name) task))
@@ -85,6 +100,9 @@
       (macher-agent--prepare-subagent-instructions buf instructions preset)
       (with-current-buffer buf
         (macher-agent--show-ui buf)
+        
+        ;; Guarantee this buffer is marked as a subagent locally
+        (setq-local macher-agent--is-subagent t)
         (setq-local macher-agent--parent-callback callback)
         
         (let* ((profile (macher-agent-resolve-skill-profile preset))
@@ -98,11 +116,17 @@
           (macher-agent-gptel-transmit
            task-ctx
            (list :on-success (lambda (res)
-                               (funcall callback (list :status 'success :data res :buffer_name buf-name))
-                               (push buf macher-agent--garbage-queue))
+                               ;; MARK FOR DEATH FIRST
+                               (when (buffer-live-p buf)
+                                 (with-current-buffer buf (setq-local macher-agent--ready-to-reap t)))
+                               ;; THEN return control to the parent
+                               (funcall callback (list :status 'success :data res :buffer_name buf-name)))
                  :on-error (lambda (err)
-                             (funcall callback (list :status 'error :error (format "ERROR: %s" err) :buffer_name buf-name))
-                             (push buf macher-agent--garbage-queue)))))))))
+                             ;; MARK FOR DEATH FIRST
+                             (when (buffer-live-p buf)
+                               (with-current-buffer buf (setq-local macher-agent--ready-to-reap t)))
+                             ;; THEN return control to the parent
+                             (funcall callback (list :status 'error :error (format "ERROR: %s" err) :buffer_name buf-name))))))))))
 
 (defvar macher-agent-subagent-setup-hook nil)
 

@@ -124,24 +124,28 @@
                                                                           ("*scratch*" . ("old" . "new")))))
                                (fsm 'mock-fsm))
                           
+                          (spy-on 'macher-agent-current-context :and-return-value context)
                           (spy-on 'gptel-fsm-info :and-return-value (list :macher-agent-session (make-macher-agent-session :workspace workspace)))
-                          
                           (setf (macher-context-dirty-p context) t)
                           
-                          (let ((built-vfs-diff nil)
-                                (built-virtual-diff nil))
+                          ;; Spy on upstream Emacs UI commands to prevent actual buffers from rendering
+                          (spy-on 'rename-buffer)
+                          (spy-on 'macher--get-buffer :and-return-value (list (get-buffer-create "*patch*")))
+                          
+                          (let ((orig-called-with nil))
+                            ;; Execute our bridge interceptor, mocking the core function to capture the splits
+                            (macher-agent--override-build-patch 
+                             (lambda (ctx _fsm) (push (macher-context-contents ctx) orig-called-with))
+                             context fsm)
                             
-                            (spy-on 'macher-agent--build-patch :and-call-fake
-                                    (lambda (ctx fsm) (setq built-vfs-diff t)))
-                            (spy-on 'macher-agent--build-virtual-patch :and-call-fake
-                                    (lambda (ctx) (setq built-virtual-diff t)))
+                            ;; Assert that the core patch builder was called twice
+                            (expect (length orig-called-with) :to-equal 2)
                             
-                            ;; The rewritten process request function
-                            (macher-agent--process-request 'complete context fsm)
+                            ;; The physical pass (executed second, so it sits at the head of the list)
+                            (expect (car (car orig-called-with)) :to-equal '("/mock/proj/disk-file.el" "old" . "new"))
                             
-                            ;; Both diff streams should be processed
-                            (expect built-vfs-diff :to-be t)
-                            (expect built-virtual-diff :to-be t)))))
+                            ;; The virtual pass (executed first, so it sits in the second slot)
+                            (expect (car (cadr orig-called-with)) :to-equal '("*scratch*" "old" . "new"))))))
 
           (describe "5. Sandbox Security & Path Traversal (Jailbreaks)"
                     

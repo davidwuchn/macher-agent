@@ -48,26 +48,44 @@
   (apply orig-fun args))
 
 (defun macher-agent-gptel-transmit (task-context callbacks)
-  "Facade to transmit network request using a strictly explicit TASK-CONTEXT."
+  "Facade to transmit network request, attaching async-safe local hooks."
   (let* ((target-buffer (macher-agent-task-context-target-buffer task-context))
          (sys-msg (macher-agent-task-context-system-message task-context))
          (success-cb (plist-get callbacks :on-success))
          (error-cb (plist-get callbacks :on-error)))
+    
     (with-current-buffer target-buffer
-      (let* ((transform-hook
+      ;; Safely set the system message locally
+      (setq-local gptel--system-message sys-msg)
+      
+      ;; 1. The Transform Hook
+      (let ((transform-hook nil))
+        (setq transform-hook
               (lambda (async-fn fsm)
                 (setq-local macher--fsm-latest fsm)
-                (funcall async-fn)))
-             (response-hook
+                (funcall async-fn)
+                ;; Self-destruct the hook after it fires
+                (remove-hook 'gptel-prompt-transform-functions transform-hook t)))
+        (add-hook 'gptel-prompt-transform-functions transform-hook nil t))
+
+      ;; 2. The Response Hook (UPDATED to prevent Premature Assassination)
+      (let ((response-hook nil))
+        (setq response-hook
               (lambda (_beg _end)
-                (let ((res (buffer-local-value 'macher-agent--final-result target-buffer)))
-                  (if res
-                      (when success-cb (funcall success-cb res))
-                    (when error-cb (funcall error-cb "Buffer stopped silently.")))))))
-        (cl-letf (((default-value 'gptel-prompt-transform-functions) (list transform-hook))
-                  ((default-value 'gptel-post-response-functions) (list response-hook))
-                  (gptel--system-message sys-msg))
-          (gptel-send))))))
+                (if (bound-and-true-p macher-agent--is-subagent)
+                    (message "DEBUG BRIDGE: Stream ended for sub-agent %s. Deferring to tool execution..." (current-buffer))
+                  
+                  ;; For normal, non-agent tasks, we trigger completion immediately
+                  (let ((res (buffer-substring-no-properties (point-min) (point-max))))
+                    (if (and res (not (string-empty-p res)))
+                        (when success-cb (funcall success-cb res))
+                      (when error-cb (funcall error-cb "Buffer stopped silently or returned empty."))))
+                  ;; Only remove the hook if it was a normal task that actually finished
+                  (remove-hook 'gptel-post-response-functions response-hook t)))))
+      (add-hook 'gptel-post-response-functions response-hook nil t))
+
+    ;; Transmit!
+    (gptel-send)))
 
 (defun macher-agent--setup-tools-advice (orig-fn &rest args)
   "Sync the VFS and inject the sandbox session before tools are executed."
