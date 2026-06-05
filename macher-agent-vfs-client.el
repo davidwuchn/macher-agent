@@ -189,13 +189,18 @@ If REPLACE-ALL is nil, errors if OLD-TEXT occurs more than once."
      (fsm-ctx fsm-ctx)
      (local-ctx local-ctx)
      (t
-      (let ((primary-ctx nil))
+      (let ((primary-ctx nil)
+            (primary-directives nil)) ;; <-- Capture the workspace skills
+        ;; Search for the active workspace buffer
         (dolist (buf (buffer-list))
           (with-current-buffer buf
             (when (and (bound-and-true-p macher-agent--is-workspace)
                        (bound-and-true-p macher-agent--persistent-context))
-              (unless primary-ctx (setq primary-ctx macher-agent--persistent-context)))))
+              (unless primary-ctx 
+                (setq primary-ctx macher-agent--persistent-context)
+                (setq primary-directives gptel-directives))))) ;; <-- Save them
         
+        ;; Fallback lazy initialization
         (unless primary-ctx
           (if macher-agent--allow-lazy-init
               (let* ((proj (and (fboundp 'project-current) (project-current nil)))
@@ -203,10 +208,15 @@ If REPLACE-ALL is nil, errors if OLD-TEXT occurs more than once."
                                        (and (fboundp 'vc-root-dir) (vc-root-dir))
                                        default-directory)))
                 (macher-agent--init-workspace-state current-root)
-                (setq primary-ctx macher-agent--persistent-context))
+                (setq primary-ctx macher-agent--persistent-context)
+                (setq primary-directives gptel-directives)) ;; <-- Capture them after init
             (error "No active agent session found")))
         
-        (when primary-ctx (setq-local macher-agent--persistent-context primary-ctx))
+        ;; Inject both the context and the skills into the current buffer (e.g., navigate.md)
+        (when primary-ctx 
+          (setq-local macher-agent--persistent-context primary-ctx)
+          (when primary-directives
+            (setq-local gptel-directives primary-directives))) 
         primary-ctx)))))
 
 (defun macher-agent--read-content-from-disk-or-buffer (path)
