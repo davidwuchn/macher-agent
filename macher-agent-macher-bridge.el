@@ -83,11 +83,12 @@
          (root-dir (macher-agent--get-workspace-root valid-ws))
          (diff-output ""))
     (dolist (entry contents)
-      (let* ((rel-path (car entry))
+      (let* ((raw-path (car entry))
              ;; Safely unpack the cons cell if optimistic concurrency data is present
              (file-data (cdr entry))
              (new-text (if (consp file-data) (cdr file-data) file-data))
-             (abs-path (expand-file-name rel-path (or root-dir default-directory)))
+             (abs-path (expand-file-name raw-path (or root-dir default-directory)))
+             (rel-path (file-relative-name abs-path (or root-dir default-directory)))
              ;; Treat missing files as empty strings for diffing additions
              (old-text (if (file-exists-p abs-path)
                            (with-temp-buffer
@@ -254,6 +255,10 @@
 
 (defun macher-agent--get-fsm-latest ()
   (bound-and-true-p macher--fsm-latest))
+
+(cl-defun macher-agent--make-vfs-context (&key workspace contents)
+  "Construct a core compatible context struct for the VFS."
+  (macher--make-context :workspace workspace :contents contents))
 
 (provide 'macher-agent-macher-bridge)
 ;;; macher-agent-macher-bridge.el ends here
