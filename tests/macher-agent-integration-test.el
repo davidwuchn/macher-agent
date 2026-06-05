@@ -27,18 +27,12 @@
                        (cond
                         ((string-match-p "agent-france" name)
                          (macher-agent-submit-task-result "The capital of France is Paris.")
-                         ;; Satisfy the OLD architecture mock
-                         (push buf macher-agent--garbage-queue)
-                         ;; Satisfy the NEW architecture mock
                          (with-current-buffer buf
                            (setq-local macher-agent--is-subagent t)
                            (setq-local macher-agent--ready-to-reap t)))
                         
                         ((string-match-p "agent-spain" name)
                          (macher-agent-submit-task-result "The capital of Spain is Madrid.")
-                         ;; Satisfy the OLD architecture mock
-                         (push buf macher-agent--garbage-queue)
-                         ;; Satisfy the NEW architecture mock
                          (with-current-buffer buf
                            (setq-local macher-agent--is-subagent t)
                            (setq-local macher-agent--ready-to-reap t)))))))

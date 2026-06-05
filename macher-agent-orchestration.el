@@ -39,8 +39,9 @@
 
 (defun macher-agent--reap-buffers-on-idle ()
   "An indestructible garbage collector that natively aborts hidden gptel networks."
-  (condition-case nil
-      (dolist (buf (buffer-list))
+  (dolist (buf (buffer-list))
+    ;; Scope the condition-case inside the loop so one crash doesn't abort the entire sweep
+    (condition-case nil
         (when (buffer-live-p buf)
           (with-current-buffer buf
             (when (and (bound-and-true-p macher-agent--is-subagent)
@@ -48,19 +49,22 @@
               
               (set-buffer-modified-p nil)
               
+              ;; 1. Safely abort gptel without crashing the reaper (fixes synchronous mocks)
               (when (fboundp 'gptel-abort)
-                (gptel-abort))
+                (ignore-errors (gptel-abort)))
               
+              ;; 2. Seek and destroy ALL network processes pointing at this buffer
               (dolist (proc (process-list))
                 (when (eq (process-buffer proc) buf)
                   (set-process-query-on-exit-flag proc nil)
                   (set-process-sentinel proc nil)
                   (delete-process proc)))
               
+              ;; 3. Ruthlessly kill the buffer
               (let ((kill-buffer-query-functions nil)
                     (kill-buffer-hook nil))
-                (kill-buffer buf))))))
-    ((error quit) nil)))
+                (kill-buffer buf)))))
+      ((error quit) nil))))
 
 ;; --- Resurrect and lock the timer ---
 (defvar macher-agent--reaper-timer nil)
@@ -103,7 +107,14 @@
         
         ;; Guarantee this buffer is marked as a subagent locally
         (setq-local macher-agent--is-subagent t)
-        (setq-local macher-agent--parent-callback callback)
+        
+        ;; Wrap the parent callback to guarantee the death flag is set upon execution,
+        ;; completely mitigating bypasses triggered by explicit tool usage like `submit_task_result`.
+        (setq-local macher-agent--parent-callback 
+                    (lambda (res)
+                      (when (buffer-live-p buf)
+                        (with-current-buffer buf (setq-local macher-agent--ready-to-reap t)))
+                      (funcall callback res)))
         
         (let* ((profile (macher-agent-resolve-skill-profile preset))
                (final-sym (plist-get profile :sym))
@@ -113,20 +124,13 @@
                           :target-buffer buf
                           :skill-sym final-sym
                           :system-message (if skill-data (plist-get skill-data :system) gptel--system-message))))
+          
           (macher-agent-gptel-transmit
            task-ctx
            (list :on-success (lambda (res)
-                               ;; MARK FOR DEATH FIRST
-                               (when (buffer-live-p buf)
-                                 (with-current-buffer buf (setq-local macher-agent--ready-to-reap t)))
-                               ;; THEN return control to the parent
-                               (funcall callback (list :status 'success :data res :buffer_name buf-name)))
+                               (funcall macher-agent--parent-callback (list :status 'success :data res :buffer_name buf-name)))
                  :on-error (lambda (err)
-                             ;; MARK FOR DEATH FIRST
-                             (when (buffer-live-p buf)
-                               (with-current-buffer buf (setq-local macher-agent--ready-to-reap t)))
-                             ;; THEN return control to the parent
-                             (funcall callback (list :status 'error :error (format "ERROR: %s" err) :buffer_name buf-name))))))))))
+                             (funcall macher-agent--parent-callback (list :status 'error :error (format "ERROR: %s" err) :buffer_name buf-name))))))))))
 
 (defvar macher-agent-subagent-setup-hook nil)
 

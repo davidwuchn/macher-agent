@@ -109,8 +109,10 @@
 (defun macher-agent-parse-skill-file (filepath)
   "Parse a SKILL.md file at FILEPATH extracting frontmatter and body."
   (with-temp-buffer
-    (let ((org-inhibit-startup t))
-      (insert-file-contents filepath)
+    (let* ((org-inhibit-startup t)
+           (abs-file (expand-file-name filepath))) 
+      (setq default-directory (file-name-directory abs-file))
+      (insert-file-contents abs-file)
       (goto-char (point-max))
       (unless (bolp) (insert "\n"))
       (org-mode)
