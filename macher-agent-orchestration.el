@@ -76,19 +76,11 @@
 
 (defun macher-agent--apply-preset (preset)
   "Apply the PRESET directive securely, flawlessly merging buffer and preset tools."
-  (when-let* ((profile (macher-agent-resolve-skill-profile preset))
-              (skill-data (plist-get profile :data)))
-    
-    (let* ((tools (plist-get skill-data :tools))
-           (safe-skill-data (macher-agent-sanitise-skill-data skill-data)))
-      
-      (when safe-skill-data
-        (let ((gptel--known-presets (list (cons preset safe-skill-data))))
-          (gptel--apply-preset preset (lambda (sym val) (set (make-local-variable sym) val)))))
-      
-      (unless (boundp 'gptel-tools) (setq gptel-tools nil))
-      (make-local-variable 'gptel-tools)
-      (setq gptel-tools (macher-agent-deduplicate-tools (append gptel-tools tools))))))
+  (let* ((raw-str (if (symbolp preset) (symbol-name preset) preset))
+         (clean-str (replace-regexp-in-string "^@+" "" raw-str))
+         (clean-sym (intern clean-str)))
+    (when (gptel-get-preset clean-sym)
+      (gptel--apply-preset clean-sym (lambda (sym val) (set (make-local-variable sym) val))))))
 
 (put 'macher-agent--is-subagent 'permanent-local t)
 (put 'macher-agent--ready-to-reap 'permanent-local t)
@@ -116,14 +108,13 @@
                         (with-current-buffer buf (setq-local macher-agent--ready-to-reap t)))
                       (funcall callback res)))
         
-        (let* ((profile (macher-agent-resolve-skill-profile preset))
-               (final-sym (plist-get profile :sym))
-               (skill-data (plist-get profile :data))
+        (let* ((raw-str (when preset (if (symbolp preset) (symbol-name preset) preset)))
+               (clean-sym (when raw-str (intern (replace-regexp-in-string "^@+" "" raw-str))))
                (task-ctx (make-macher-agent-task-context
                           :workspace nil
                           :target-buffer buf
-                          :skill-sym final-sym
-                          :system-message (if skill-data (plist-get skill-data :system) gptel--system-message))))
+                          :skill-sym clean-sym
+                          :system-message gptel--system-message)))
           
           (macher-agent-gptel-transmit
            task-ctx
@@ -229,8 +220,6 @@
 (add-hook 'gptel-pre-response-hook
           (lambda ()
             (let ((ctx (ignore-errors (macher-agent-current-context))))
-              (when ctx (macher-agent--auto-sync-context ctx)))
-            (when (fboundp 'macher-agent--compose-active-skills)
-              (macher-agent--compose-active-skills))))
+              (when ctx (macher-agent--auto-sync-context ctx)))))
 
 (provide 'macher-agent-orchestration)

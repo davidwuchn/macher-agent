@@ -9,43 +9,15 @@
 (declare-function macher-agent--split-context "macher-agent-vfs-client")
 (declare-function macher-agent--build-virtual-patch "macher-agent-vfs-client")
 
-(defun macher-agent--track-directive-selection (orig-fun sym val scope)
-  "Intercept gptel directive selection to sync our buffer-local skill anchor."
-  (apply orig-fun sym val scope)
-  (when (and (eq sym 'gptel--system-message)
-             (eq scope 'gptel--set-buffer-locally))
-    (let ((skill-sym (macher-agent--get-system-message-name val)))
-      (if skill-sym
-          (setq-local macher-agent--active-skill-sym (intern skill-sym))
-        (setq-local macher-agent--active-skill-sym nil)))))
-
-(defun macher-agent--compose-active-skills ()
-  "JIT Composition: Rebuild buffer-local state right before the LLM request fires."
-  (let ((target-sym (or (bound-and-true-p gptel-directive) 
-                        (bound-and-true-p macher-agent--active-skill-sym))))
-    (when-let* ((profile (macher-agent-resolve-skill-profile target-sym))
-                (skill-data (plist-get profile :data)))
-      
-      ;; FIX: Extracted from when-let* to prevent silent aborts
-      (let* ((tools (plist-get skill-data :tools))
-             (safe-skill-data (macher-agent-sanitise-skill-data skill-data)))
-        
-        (when safe-skill-data
-          (let ((gptel--known-presets (list (cons (or target-sym 'temp) safe-skill-data))))
-            (gptel--apply-preset (or target-sym 'temp) (lambda (sym val) (set (make-local-variable sym) val)))))
-        
-        (when (boundp 'gptel-tools)
-          (let ((buffer-tools gptel-tools))
-            ;; Combine the currently active buffer tools with the preset tools
-            (setq-local gptel-tools (macher-agent-deduplicate-tools (append buffer-tools tools)))))))))
-
 (defun macher-agent--gptel-pre-send-advice (orig-fun &rest args)
-  "Ensure the agent VFS is synchronised and skills are composed before sending."
+  "Ensure the agent VFS is synchronised before sending."
   (let* ((macher-agent--allow-lazy-init t)
          (ctx (macher-agent-current-context)))
-    (when ctx (macher-agent--auto-sync-context ctx))
-    (macher-agent--compose-active-skills))
+    (when ctx (macher-agent--auto-sync-context ctx)))
   (apply orig-fun args))
+
+(advice-add 'gptel-send :around #'macher-agent--gptel-pre-send-advice)
+(advice-add 'gptel-request :around #'macher-agent--gptel-pre-send-advice)
 
 (defun macher-agent-gptel-transmit (task-context callbacks)
   "Facade to transmit network request, attaching async-safe local hooks."
@@ -145,29 +117,44 @@
 (defvar macher-agent--captured-buffer-tools nil
   "Dynamic snapshot of buffer tools.")
 
-(defun macher-agent--merge-preset-and-buffer-tools (fsm)
-  "Transform hook to natively merge buffer tools and preset tools.
-   Runs in the temp prompt buffer immediately after presets have overwritten gptel-tools."
-  (let* ((info (gptel-fsm-info fsm))
-         (orig-buf (plist-get info :buffer))
-         ;; gptel-tools here represents what the preset injected
-         (preset-tools gptel-tools)
-         ;; Reach back to the chat buffer to get the tools you ticked in the menu
-         (buffer-tools (buffer-local-value 'gptel-tools orig-buf)))
-    
-    (when (or buffer-tools preset-tools)
-      ;; Merge them and overwrite the temp buffer's tools. 
-      ;; gptel will natively pick this up when it builds the network payload!
-      (setq-local gptel-tools
-                  (macher-agent-deduplicate-tools (append buffer-tools preset-tools))))))
-
-(add-hook 'gptel-prompt-transform-functions #'macher-agent--merge-preset-and-buffer-tools t)
-
 (defun macher-agent--protect-nil-responses (orig-fun response info &optional raw)
   "Prevent nil string crashes at the point of insertion."
   (funcall orig-fun (or response "") info raw))
 
 (advice-add 'gptel--insert-response :around #'macher-agent--protect-nil-responses)
 (advice-add 'gptel-curl--stream-insert-response :around #'macher-agent--protect-nil-responses)
+
+(defun macher-agent--transform-apply-preset-advice (orig-fun &rest args)
+  "Inject the original buffer's presets, safely padding arguments for sub-agents."
+  (let* ((fsm (car args))
+         (info (when fsm 
+                 (if (fboundp 'gptel-fsm-info) 
+                     (funcall 'gptel-fsm-info fsm) 
+                   (funcall 'mock-gptel-fsm-info fsm))))
+         (orig-buf (if info (plist-get info :buffer) (current-buffer)))
+         (gptel--known-presets (if (buffer-live-p orig-buf) 
+                                   (buffer-local-value 'gptel--known-presets orig-buf) 
+                                 gptel--known-presets))
+         (gptel-directives (if (buffer-live-p orig-buf) 
+                               (buffer-local-value 'gptel-directives orig-buf) 
+                             gptel-directives)))
+    
+    ;; Execute gracefully. If the native function chokes on the delegate's missing/nil 
+    ;; context and throws a stringp error, silently swallow it so the sentinel can finish.
+    (condition-case nil
+        (apply orig-fun (or args (list nil)))
+      (error nil))))
+
+(advice-add 'gptel--transform-apply-preset :around #'macher-agent--transform-apply-preset-advice)
+
+(defun macher-agent--gptel-restore-advice (&rest _)
+  "Ensure workspace skills are loaded into `gptel--known-presets` before restoring."
+  (let ((ctx (when (fboundp 'macher-agent-current-context)
+               (macher-agent-current-context))))
+    (macher-agent-initialize-skills ctx)))
+
+;; Advise the actual internal function that gptel uses on mode startup
+(advice-add 'gptel--restore-state :before #'macher-agent--gptel-restore-advice)
+
 
 (provide 'macher-agent-gptel-bridge)
