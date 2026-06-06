@@ -209,22 +209,26 @@
                           (delete-directory ws-dir t)))
                     
                     (it "applies skill tools correctly into gptel-tools when selected"
-                        (let ((gptel-tools nil)
-                              (mock-tool-obj (if (fboundp 'gptel-make-tool)
-                                                 (gptel-make-tool :name "the_tool" :function (lambda () nil) :description "A tool")
-                                               'the-tool)))
+                        (let* ((gptel-tools nil)
+                               (gptel--known-presets nil)
+                               (gptel-directives nil)
+                               (mock-tool-obj (if (fboundp 'gptel-make-tool)
+                                                  (gptel-make-tool :name "the_tool" :function (lambda () nil) :description "A tool")
+                                                'the-tool)))
                           (spy-on 'gptel-tool-p :and-return-value t)
                           (let* ((ctx (macher-agent-current-context))
-                                 (ws (macher-agent--get-context-workspace ctx)))
-                            (puthash "selected-tool" mock-tool-obj (macher-agent-workspace-tools-registry ws)))
-                          
-                          (let ((workspace (macher-agent--get-context-workspace (macher-agent-current-context))))
+                                 (workspace (macher-agent--get-context-workspace ctx)))
+                            (puthash "selected-tool" mock-tool-obj (macher-agent-workspace-tools-registry workspace))
                             (setf (alist-get 'test-preset (macher-agent-workspace-skills-alist workspace))
-                                  (list :description "test" :tools (list mock-tool-obj) :context-dir nil))
-                            (setq-local macher-agent--active-skill-sym '(test-preset))
-                            (macher-agent--apply-preset 'test-preset))
-                          
-                          (expect gptel-tools :to-equal (list mock-tool-obj))))
+                                  (list :description "test" :system "test system" :tools (list mock-tool-obj) :context-dir nil))
+                            
+                            (with-temp-buffer
+                              (let ((gptel--known-presets nil))
+                                (macher-agent-initialize-skills ctx)
+                                (let ((preset-def (buffer-local-value 'gptel--known-presets (current-buffer))))
+                                  (setq preset-def (alist-get 'test-preset preset-def))
+                                  (expect preset-def :not :to-be nil)
+                                  (expect (plist-get preset-def :tools) :to-equal '(:append ("the_tool")))))))))
 
                     (it "expands org-macros in SKILL.md body"
                         (let* ((parsed (macher-agent-parse-skill-file "tests/fixtures/skills/macro-skill/SKILL.md")))
@@ -236,16 +240,18 @@
                           (make-directory skill-dir t)
                           (with-temp-file (expand-file-name "SKILL.md" skill-dir)
                             (insert "---\nname: my-preset\ndescription: test\nallowed-tools:\n  - some-tool\nmodel: gpt-4o\n---\nPreset body"))
-                          (spy-on 'gptel-make-preset)
-                          (spy-on 'macher-agent-resolve-tool :and-return-value 'mock-tool)
-                          (let ((gptel-directives nil))
-                            (macher-agent-api-register-skills-in-directory mock-dir nil)
-                            (expect 'gptel-make-preset :to-have-been-called)
-                            (let ((args (spy-calls-args-for 'gptel-make-preset 0)))
-                              (expect (car args) :to-equal 'my-preset)
-                              (expect (plist-get (cdr args) :system) :to-equal "Preset body")
-                              (expect (plist-get (cdr args) :model) :to-equal 'gpt-4o))
-                            (delete-directory mock-dir t))))
+                          (spy-on 'macher-agent-resolve-tool :and-return-value "some-tool")
+                          (with-temp-buffer
+                            (let ((gptel-directives nil)
+                                  (gptel--known-presets nil))
+                              (macher-agent-initialize-skills nil mock-dir)
+                              
+                              (let ((preset-def (alist-get 'my-preset gptel--known-presets)))
+                                (expect preset-def :not :to-be nil)
+                                (expect (plist-get preset-def :system) :to-equal "Preset body")
+                                (expect (plist-get preset-def :model) :to-equal 'gpt-4o)
+                                (expect (plist-get preset-def :tools) :to-equal '(:append ("some-tool"))))
+                              (delete-directory mock-dir t)))))
 
                     (it "injects directly into gptel-directives when allowed-tools is omitted"
                         (let* ((mock-dir (make-temp-file "macher-test-skills-directive" t))
@@ -253,9 +259,14 @@
                           (make-directory skill-dir t)
                           (with-temp-file (expand-file-name "SKILL.md" skill-dir)
                             (insert "---\nname: my-directive\n---\nDirective body"))
-                          (let ((gptel-directives nil))
-                            (macher-agent-api-register-skills-in-directory mock-dir nil)
-                            (expect (alist-get 'my-directive gptel-directives) :to-equal "Directive body")
-                            (delete-directory mock-dir t))))))
+                          (with-temp-buffer
+                            (let ((gptel-directives nil)
+                                  (gptel--known-presets nil))
+                              (macher-agent-initialize-skills nil mock-dir)
+                              (expect (alist-get 'my-directive gptel-directives) :to-equal "Directive body")
+                              (let ((preset-def (alist-get 'my-directive gptel--known-presets)))
+                                (expect preset-def :not :to-be nil)
+                                (expect (plist-get preset-def :system) :to-equal "Directive body"))
+                              (delete-directory mock-dir t)))))))
 
 (provide 'macher-agent-skills-test)
