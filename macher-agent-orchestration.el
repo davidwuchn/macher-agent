@@ -37,50 +37,81 @@
                        (when (= completed total)
                          (funcall final-callback results)))))))))
 
-(defun macher-agent--reap-buffers-on-idle ()
+(defun macher-agent--reap-buffer (buf)
   "An indestructible garbage collector that natively aborts hidden gptel networks."
-  (dolist (buf (buffer-list))
-    ;; Scope the condition-case inside the loop so one crash doesn't abort the entire sweep
-    (condition-case nil
-        (when (buffer-live-p buf)
-          (with-current-buffer buf
-            (when (and (bound-and-true-p macher-agent--is-subagent)
-                       (bound-and-true-p macher-agent--ready-to-reap))
-              
-              (set-buffer-modified-p nil)
-              
-              ;; 1. Safely abort gptel without crashing the reaper (fixes synchronous mocks)
-              (when (fboundp 'gptel-abort)
-                (ignore-errors (gptel-abort)))
-              
-              ;; 2. Seek and destroy ALL network processes pointing at this buffer
-              (dolist (proc (process-list))
-                (when (eq (process-buffer proc) buf)
+  (condition-case nil
+      (when (buffer-live-p buf)
+        (with-current-buffer buf
+          (when (and (bound-and-true-p macher-agent--is-subagent)
+                     (bound-and-true-p macher-agent--ready-to-reap))
+            
+            (set-buffer-modified-p nil)
+
+            (when (fboundp 'gptel-abort)
+              (ignore-errors (gptel-abort)))
+
+            (dolist (proc (process-list))
+              (let* ((p-buf (process-buffer proc))
+                     (target-buf nil))
+                
+                (when (and p-buf (buffer-live-p p-buf))
+                  (with-current-buffer p-buf
+                    (setq target-buf
+                          (or (when (bound-and-true-p gptel--info)
+                                (plist-get gptel--info :buffer))
+                              (when (and (boundp 'gptel--fsm) gptel--fsm (fboundp 'gptel-fsm-info))
+                                (plist-get (gptel-fsm-info gptel--fsm) :buffer))))))
+
+                (when (or (eq p-buf buf)
+                          (eq target-buf buf))
                   (set-process-query-on-exit-flag proc nil)
                   (set-process-sentinel proc nil)
-                  (delete-process proc)))
-              
-              ;; 3. Ruthlessly kill the buffer
-              (let ((kill-buffer-query-functions nil)
-                    (kill-buffer-hook nil))
-                (kill-buffer buf)))))
-      ((error quit) nil))))
+                  (delete-process proc))))
+
+            (let ((kill-buffer-query-functions nil)
+                  (kill-buffer-hook nil))
+              (kill-buffer buf)))))
+    ((error quit) nil)))
 
 ;; --- Resurrect and lock the timer ---
-(defvar macher-agent--reaper-timer nil)
-(when (timerp macher-agent--reaper-timer)
-  (cancel-timer macher-agent--reaper-timer))
+;;(defvar macher-agent--reaper-timer nil)
+;;(when (timerp macher-agent--reaper-timer)
+;;  (cancel-timer macher-agent--reaper-timer))
 
-(setq macher-agent--reaper-timer 
-      (run-with-idle-timer 0.5 t #'macher-agent--reap-buffers-on-idle))
+;;(setq macher-agent--reaper-timer 
+;;      (run-with-idle-timer 0.5 t #'macher-agent--reap-buffers-on-idle))
 
 (defun macher-agent--apply-preset (preset)
   "Apply the PRESET directive securely, flawlessly merging buffer and preset tools."
   (let* ((raw-str (if (symbolp preset) (symbol-name preset) preset))
          (clean-str (replace-regexp-in-string "^@+" "" raw-str))
-         (clean-sym (intern clean-str)))
-    (when (gptel-get-preset clean-sym)
-      (gptel--apply-preset clean-sym (lambda (sym val) (set (make-local-variable sym) val))))))
+         (clean-sym (intern clean-str))
+         (spec (gptel-get-preset clean-sym)))
+    (when spec
+      (setq-local macher-agent--active-skill-sym clean-sym)
+      (setq-local gptel--preset clean-sym)
+      (let ((system-msg (or (plist-get spec :system)
+                            (plist-get spec :system-message)
+                            (plist-get spec :rewrite-directive)))
+            (model (plist-get spec :model))
+            (backend (plist-get spec :backend))
+            (temp (plist-get spec :temperature))
+            (tokens (plist-get spec :max-tokens))
+            (tools (plist-get spec :tools)))
+        (when system-msg
+          (setq-local gptel--system-message system-msg))
+        (when model
+          (setq-local gptel-model model))
+        (when backend
+          (setq-local gptel-backend backend))
+        (when temp
+          (setq-local gptel-temperature temp))
+        (when tokens
+          (setq-local gptel-max-tokens tokens))
+        (when tools
+          (let ((resolved-tools (macher-agent-resolve-and-flatten-tools tools))
+                (default-tools (default-value 'gptel-tools)))
+            (setq-local gptel-tools (macher-agent-deduplicate-tools (append default-tools gptel-tools resolved-tools)))))))))
 
 (put 'macher-agent--is-subagent 'permanent-local t)
 (put 'macher-agent--ready-to-reap 'permanent-local t)
@@ -102,12 +133,22 @@
         
         ;; Wrap the parent callback to guarantee the death flag is set upon execution,
         ;; completely mitigating bypasses triggered by explicit tool usage like `submit_task_result`.
+        ;; (setq-local macher-agent--parent-callback 
+        ;;             (lambda (res)
+        ;;               (when (buffer-live-p buf)
+        ;;                 (with-current-buffer buf (setq-local macher-agent--ready-to-reap t)))
+        ;;               (funcall callback res)))
         (setq-local macher-agent--parent-callback 
                     (lambda (res)
                       (when (buffer-live-p buf)
-                        (with-current-buffer buf (setq-local macher-agent--ready-to-reap t)))
-                      (funcall callback res)))
-        
+                        (with-current-buffer buf 
+                          (setq-local macher-agent--ready-to-reap t)))
+                      
+                      (funcall callback res)
+                      
+                      (when (buffer-live-p buf)
+                        (run-at-time 0.1 nil #'macher-agent--reap-buffer buf))))
+
         (let* ((raw-str (when preset (if (symbolp preset) (symbol-name preset) preset)))
                (clean-sym (when raw-str (intern (replace-regexp-in-string "^@+" "" raw-str))))
                (task-ctx (make-macher-agent-task-context

@@ -153,11 +153,12 @@
                           (expect (plist-get parsed :body) :to-equal "This is the system prompt for the mock skill.\nIt spans multiple lines.")))
 
                     (it "resolves global skill tools by loading their script if not registered"
-                        (spy-on 'file-exists-p :and-return-value t)
-                        (spy-on 'insert-file-contents :and-call-fake (lambda (f) (insert "(setq mock-tool-load 'loaded-tool-object)")))
-                        ;; Resolution test
-                        (let ((resolved (macher-agent-resolve-tool "mock-tool-load" nil "tests/fixtures/skills/global/")))
-                          (expect resolved :to-equal 'loaded-tool-object)))
+                        (let* ((loaded-tool-object (gptel-make-tool :name "mock-tool-load" :category "test")))
+                          (setq mock-tool-load-global loaded-tool-object)
+                          (spy-on 'file-exists-p :and-return-value t)
+                          (spy-on 'insert-file-contents :and-call-fake (lambda (f) (insert "(setq mock-tool-load mock-tool-load-global)")))
+                          (let ((resolved (macher-agent-resolve-tool "mock-tool-load" nil "tests/fixtures/skills/global/")))
+                            (expect resolved :to-equal loaded-tool-object))))
 
                     (it "refuses to load workspace skill tools (security context)"
                         (let* ((mock-script-dir (expand-file-name "tests/fixtures/skills/workspace/scripts"))
@@ -185,14 +186,18 @@
                         (let* ((pkg-dir (make-temp-file "macher-pkg" t))
                                (ws-dir (make-temp-file "macher-ws" t))
                                (pkg-scripts (expand-file-name "scripts" pkg-dir))
-                               (ws-scripts (expand-file-name "scripts" ws-dir)))
+                               (ws-scripts (expand-file-name "scripts" ws-dir))
+                               (ws-a (gptel-make-tool :name "tool-a" :category "test1"))
+                               (pkg-b (gptel-make-tool :name "tool-b" :category "test2")))
+                          (setq mock-ws-a-global ws-a)
+                          (setq mock-pkg-b-global pkg-b)
                           (make-directory pkg-scripts t)
                           (make-directory ws-scripts t)
                           ;; Package provides tool-a and tool-b
                           (with-temp-file (expand-file-name "tool-a.el" pkg-scripts) (insert "(setq tool-a 'pkg-a)"))
-                          (with-temp-file (expand-file-name "tool-b.el" pkg-scripts) (insert "(setq tool-b 'pkg-b)"))
+                          (with-temp-file (expand-file-name "tool-b.el" pkg-scripts) (insert "(setq tool-b mock-pkg-b-global)"))
                           ;; Workspace overrides tool-a
-                          (with-temp-file (expand-file-name "tool-a.el" ws-scripts) (insert "(setq tool-a 'ws-a)"))
+                          (with-temp-file (expand-file-name "tool-a.el" ws-scripts) (insert "(setq tool-a mock-ws-a-global)"))
                           
                           ;; Clear registry
                           (let* ((ctx (macher-agent-current-context))
@@ -202,8 +207,8 @@
                           ;; Resolve pkg first, then workspace shadows
                           (let* ((res-pkg-b (macher-agent-resolve-tool "tool-b" nil pkg-dir))
                                  (res-ws-a (macher-agent-resolve-tool "tool-a" nil ws-dir)))
-                            (expect res-pkg-b :to-equal 'pkg-b)
-                            (expect res-ws-a :to-equal 'ws-a))
+                            (expect res-pkg-b :to-equal pkg-b)
+                            (expect res-ws-a :to-equal ws-a))
                           
                           (delete-directory pkg-dir t)
                           (delete-directory ws-dir t)))
