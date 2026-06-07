@@ -147,14 +147,73 @@
 
 (advice-add 'gptel--transform-apply-preset :around #'macher-agent--transform-apply-preset-advice)
 
-(defun macher-agent--gptel-restore-advice (&rest _)
-  "Ensure workspace skills are loaded into `gptel--known-presets` before restoring."
-  (let ((ctx (when (fboundp 'macher-agent-current-context)
-               (macher-agent-current-context))))
-    (macher-agent-initialize-skills ctx)))
+(defvar macher-agent--allow-gptel-restore nil
+  "Dynamic variable controlling whether `gptel--restore-state' is allowed to execute.")
+
+(defun macher-agent--gptel-restore-advice (orig-fun &rest args)
+  "Bypass `gptel--restore-state' unless explicitly allowed."
+  (when macher-agent--allow-gptel-restore
+    (let ((ctx (when (fboundp 'macher-agent-current-context)
+                 (macher-agent-current-context))))
+      (when ctx
+        (macher-agent-initialize-skills ctx)))
+    (apply orig-fun args)))
 
 ;; Advise the actual internal function that gptel uses on mode startup
-(advice-add 'gptel--restore-state :before #'macher-agent--gptel-restore-advice)
+(advice-add 'gptel--restore-state :around #'macher-agent--gptel-restore-advice)
 
+(defun macher-agent-resolve-backend-and-model (model-name)
+  "Find the first backend and model format matching MODEL-NAME.
+MODEL-NAME can be a string or a symbol.
+Returns a cons cell (BACKEND . MODEL-FORMAT) if found, otherwise nil."
+  (when (and model-name (boundp 'gptel--known-backends))
+    (let ((model-str (if (symbolp model-name) (symbol-name model-name) model-name))
+          result)
+      (dolist (item gptel--known-backends)
+        (unless result
+          (let* ((backend (cdr item))
+                 (models (gptel-backend-models backend)))
+            (dolist (m models)
+              (unless result
+                (let* ((m-raw (if (consp m) (car m) m))
+                       (m-str (if (symbolp m-raw) (symbol-name m-raw) m-raw)))
+                  (when (equal m-str model-str)
+                    (setq result (cons backend m-raw)))))))))
+      result)))
+
+(defun macher-agent--after-apply-preset-advice (preset &rest _)
+  "Ensure gptel-tools is resolved to structs, includes default tools, and is deduplicated.
+Also aligns `gptel-backend` with `gptel-model` if the model belongs to a different backend."
+  (when (boundp 'gptel-tools)
+    (let ((default-tools (default-value 'gptel-tools))
+          (clean-sym (when (and preset (or (symbolp preset) (stringp preset)))
+                       (let* ((raw-str (if (symbolp preset) (symbol-name preset) preset))
+                              (clean-str (replace-regexp-in-string "^@+" "" raw-str)))
+                         (intern clean-str)))))
+      (when clean-sym
+        (setq-local macher-agent--active-skill-sym clean-sym))
+      (setq-local gptel-tools (macher-agent-deduplicate-tools (append default-tools gptel-tools)))))
+
+  ;; Auto-resolve and align backend when `gptel-model' is updated via a preset
+  (when (bound-and-true-p gptel-model)
+    (let ((resolved (macher-agent-resolve-backend-and-model gptel-model)))
+      (when resolved
+        (let ((backend (car resolved))
+              (model-format (cdr resolved)))
+          (unless (eq gptel-backend backend)
+            (setq-local gptel-backend backend))
+          (unless (eq gptel-model model-format)
+            (setq-local gptel-model model-format)))))))
+
+(advice-add 'gptel--apply-preset :after #'macher-agent--after-apply-preset-advice)
+
+(defun macher-agent--tolerate-dead-buffer-sentinel (orig-fn proc event &rest args)
+  "Prevent gptel's sentinel from crashing when a sub-agent buffer is abruptly reaped."
+  (let ((buf (process-buffer proc)))
+    (if (and buf (buffer-live-p buf))
+        (apply orig-fn proc event args)
+      (message "Macher-Agent: Suppressed gptel sentinel for reaped sub-agent."))))
+
+(advice-add 'gptel-curl--sentinel :around #'macher-agent--tolerate-dead-buffer-sentinel)
 
 (provide 'macher-agent-gptel-bridge)

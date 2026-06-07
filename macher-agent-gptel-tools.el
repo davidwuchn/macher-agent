@@ -117,42 +117,44 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
 (cl-defmacro macher-agent-make-tool (name-symbol description &key category args command-fn success-fn output-filter-fn)
   "Declarative tool definition. Execution delegated to middleware with strict parsing and dynamic arity."
   (let ((name (replace-regexp-in-string "^macher-agent-\\|-tool$" "" (symbol-name name-symbol))))
-    `(defvar ,name-symbol
-       (gptel-make-tool
-        :name ,(replace-regexp-in-string "-" "_" name)
-        :description ,description :category ,(or category "macher-agent") :args ,args :async t
-        :function
-        (lambda (&rest all-args)
-          (let* ((callback (cl-find-if #'functionp all-args))
-                 (context (ignore-errors (macher-agent-current-context)))
-                 (root (if context (macher-agent-context-root context) default-directory))
-                 (arg-names (ignore-errors (mapcar (lambda (a) (intern (concat ":" (plist-get a :name)))) ,args)))
-                 (payload nil)
-                 (cmd-eval ,command-fn)
-                 (succ-eval ,success-fn)
-                 (filter-eval ,output-filter-fn))
-            
-            (cl-loop for k in arg-names
-                     for v in (cl-remove-if #'functionp all-args)
-                     do (setq payload (plist-put payload k v)))
-            
-            (let ((wrap-cb (macher-agent--wrap-callback callback)))
-              (condition-case err
-                  (let* ((action (let* ((arity (func-arity cmd-eval))
-                                        (max-args (cdr arity)))
-                                   (if (or (eq max-args 'many) (>= max-args 3))
-                                       (funcall cmd-eval payload context root)
-                                     (funcall cmd-eval payload))))
-                         (on-success 
-                          (lambda (raw-result)
-                            (let* ((success-data (if succ-eval (funcall succ-eval raw-result) raw-result))
-                                   (final-data (if filter-eval (funcall filter-eval success-data) success-data)))
-                              (funcall wrap-cb (list :status 'success :data final-data))))))
-                    (unless (macher-agent-tool-response-p action)
-                      (error "Tool contract violation: command must return a macher-agent-tool-response struct"))
-                    (macher-agent--execute-action action context on-success wrap-cb))
-                (error
-                 (funcall wrap-cb (list :status 'error :error (error-message-string err))))))))))))
+    `(progn
+       (defvar ,name-symbol nil)
+       (setq ,name-symbol
+             (gptel-make-tool
+              :name ,(replace-regexp-in-string "-" "_" name)
+              :description ,description :category ,(or category "macher-agent") :args ,args :async t
+              :function
+              (lambda (&rest all-args)
+                (let* ((callback (cl-find-if #'functionp all-args))
+                       (context (ignore-errors (macher-agent-current-context)))
+                       (root (if context (macher-agent-context-root context) default-directory))
+                       (arg-names (ignore-errors (mapcar (lambda (a) (intern (concat ":" (plist-get a :name)))) ,args)))
+                       (payload nil)
+                       (cmd-eval ,command-fn)
+                       (succ-eval ,success-fn)
+                       (filter-eval ,output-filter-fn))
+                  
+                  (cl-loop for k in arg-names
+                           for v in (cl-remove-if #'functionp all-args)
+                           do (setq payload (plist-put payload k v)))
+                  
+                  (let ((wrap-cb (macher-agent--wrap-callback callback)))
+                    (condition-case err
+                        (let* ((action (let* ((arity (func-arity cmd-eval))
+                                              (max-args (cdr arity)))
+                                         (if (or (eq max-args 'many) (>= max-args 3))
+                                             (funcall cmd-eval payload context root)
+                                           (funcall cmd-eval payload))))
+                               (on-success 
+                                (lambda (raw-result)
+                                  (let* ((success-data (if succ-eval (funcall succ-eval raw-result) raw-result))
+                                         (final-data (if filter-eval (funcall filter-eval success-data) success-data)))
+                                    (funcall wrap-cb (list :status 'success :data final-data))))))
+                          (unless (macher-agent-tool-response-p action)
+                            (error "Tool contract violation: command must return a macher-agent-tool-response struct"))
+                          (macher-agent--execute-action action context on-success wrap-cb))
+                      (error
+                       (funcall wrap-cb (list :status 'error :error (error-message-string err)))))))))))))
 
 (defun macher-agent--execute-action (action context on-success on-error)
   "Routes the declarative ACTION to the appropriate asynchronous backend."
@@ -195,16 +197,41 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
                      (funcall callback exit-code output)))))))
 
 (defun macher-agent--run-in-persistent-sandbox (context command on-success on-error)
-  (condition-case err
-      (macher-agent-with-strict-vfs-pipeline context
-                                             (let* ((output-buf (generate-new-buffer " *macher-sandbox-out*"))
-                                                    (exit-code (call-process shell-file-name nil output-buf nil shell-command-switch command))
-                                                    (output (with-current-buffer output-buf (buffer-string))))
-                                               (kill-buffer output-buf)
-                                               (if (= exit-code 0)
-                                                   (funcall on-success output)
-                                                 (funcall on-error (list :status 'error :error output)))))
-    (error (funcall on-error (list :status 'error :error (error-message-string err))))))
+  "Executes COMMAND asynchronously within a dynamically generated VFS sandbox."
+  (let* ((workspace-root (if context (macher-agent-context-root context) default-directory))
+         (sandbox-dir (make-temp-file "macher-sandbox-" t)))
+    (condition-case err
+        (progn
+          ;; 1. Synchronous prep (rsync is fast enough not to block noticeably)
+          (macher-agent--vfs-verify-clean-merge workspace-root context)
+          (macher-agent--vfs-sync-baseline workspace-root sandbox-dir)
+          (macher-agent--vfs-apply-overlay context sandbox-dir)
+
+          ;; 2. Asynchronous execution
+          (let* ((out-buf (generate-new-buffer " *macher-sandbox-out*"))
+                 (default-directory (file-name-as-directory sandbox-dir)))
+            (make-process
+             :name "macher-sandbox-process"
+             :buffer out-buf
+             :command (list shell-file-name shell-command-switch command)
+             :sentinel
+             (lambda (proc _event)
+               (when (memq (process-status proc) '(exit signal))
+                 (let ((output (with-current-buffer out-buf (buffer-string)))
+                       (exit-code (process-exit-status proc)))
+                   
+                   ;; 3. Cleanup safely in the background
+                   (kill-buffer out-buf)
+                   (ignore-errors (delete-directory sandbox-dir t))
+                   
+                   ;; 4. Trigger tool callbacks
+                   (if (= exit-code 0)
+                       (funcall on-success output)
+                     (funcall on-error (list :status 'error :error output)))))))))
+      (error
+       ;; Ensure cleanup if the prep phase fails before the process starts
+       (ignore-errors (delete-directory sandbox-dir t))
+       (funcall on-error (list :status 'error :error (error-message-string err)))))))
 
 ;; --- VFS and JIT Reloading ---
 

@@ -2,7 +2,7 @@
 (require 'buttercup)
 (require 'macher-agent-macher-bridge)
 (require 'macher-agent)
-(require 'macher-agent-orchestration nil t)
+(require 'macher-agent-orchestration)
 
 ;; --- TEST FIX: The Universal Shock Absorbers ---
 ;; We define these explicitly in the test environment so that the test passes
@@ -26,16 +26,16 @@
                            (name (buffer-name (current-buffer))))
                        (cond
                         ((string-match-p "agent-france" name)
-                         (macher-agent-submit-task-result "The capital of France is Paris.")
                          (with-current-buffer buf
                            (setq-local macher-agent--is-subagent t)
-                           (setq-local macher-agent--ready-to-reap t)))
+                           (setq-local macher-agent--ready-to-reap t))
+                         (macher-agent-submit-task-result "The capital of France is Paris."))
                         
                         ((string-match-p "agent-spain" name)
-                         (macher-agent-submit-task-result "The capital of Spain is Madrid.")
                          (with-current-buffer buf
                            (setq-local macher-agent--is-subagent t)
-                           (setq-local macher-agent--ready-to-reap t)))))))
+                           (setq-local macher-agent--ready-to-reap t))
+                         (macher-agent-submit-task-result "The capital of Spain is Madrid."))))))
 
            ;; 2. Mock timers: Force deferred buffer cleanups to happen synchronously
            (spy-on 'run-at-time :and-call-fake

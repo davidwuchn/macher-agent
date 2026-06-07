@@ -58,7 +58,8 @@
   
   (let* ((relative (if (string-prefix-p "~" unsafe-path) (concat "./" unsafe-path) unsafe-path))
          (resolved (expand-file-name relative base-dir)))
-    (if (string-prefix-p (expand-file-name base-dir) (expand-file-name resolved))
+    (if (or (file-in-directory-p resolved base-dir)
+            (string= (expand-file-name resolved) (expand-file-name base-dir)))
         resolved
       (error "SECURITY ERROR: Path traversal jailbreak detected: %s" unsafe-path))))
 
@@ -261,7 +262,8 @@ If REPLACE-ALL is nil, errors if OLD-TEXT occurs more than once."
          (workspace-root (when workspace (macher-agent--get-workspace-root workspace)))
          (abs-path (expand-file-name path)))
     (when (and workspace-root
-               (not (string-prefix-p (expand-file-name workspace-root) abs-path)))
+               (not (or (file-in-directory-p abs-path workspace-root)
+                        (string= (expand-file-name abs-path) (expand-file-name workspace-root)))))
       (error "SECURITY ERROR: Path traversal attempt detected. Path '%s' is outside workspace root '%s'." path workspace-root))
     (macher-agent--read-content-from-disk-or-buffer path)))
 
@@ -275,7 +277,7 @@ If REPLACE-ALL is nil, errors if OLD-TEXT occurs more than once."
                                             (cons (cons path (cons orig new-content)) contents))))
     (macher-agent--set-context-dirty-p context t)
     (macher-agent--persist-vfs-to-hidden-buffer context)
-    (run-hooks 'macher-agent-context-mutated-hook)))
+    (run-hook-with-args 'macher-agent-context-mutated-hook path)))
 
 (defun macher-agent--read-context-file (context path)
   (macher-agent--ensure-access context path)
@@ -436,7 +438,7 @@ If REPLACE-ALL is nil, errors if OLD-TEXT occurs more than once."
          (default-directory (file-name-as-directory (expand-file-name root)))
          (use-git (locate-dominating-file default-directory ".git"))
          (cmd (if use-git "git" "patch"))
-         (args (if use-git '("apply" "-p0" "-") '("-p0"))))
+         (args (if use-git '("apply" "-p1" "-") '("-p1"))))
     (with-temp-buffer
       (insert patch-content)
       (let ((exit-code (apply #'call-process-region (point-min) (point-max) cmd nil "*macher-patch-out*" nil args)))
