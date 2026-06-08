@@ -255,7 +255,46 @@
                                            (processed-tool (car processed-tools)))
                                       
                                       ;; PROOF: The tool has been wrapped and is now expecting the context
-                                      (expect (funcall (gptel-tool-function processed-tool)) :to-equal 'injected-context)))))
+                                      (expect (funcall (gptel-tool-function processed-tool)) :to-equal 'injected-context))))
+
+                              (it "correctly initialises and binds the context during session restoration, preventing buffer-list fallback leakage"
+                                  (let* ((other-buf (generate-new-buffer "other-chat-buffer"))
+                                         (restore-buf (generate-new-buffer "restored-chat-buffer"))
+                                         (other-dir "/mock/proj/other")
+                                         (restore-dir "/mock/proj/restore")
+                                         (macher-agent--allow-gptel-restore t)
+                                         (orig-called nil)
+                                         (orig-fun (lambda (&rest _args) (setq orig-called t))))
+                                    
+                                    (unwind-protect
+                                        (progn
+                                          ;; 1. Set up the other buffer to simulate an active workspace that could be leaked
+                                          (with-current-buffer other-buf
+                                            (setq-local default-directory other-dir)
+                                            (macher-agent--init-workspace-state other-dir))
+                                          
+                                          ;; 2. Set up the restored buffer with its correct default-directory
+                                          (with-current-buffer restore-buf
+                                            (setq-local default-directory restore-dir)
+                                            
+                                            ;; Verify that prior to restore advice, persistent-context is nil
+                                            (expect (bound-and-true-p macher-agent--persistent-context) :to-be nil)
+                                            
+                                            ;; Execute the restore advice
+                                            (macher-agent--gptel-restore-advice orig-fun)
+                                            
+                                            ;; Verify the original restore function was called
+                                            (expect orig-called :to-be t)
+                                            
+                                            ;; Verify that the correct workspace context was created and bound
+                                            (let ((local-ctx (bound-and-true-p macher-agent--persistent-context)))
+                                              (expect local-ctx :not :to-be nil)
+                                              (let ((workspace (macher-agent--get-context-workspace local-ctx)))
+                                                (expect (macher-agent--get-workspace-root workspace) :to-equal (expand-file-name restore-dir))))))
+                                      
+                                      ;; Clean up temp buffers
+                                      (when (buffer-live-p other-buf) (kill-buffer other-buf))
+                                      (when (buffer-live-p restore-buf) (kill-buffer restore-buf))))))
                     (describe "Sandbox Execution (macher-agent-vfs-client.el)"
                               (describe "read_media_in_workspace"
                                         (it "errors if gptel-track-media is nil"
@@ -384,6 +423,9 @@
                                                                                    :contents '(("/my/project/src/main.rs" . ("orig" . "new content")))))
                                                    (write-region-called-with nil))
                                               
+                                              ;; Spy on file-in-directory-p to allow mock/non-existent sandbox directories
+                                              (spy-on 'file-in-directory-p :and-return-value t)
+
                                               ;; Mock the context root provider (struct access)
                                               (spy-on 'macher--workspace-root :and-return-value workspace-root)
                                               

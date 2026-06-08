@@ -153,6 +153,12 @@
 (defun macher-agent--gptel-restore-advice (orig-fun &rest args)
   "Bypass `gptel--restore-state' unless explicitly allowed."
   (when macher-agent--allow-gptel-restore
+    (let* ((proj (and (fboundp 'project-current) (project-current nil)))
+           (current-root (or (and proj (fboundp 'project-root) (project-root proj))
+                             (and (fboundp 'vc-root-dir) (vc-root-dir))
+                             default-directory)))
+      (when (and current-root (fboundp 'macher-agent--init-workspace-state))
+        (macher-agent--init-workspace-state current-root)))
     (let ((ctx (when (fboundp 'macher-agent-current-context)
                  (macher-agent-current-context))))
       (when ctx
@@ -207,13 +213,37 @@ Also aligns `gptel-backend` with `gptel-model` if the model belongs to a differe
 
 (advice-add 'gptel--apply-preset :after #'macher-agent--after-apply-preset-advice)
 
-(defun macher-agent--tolerate-dead-buffer-sentinel (orig-fn proc event &rest args)
-  "Prevent gptel's sentinel from crashing when a sub-agent buffer is abruptly reaped."
-  (let ((buf (process-buffer proc)))
-    (if (and buf (buffer-live-p buf))
-        (apply orig-fn proc event args)
-      (message "Macher-Agent: Suppressed gptel sentinel for reaped sub-agent."))))
+(defun macher-agent--tolerate-and-reap-sentinel (orig-fn proc event &rest args)
+  "Run gptel's sentinel safely and reap sub-agents only when explicitly flagged."
+  (let* ((internal-buf (process-buffer proc))
+         (fsm (car (alist-get proc gptel--request-alist)))
+         (proc-info (when fsm (gptel-fsm-info fsm)))
+         
+         ;; Extract the agent buffer via gptel's tracking keys
+         (agent-buf (when proc-info
+                      (or (plist-get proc-info :buffer)
+                          (let ((pos (plist-get proc-info :position)))
+                            (when (markerp pos) (marker-buffer pos)))))))
 
-(advice-add 'gptel-curl--sentinel :around #'macher-agent--tolerate-dead-buffer-sentinel)
+    ;; 1. Always run the original sentinel so gptel can process tool loops / callbacks
+    (condition-case err
+        (apply orig-fn proc event args)
+      ((error quit) nil))
+
+    ;; 2. Only reap if the buffer is live AND the flag is explicitly t
+    (when (and agent-buf (buffer-live-p agent-buf))
+      (let ((ready-to-reap (condition-case nil
+                               (buffer-local-value 'macher-agent--ready-to-reap agent-buf)
+                             (void-variable nil))))
+        (if (eq ready-to-reap t)
+            (progn
+              (message "Macher-Agent: Explicit flag detected. Reaping %s now." agent-buf)
+              (macher-agent--reap-buffer agent-buf))
+          ;; Do nothing if the flag is nil or void (e.g. during intermediate tool calls)
+          (message "Macher-Agent: Deferred reaping for %s (flag is %S)" 
+                   (buffer-name agent-buf) 
+                   (if (equal ready-to-reap nil) "nil" "unbound")))))))
+
+(advice-add 'gptel-curl--sentinel :around #'macher-agent--tolerate-and-reap-sentinel)
 
 (provide 'macher-agent-gptel-bridge)

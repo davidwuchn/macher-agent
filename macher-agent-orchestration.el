@@ -145,9 +145,12 @@
                           (setq-local macher-agent--ready-to-reap t)))
                       
                       (funcall callback res)
-                      
-                      (when (buffer-live-p buf)
-                        (run-at-time 0.1 nil #'macher-agent--reap-buffer buf))))
+
+                      ;; removed -- use already in place sentinel
+                      ;;(when (buffer-live-p buf)
+                      ;; (run-at-time 0.1 nil #'macher-agent--reap-buffer buf))
+                      )
+                    )
 
         (let* ((raw-str (when preset (if (symbolp preset) (symbol-name preset) preset)))
                (clean-sym (when raw-str (intern (replace-regexp-in-string "^@+" "" raw-str))))
