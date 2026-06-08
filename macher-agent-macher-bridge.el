@@ -112,9 +112,64 @@
     ;; 2. PHYSICAL FILES
     ;; Always run this pass even if empty, so the core package naturally generates 
     ;; its native "No changes were made" UI if needed.
-    (let ((p-ctx (macher-agent--make-vfs-context :workspace ws :contents physical-contents)))
+    (let ((p-ctx (macher-agent--make-vfs-context :workspace ws :contents physical-contents))
+          (shadow-descriptors nil))
       (setf (macher-context-prompt p-ctx) (macher-context-prompt context))
-      (funcall orig-fn p-ctx fsm))))
+      
+      ;; Identify physical files that have active open back buffers visiting them,
+      ;; and construct the shadow descriptors to temporarily redirect buffer operations.
+      (dolist (entry physical-contents)
+        (let* ((file-path (car entry))
+               (new-content (cdr (cdr entry)))
+               (orig-buf (or (get-file-buffer file-path)
+                             (find-buffer-visiting file-path))))
+          (when (and orig-buf (buffer-live-p orig-buf))
+            (push (list :original-buffer orig-buf
+                        :original-file-name (buffer-file-name orig-buf)
+                        :original-buffer-name (buffer-name orig-buf)
+                        :file-path file-path
+                        :new-content new-content
+                        :shadow-buffer nil)
+                  shadow-descriptors))))
+      
+      (unwind-protect
+          (progn
+            ;; Temporarily rename and detach the user's real buffers, and create shadow buffers
+            (dolist (desc shadow-descriptors)
+              (let* ((orig-buf (plist-get desc :original-buffer))
+                     (orig-name (plist-get desc :original-buffer-name))
+                     (file-path (plist-get desc :file-path))
+                     (new-content (plist-get desc :new-content))
+                     (temp-name (generate-new-buffer-name (format " *macher-hidden-%s*" orig-name))))
+                (with-current-buffer orig-buf
+                  (rename-buffer temp-name t)
+                  (setq buffer-file-name nil))
+                
+                (let ((shadow-buf (get-buffer-create orig-name)))
+                  (with-current-buffer shadow-buf
+                    (setq buffer-file-name file-path)
+                    (setq buffer-file-truename (file-truename file-path))
+                    (insert new-content)
+                    (set-buffer-modified-p nil))
+                  (plist-put desc :shadow-buffer shadow-buf))))
+            
+            ;; Execute the core patch builder
+            (funcall orig-fn p-ctx fsm))
+        
+        ;; Cleanup phase: destroy shadow buffers and perfectly restore original buffers
+        (dolist (desc shadow-descriptors)
+          (let ((shadow (plist-get desc :shadow-buffer))
+                (orig-buf (plist-get desc :original-buffer))
+                (orig-name (plist-get desc :original-buffer-name))
+                (orig-file (plist-get desc :original-file-name)))
+            (when (and shadow (buffer-live-p shadow))
+              (with-current-buffer shadow
+                (setq buffer-file-name nil))
+              (kill-buffer shadow))
+            (when (and orig-buf (buffer-live-p orig-buf))
+              (with-current-buffer orig-buf
+                (setq buffer-file-name orig-file)
+                (rename-buffer orig-name t)))))))))
 
 (advice-add 'macher--build-patch :around #'macher-agent--override-build-patch)
 

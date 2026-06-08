@@ -63,6 +63,7 @@
                           (puthash "/mock/proj/overlay.el" "VFS Overlay Content" (macher-agent-workspace-vfs-buffers workspace))
                           
                           (let ((written-to-sandbox nil))
+                            (spy-on 'file-in-directory-p :and-return-value t)
                             (spy-on 'write-region :and-call-fake
                                     (lambda (start end filename &rest _args)
                                       (when (string-suffix-p "overlay.el" filename)
@@ -145,7 +146,67 @@
                             (expect (car (car orig-called-with)) :to-equal '("/mock/proj/disk-file.el" "old" . "new"))
                             
                             ;; The virtual pass (executed first, so it sits in the second slot)
-                            (expect (car (cadr orig-called-with)) :to-equal '("*scratch*" "old" . "new"))))))
+                            (expect (car (cadr orig-called-with)) :to-equal '("*scratch*" "old" . "new")))))
+
+                    (it "creates temporary shadow buffers and renames open physical back buffers during build-patch"
+                        (let* ((workspace (make-macher-agent-workspace :project-root "/mock/proj/"))
+                               (file-path "/mock/proj/live-file.el")
+                               (context (macher--make-context :workspace (cons 'project "/mock/proj/")
+                                                              :contents `((,file-path . ("old content" . "new virtual content")))))
+                               (fsm 'mock-fsm)
+                               ;; Create an actual live buffer visiting that file
+                               (live-buf (get-buffer-create "live-file.el")))
+                          
+                          (with-current-buffer live-buf
+                            (setq buffer-file-name file-path)
+                            (setq buffer-file-truename (file-truename file-path))
+                            (insert "old content")
+                            (set-buffer-modified-p nil))
+                          
+                          (spy-on 'macher-agent-current-context :and-return-value context)
+                          (spy-on 'gptel-fsm-info :and-return-value (list :macher-agent-session (make-macher-agent-session :workspace workspace)))
+                          (setf (macher-context-dirty-p context) t)
+                          
+                          ;; Spy on macher--get-buffer to prevent real buffer rendering of the patch itself
+                          (spy-on 'macher--get-buffer :and-return-value (list (get-buffer-create "*patch*")))
+                          
+                          (let ((shadow-buffer-verified nil)
+                                (original-buffer-hidden nil))
+                            
+                            (macher-agent--override-build-patch 
+                             (lambda (_ctx _fsm)
+                               ;; Inside orig-fn:
+                               ;; 1. The original buffer should be renamed and file-visiting should be nil
+                               (expect (buffer-file-name live-buf) :to-be nil)
+                               (expect (buffer-name live-buf) :not :to-equal "live-file.el")
+                               (setq original-buffer-hidden t)
+                               
+                               ;; 2. A shadow buffer should exist with name "live-file.el" and visit file-path
+                               (let ((shadow (get-buffer "live-file.el")))
+                                 (expect shadow :not :to-be nil)
+                                 (when shadow
+                                   (expect (buffer-file-name shadow) :to-equal file-path)
+                                   (with-current-buffer shadow
+                                     (expect (buffer-string) :to-equal "new virtual content"))
+                                   (setq shadow-buffer-verified t))))
+                             context fsm)
+                            
+                            ;; After orig-fn, everything must be perfectly restored
+                            (expect original-buffer-hidden :to-be t)
+                            (expect shadow-buffer-verified :to-be t)
+                            
+                            ;; 3. Shadow buffer must be killed and original buffer must be restored
+                            (expect (get-buffer "live-file.el") :to-be live-buf)
+                            
+                            ;; 4. Original buffer must be restored
+                            (expect (buffer-name live-buf) :to-equal "live-file.el")
+                            (expect (buffer-file-name live-buf) :to-equal file-path))
+                          
+                          ;; Clean up the live-buf
+                          (when (buffer-live-p live-buf)
+                            (with-current-buffer live-buf
+                              (setq buffer-file-name nil))
+                            (kill-buffer live-buf)))))
 
           (describe "5. Sandbox Security & Path Traversal (Jailbreaks)"
                     

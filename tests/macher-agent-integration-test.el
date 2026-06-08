@@ -11,6 +11,15 @@
 (put 'macher-agent--is-subagent 'permanent-local t)
 (put 'macher-agent--ready-to-reap 'permanent-local t)
 
+(defun macher-agent--reap-buffers-on-idle ()
+  "Reap all buffers that are subagents and marked ready-to-reap."
+  (dolist (buf (buffer-list))
+    (when (buffer-live-p buf)
+      (with-current-buffer buf
+        (when (and (bound-and-true-p macher-agent--is-subagent)
+                   (bound-and-true-p macher-agent--ready-to-reap))
+          (macher-agent--reap-buffer buf))))))
+
 (describe "Macher-Agent Orchestration Integration"
           (before-each
            (setq macher-agent--garbage-queue nil)
