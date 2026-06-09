@@ -29,7 +29,7 @@
                         (let* ((ctx (macher--make-context :contents '(("test.txt" . ("orig" . "orig"))))))
                           (macher-agent--update-context-file ctx "test.txt" "modified")
                           (expect (macher-context-dirty-p ctx) :to-be t)
-                          (expect (cdr (cdr (assoc "test.txt" (macher-context-contents ctx)))) :to-equal "modified")))
+                          (expect (macher-agent-vfs-entry-curr (assoc "test.txt" (macher-context-contents ctx))) :to-equal "modified")))
 
                     (it "resolves context matching the active project root rather than selecting an arbitrary workspace"
                         (let* ((proj1-dir "/mock/proj1/")
@@ -100,7 +100,7 @@
                                     (macher-agent--sync-context-entry entry)
                                     
                                     ;; The agent's unapplied virtual edit MUST survive!
-                                    (expect (cddr entry) :to-equal "proposed ghost state")))
+                                    (expect (macher-agent-vfs-entry-curr entry) :to-equal "proposed ghost state")))
 
                               (it "invalidates edits and prevents ghost diffs if the underlying buffer or file is destroyed"
                                   (let* ((content-pair (cons "original state" "proposed ghost state"))
@@ -112,8 +112,8 @@
                                     (macher-agent--sync-context-entry entry)
                                     
                                     ;; The concurrency control detects the change and wipes the ghost edits
-                                    (expect (cadr entry) :to-be nil)
-                                    (expect (cddr entry) :to-be nil)))
+                                    (expect (macher-agent-vfs-entry-orig entry) :to-be nil)
+                                    (expect (macher-agent-vfs-entry-curr entry) :to-be nil)))
 
                               (it "splits pure buffers from physical files for independent diff generation"
                                   (let* ((ctx (macher--make-context))
@@ -213,8 +213,8 @@
                                               
                                               (let ((mutated (macher-agent--sync-context-entry entry)))
                                                 (expect mutated :to-be nil)
-                                                (expect (cadr entry) :to-equal "original state")
-                                                (expect (cddr entry) :to-equal "agent edit"))))
+                                                (expect (macher-agent-vfs-entry-orig entry) :to-equal "original state")
+                                                (expect (macher-agent-vfs-entry-curr entry) :to-equal "agent edit"))))
 
                                         (it "fast-forwards a clean virtual memory if the physical disk mutates naturally"
                                             (let* ((content-pair (cons "original state" "original state"))
@@ -225,8 +225,8 @@
                                               
                                               (let ((mutated (macher-agent--sync-context-entry entry)))
                                                 (expect mutated :to-be t)
-                                                (expect (cadr entry) :to-equal "new physical state")
-                                                (expect (cddr entry) :to-equal "new physical state"))))
+                                                (expect (macher-agent-vfs-entry-orig entry) :to-equal "new physical state")
+                                                (expect (macher-agent-vfs-entry-curr entry) :to-equal "new physical state"))))
 
                                         (it "OPTIMISTIC CONCURRENCY: invalidates virtual edits if a hostile physical mutation occurs"
                                             (let* ((content-pair (cons "original state" "agent edit"))
@@ -238,8 +238,8 @@
                                               (let ((mutated (macher-agent--sync-context-entry entry)))
                                                 ;; The system MUST detect the conflict and aggressively drop the agent's delta
                                                 (expect mutated :to-be t)
-                                                (expect (cadr entry) :to-equal "user physical edit")
-                                                (expect (cddr entry) :to-equal "user physical edit"))))
+                                                (expect (macher-agent-vfs-entry-orig entry) :to-equal "user physical edit")
+                                                (expect (macher-agent-vfs-entry-curr entry) :to-equal "user physical edit"))))
 
                                         (it "fast-forwards virtual memory if the physical mutation perfectly matches the virtual delta (patch applied)"
                                             (let* ((content-pair (cons "original state" "agent edit"))
@@ -253,8 +253,8 @@
                                                 ;; The system MUST recognise the patch was applied and fast-forward the baseline.
                                                 ;; It returns t (mutated) and updates orig to match new, preventing duplicate patches.
                                                 (expect mutated :to-be t)
-                                                (expect (cadr entry) :to-equal "agent edit")
-                                                (expect (cddr entry) :to-equal "agent edit")))))
+                                                (expect (macher-agent-vfs-entry-orig entry) :to-equal "agent edit")
+                                                (expect (macher-agent-vfs-entry-curr entry) :to-equal "agent edit")))))
 
                               )
                     (describe "Macher-Agent Tool Registry Resilience"

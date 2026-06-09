@@ -13,6 +13,7 @@
 (declare-function macher-agent--clone-context "macher-agent-vfs-client")
 (declare-function macher-agent--ensure-access "macher-agent-vfs-client")
 (declare-function macher-agent-context-classify-entry "macher-agent-vfs-client")
+(declare-function macher-agent-vfs-entry-curr "macher-agent-vfs-client")
 
 (cl-defstruct macher-agent-tool-response
   type
@@ -238,7 +239,7 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
 (defun macher-agent--read-file-vfs-aware (file-path context)
   "Read a file, prioritising the uncommitted VFS memory over the physical disk."
   (let* ((vfs-entry (when context (assoc file-path (macher-context-contents context))))
-         (vfs-content (cdr (cdr vfs-entry))))
+         (vfs-content (when vfs-entry (macher-agent-vfs-entry-curr vfs-entry))))
     (cond
      (vfs-content vfs-content)
      ((file-exists-p file-path)
