@@ -113,6 +113,9 @@
                 (default-tools (default-value 'gptel-tools)))
             (setq-local gptel-tools (macher-agent-deduplicate-tools (append default-tools gptel-tools resolved-tools)))))))))
 
+(defvar macher-agent--is-subagent nil)
+(defvar macher-agent--ready-to-reap nil)
+
 (put 'macher-agent--is-subagent 'permanent-local t)
 (put 'macher-agent--ready-to-reap 'permanent-local t)
 
@@ -121,12 +124,14 @@
   (let* ((buf-name (if (listp task) (plist-get task :buffer_name) task))
          (instructions (if (listp task) (plist-get task :instructions) ""))
          (preset (if (listp task) (plist-get task :preset) nil))
+         (is-background (and (listp task) (plist-get task :background)))
          (buf (get-buffer buf-name)))
     (if (not buf)
         (funcall callback (list :status 'error :error (format "ERROR: Sub-agent buffer '%s' not found." buf-name) :buffer_name buf-name))
       (macher-agent--prepare-subagent-instructions buf instructions preset)
       (with-current-buffer buf
-        (macher-agent--show-ui buf)
+        (unless is-background
+          (macher-agent--show-ui buf))
         
         ;; Guarantee this buffer is marked as a subagent locally
         (setq-local macher-agent--is-subagent t)
@@ -142,7 +147,8 @@
                     (lambda (res)
                       (when (buffer-live-p buf)
                         (with-current-buffer buf 
-                          (setq-local macher-agent--ready-to-reap t)))
+                          (unless is-background
+                            (setq-local macher-agent--ready-to-reap t))))
                       
                       (funcall callback res)
 

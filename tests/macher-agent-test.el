@@ -31,6 +31,46 @@
                           (expect (macher-context-dirty-p ctx) :to-be t)
                           (expect (cdr (cdr (assoc "test.txt" (macher-context-contents ctx)))) :to-equal "modified")))
 
+                    (it "resolves context matching the active project root rather than selecting an arbitrary workspace"
+                        (let* ((proj1-dir "/mock/proj1/")
+                               (proj2-dir "/mock/proj2/")
+                               (ws1 (make-macher-agent-workspace :project-root proj1-dir))
+                               (ws2 (make-macher-agent-workspace :project-root proj2-dir))
+                               (ctx1 (macher-agent--make-vfs-context :workspace ws1 :contents nil))
+                               (ctx2 (macher-agent--make-vfs-context :workspace ws2 :contents nil))
+                               (buf1 (generate-new-buffer "buf1"))
+                               (buf2 (generate-new-buffer "buf2")))
+                          (with-current-buffer buf1
+                            (setq-local macher-agent--is-workspace t)
+                            (setq-local macher-agent--persistent-context ctx1))
+                          (with-current-buffer buf2
+                            (setq-local macher-agent--is-workspace t)
+                            (setq-local macher-agent--persistent-context ctx2))
+                          (unwind-protect
+                              (let ((default-directory proj2-dir))
+                                ;; When we call macher-agent-current-context, it should resolve to ctx2 because proj2-dir is active
+                                (expect (macher-agent-current-context) :to-be ctx2))
+                            (kill-buffer buf1)
+                            (kill-buffer buf2))))
+
+                    (it "bypasses UI and reaper flag when spawning background tasks"
+                        (let* ((buf (generate-new-buffer "subagent-bg-buf"))
+                               (task `(:buffer_name ,(buffer-name buf) :instructions "run" :background t))
+                               (callback-called nil)
+                               (ui-shown nil))
+                          (spy-on 'macher-agent--show-ui :and-call-fake (lambda (&rest _args) (setq ui-shown t)))
+                          (spy-on 'macher-agent-gptel-transmit :and-call-fake
+                                  (lambda (_ctx plist)
+                                    (funcall (plist-get plist :on-success) "success-result")))
+                          (unwind-protect
+                              (progn
+                                (macher-agent-spawn-task task (lambda (_res) (setq callback-called t)))
+                                (expect callback-called :to-be t)
+                                (expect ui-shown :to-be nil)
+                                (with-current-buffer buf
+                                  (expect macher-agent--ready-to-reap :to-be nil)))
+                            (kill-buffer buf))))
+
                     (describe "Three-way Merge Logic"
                               (it "invalidates the local cache if both local and remote diverged"
                                   (let* ((test-dir (make-temp-file "macher-test-dir" t))

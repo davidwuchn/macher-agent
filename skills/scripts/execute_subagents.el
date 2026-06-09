@@ -20,7 +20,8 @@
                                                                      :preset       (or (plist-get task-obj :preset)
                                                                                        (alist-get 'preset task-obj)
                                                                                        (alist-get "preset" task-obj nil nil #'equal)
-                                                                                       "macher-agent-worker")))))
+                                                                                       "macher-agent-worker")
+                                                                     :background t))))
                                         (dolist (task normalized-tasks)
                                           (macher-agent-spawn-task task (lambda (res) 
                                                                           (message "Background subagent %s task execution completed with status: %s"

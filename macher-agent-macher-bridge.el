@@ -145,8 +145,10 @@
                   (rename-buffer temp-name t)
                   (setq buffer-file-name nil))
                 
-                (let ((shadow-buf (get-buffer-create orig-name)))
+                (let* ((shadow-buf (get-buffer-create orig-name))
+                       (exact-dir (file-name-directory (expand-file-name file-path))))
                   (with-current-buffer shadow-buf
+                    (setq default-directory exact-dir)
                     (setq buffer-file-name file-path)
                     (setq buffer-file-truename (file-truename file-path))
                     (insert new-content)

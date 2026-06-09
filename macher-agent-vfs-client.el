@@ -170,16 +170,26 @@ If REPLACE-ALL is nil, errors if OLD-TEXT occurs more than once."
      (fsm-ctx fsm-ctx)
      (local-ctx local-ctx)
      (t
-      (let ((primary-ctx nil)
-            (primary-directives nil)) ;; <-- Capture the workspace skills
-        ;; Search for the active workspace buffer
+      (let* ((proj (and (fboundp 'project-current) (project-current nil)))
+             (active-root (or (and proj (fboundp 'project-root) (project-root proj))
+                              (and (fboundp 'vc-root-dir) (vc-root-dir))
+                              default-directory))
+             (active-root-expanded (and active-root (expand-file-name active-root)))
+             (primary-ctx nil)
+             (primary-directives nil)) ;; <-- Capture the workspace skills
+        ;; Search for the active workspace buffer matching active-root-expanded
         (dolist (buf (buffer-list))
           (with-current-buffer buf
             (when (and (bound-and-true-p macher-agent--is-workspace)
                        (bound-and-true-p macher-agent--persistent-context))
-              (unless primary-ctx 
-                (setq primary-ctx macher-agent--persistent-context)
-                (setq primary-directives gptel-directives))))) ;; <-- Save them
+              (let* ((ws (macher-agent--get-context-workspace macher-agent--persistent-context))
+                     (ws-root (and ws (macher-agent--get-workspace-root ws)))
+                     (ws-root-expanded (and ws-root (expand-file-name ws-root))))
+                (when (or (not active-root-expanded)
+                          (and ws-root-expanded (string= active-root-expanded ws-root-expanded)))
+                  (unless primary-ctx 
+                    (setq primary-ctx macher-agent--persistent-context)
+                    (setq primary-directives gptel-directives))))))) ;; <-- Save them
         
         ;; Fallback lazy initialization
         (unless primary-ctx
@@ -193,7 +203,7 @@ If REPLACE-ALL is nil, errors if OLD-TEXT occurs more than once."
                 (setq primary-directives gptel-directives)) ;; <-- Capture them after init
             (error "No active agent session found")))
         
-        ;; Inject both the context and the skills into the current buffer (e.g., navigate.md)
+        ;; Inject both the context and the skills into the current buffer (for example, navigate.md)
         (when primary-ctx 
           (setq-local macher-agent--persistent-context primary-ctx)
           (when primary-directives

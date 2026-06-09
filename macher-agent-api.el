@@ -606,5 +606,4 @@
       
       (switch-to-buffer (current-buffer)))))
 
-
 (provide 'macher-agent-api)

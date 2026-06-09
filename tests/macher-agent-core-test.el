@@ -187,7 +187,8 @@
                                  (when shadow
                                    (expect (buffer-file-name shadow) :to-equal file-path)
                                    (with-current-buffer shadow
-                                     (expect (buffer-string) :to-equal "new virtual content"))
+                                     (expect (buffer-string) :to-equal "new virtual content")
+                                     (expect default-directory :to-equal (file-name-directory (expand-file-name file-path))))
                                    (setq shadow-buffer-verified t))))
                              context fsm)
                             
