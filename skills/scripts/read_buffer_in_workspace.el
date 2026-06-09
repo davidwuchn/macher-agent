@@ -23,7 +23,7 @@
                                                (parsed-offset (when offset (round offset)))
                                                (parsed-limit (when limit (round limit))))
                                           (macher-agent--ensure-access context actual-name)
-                                          (let* ((contents (assoc actual-name (macher-agent--get-context-contents context)))
+                                          (let* ((contents (cl-find actual-name (macher-agent--get-context-contents context) :key #'macher-agent-vfs-entry-path :test #'equal))
                                                  (content (if contents (macher-agent-vfs-entry-curr contents)
                                                             (with-current-buffer (get-buffer actual-name)
                                                               (buffer-substring-no-properties (point-min) (point-max))))))

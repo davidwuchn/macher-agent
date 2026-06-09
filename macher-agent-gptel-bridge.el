@@ -4,7 +4,7 @@
 (require 'macher)
 (require 'macher-agent-vfs-client)
 
-(declare-function macher-agent-current-context "macher-agent-vfs-client")
+(declare-function macher-agent-resolve-context "macher-agent-vfs-client")
 (declare-function macher-agent--auto-sync-context "macher-agent-vfs-client")
 (declare-function macher-agent--split-context "macher-agent-vfs-client")
 (declare-function macher-agent--build-virtual-patch "macher-agent-vfs-client")
@@ -14,7 +14,7 @@
 (defun macher-agent-sync-prompt-transformer (prompt)
   "Synchronise the active virtual file system state and registries before the prompt is sent."
   (let* ((macher-agent--allow-lazy-init t)
-         (ctx (macher-agent-current-context)))
+         (ctx (macher-agent-resolve-context)))
     (when ctx
       (macher-agent--auto-sync-context ctx)
       (when (fboundp 'macher-agent-initialize-skills)
@@ -23,8 +23,8 @@
 
 (defun macher-agent-post-response-reaper (_beg _end)
   "Cleanly reap the sub-agent buffer if flagged for disposal."
-  (when (and (bound-and-true-p macher-agent--is-subagent)
-             (eq (bound-and-true-p macher-agent--ready-to-reap) t))
+  (when (and (macher-agent-subagent-p)
+             (macher-agent-ready-to-reap-p))
     (let ((buf (current-buffer)))
       (run-at-time 0 nil (lambda ()
                            (when (and (buffer-live-p buf)
@@ -49,14 +49,13 @@
                 (remove-hook 'gptel-prompt-transform-functions transform-hook t)))
         (add-hook 'gptel-prompt-transform-functions transform-hook nil t))
 
-
       (let ((response-hook nil))
         (setq response-hook
               (lambda (_beg _end)
                 (let ((res (string-trim (buffer-substring-no-properties (point-min) (point-max)))))
                   
                   
-                  (if (and (bound-and-true-p macher-agent--is-subagent)
+                  (if (and (macher-agent-subagent-p)
                            (not (string-empty-p res)))
                       (message "DEBUG BRIDGE: Stream ended for sub-agent. Deferring to tool execution...")
                     
@@ -80,7 +79,7 @@
       (when fsm
         (let ((session (or (plist-get info :macher-agent-session)
                            (let* ((ws (macher-agent--get-context-workspace ctx))
-                                  (proj-root (if ws (macher-agent--get-workspace-root ws) default-directory))
+                                  (proj-root (if ws (macher-agent-root ws) default-directory))
                                   (agent-ws (make-macher-agent-workspace :project-root proj-root)))
                              (make-macher-agent-session :id (buffer-name) :workspace agent-ws)))))
           (setf (gptel-fsm-info fsm) (plist-put info :macher-agent-session session))))))
@@ -90,10 +89,7 @@
 
 (defun macher-agent--inject-media-fsm-advice (orig-fun fsm &rest args)
   "Inject pending tool media into the FSM payload right before it hits the network."
-  (let* ((info (if (fboundp 'gptel-fsm-info)
-                   (funcall 'gptel-fsm-info fsm)
-                 (when (fboundp 'mock-gptel-fsm-info)
-                   (funcall 'mock-gptel-fsm-info fsm))))
+  (let* ((info (macher-agent--extract-fsm-info fsm))
          (session (plist-get info :macher-agent-session))
          (pending (when session (macher-agent-session-pending-media session))))
     
@@ -142,14 +138,11 @@
 (defun macher-agent--gptel-restore-advice (orig-fun &rest args)
   "Bypass `gptel--restore-state' unless explicitly allowed."
   (when macher-agent--allow-gptel-restore
-    (let* ((proj (and (fboundp 'project-current) (project-current nil)))
-           (current-root (or (and proj (fboundp 'project-root) (project-root proj))
-                             (and (fboundp 'vc-root-dir) (vc-root-dir))
-                             default-directory)))
+    (let ((current-root (macher-agent-root nil)))
       (when (and current-root (fboundp 'macher-agent--init-workspace-state))
         (macher-agent--init-workspace-state current-root)))
-    (let ((ctx (when (fboundp 'macher-agent-current-context)
-                 (macher-agent-current-context))))
+    (let ((ctx (when (fboundp 'macher-agent-resolve-context)
+                 (macher-agent-resolve-context))))
       (when ctx
         (macher-agent-initialize-skills ctx)))
     (apply orig-fun args)))
@@ -180,14 +173,17 @@ Returns a cons cell (BACKEND . MODEL-FORMAT) if found, otherwise nil."
   "Ensure gptel-tools is resolved to structs, includes default tools, and is deduplicated.
 Also aligns `gptel-backend` with `gptel-model` if the model belongs to a different backend."
   (when (boundp 'gptel-tools)
-    (let ((default-tools (default-value 'gptel-tools))
-          (clean-sym (when (and preset (or (symbolp preset) (stringp preset)))
-                       (let* ((raw-str (if (symbolp preset) (symbol-name preset) preset))
-                              (clean-str (replace-regexp-in-string "^@+" "" raw-str)))
-                         (intern clean-str)))))
+    (let* ((default-tools (default-value 'gptel-tools))
+           (clean-sym (macher-normalise-preset-name preset))
+           (preset-tools nil))
       (when clean-sym
-        (setq-local macher-agent--active-skill-sym clean-sym))
-      (setq-local gptel-tools (macher-agent-deduplicate-tools (append default-tools gptel-tools)))))
+        (setq-local macher-agent--active-skill-sym clean-sym)
+        (when (boundp 'gptel--known-presets)
+          (let* ((spec (alist-get clean-sym gptel--known-presets))
+                 (tools (plist-get spec :tools)))
+            (when (and tools (eq (car tools) :append))
+              (setq preset-tools (cdr tools))))))
+      (setq-local gptel-tools (macher-agent-normalize-tools (append default-tools gptel-tools preset-tools)))))
 
   ;; Auto-resolve and align backend when `gptel-model' is updated via a preset
   (when (bound-and-true-p gptel-model)
@@ -202,12 +198,66 @@ Also aligns `gptel-backend` with `gptel-model` if the model belongs to a differe
 
 (advice-add 'gptel--apply-preset :after #'macher-agent--after-apply-preset-advice)
 
+(defvar macher-agent--active-fsm nil
+  "Dynamically bound to the active FSM during tool execution hooks.")
+
+(defun macher-agent--bind-active-fsm-advice (orig-fn fsm &rest args)
+  "Capture the current FSM dynamically so tool validators do not rely on lagging state variables."
+  (let ((macher-agent--active-fsm fsm))
+    (apply orig-fn fsm args)))
+
+;; Advise both pre and post hooks to guarantee the FSM is always available
+(advice-add 'gptel--handle-pre-tool :around #'macher-agent--bind-active-fsm-advice)
+(advice-add 'gptel--handle-post-tool :around #'macher-agent--bind-active-fsm-advice)
+
+(defun macher-agent--enforce-tool-scope (tool &rest _args)
+  "Enforce that TOOL is explicitly within the buffer-local `gptel-tools'
+or the active request FSM.
+If not, block execution to prevent hallucinated or globally-leaked tools."
+  (let* ((tool-name (cond ((stringp tool) tool)
+                          ((and (fboundp 'gptel-tool-p) (gptel-tool-p tool))
+                           (gptel-tool-name tool))
+                          ((and (listp tool) (plist-get tool :name))
+                           (plist-get tool :name))
+                          ((and (listp tool) (plist-get tool :function))
+                           (let ((fn (plist-get tool :function)))
+                             (if (listp fn) (plist-get fn :name) fn)))
+                          ((symbolp tool) (symbol-name tool))
+                          (t (format "%s" tool))))
+         
+         (fsm (or macher-agent--active-fsm
+                  (bound-and-true-p macher--fsm-latest)
+                  (bound-and-true-p gptel--fsm-last)))
+         (info (when fsm (gptel-fsm-info fsm)))
+         
+         (fsm-tools (when info (plist-get info :tools)))
+         
+         (in-fsm (and fsm-tools
+                      (cl-find tool-name fsm-tools
+                               :key (lambda (t_) 
+                                      (if (and (fboundp 'gptel-tool-p) (gptel-tool-p t_))
+                                          (gptel-tool-name t_)
+                                        (format "%s" t_)))
+                               :test #'string=)))
+         
+         (local-tool (or in-fsm
+                         (and (boundp 'gptel-tools)
+                              (cl-find tool-name gptel-tools
+                                       :key (lambda (t_) 
+                                              (if (and (fboundp 'gptel-tool-p) (gptel-tool-p t_))
+                                                  (gptel-tool-name t_)
+                                                (format "%s" t_)))
+                                       :test #'string=)))))
+    (unless local-tool
+      (list :block (format "ERROR: Tool '%s' is out of scope. It was not provided to this sub-agent." tool-name)))))
+
 (defun macher-agent-setup-gptel-buffer ()
   "Set up a gptel buffer with macher-agent capabilities if in an active agent session."
   (let* ((macher-agent--allow-lazy-init nil)
-         (ctx (ignore-errors (macher-agent-current-context))))
+         (ctx (ignore-errors (macher-agent-resolve-context))))
     (when ctx
-      (add-hook 'gptel-prompt-transform-functions #'macher-agent-sync-prompt-transformer nil t))))
+      (add-hook 'gptel-prompt-transform-functions #'macher-agent-sync-prompt-transformer nil t)
+      (add-hook 'gptel-pre-tool-call-functions #'macher-agent--enforce-tool-scope nil t))))
 
 (add-hook 'gptel-mode-hook #'macher-agent-setup-gptel-buffer)
 

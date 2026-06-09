@@ -23,9 +23,9 @@
 (describe "Macher-Agent Orchestration Integration"
           (before-each
            (setq macher-agent--garbage-queue nil)
-           (spy-on 'macher-agent-current-context :and-return-value
+           (spy-on 'macher-agent-resolve-context :and-return-value
                    (let ((ctx (macher-agent--make-vfs-context :workspace (cons 'agent (make-macher-agent-workspace :project-root "/mock/proj")) :contents nil)))
-                     (macher-agent-initialize-skills ctx macher-agent-bundled-skills-directory)
+                     (macher-agent-initialize-skills ctx (or (bound-and-true-p macher-agent--bundled-skills-dir) macher-agent-bundled-skills-directory))
                      ctx))
            
            ;; 1. Mock the LLM: Intercept gptel-send to act as the AI for the sub-agents
@@ -62,9 +62,9 @@
                   
                   ;; --- A. Setup the Master Orchestrator Context ---
                   (let ((macher-agent--allow-lazy-init t))
-                    (let* ((spawn-tool (or (gethash "spawn_subagent" (macher-agent-workspace-tools-registry (macher-agent--get-context-workspace (macher-agent-current-context))))
+                    (let* ((spawn-tool (or (gethash "spawn_subagent" (macher-agent-workspace-tools-registry (macher-agent--get-context-workspace (macher-agent-resolve-context))))
                                            (bound-and-true-p macher-agent-spawn-subagent-tool)))
-                           (delegate-tool (or (gethash "delegate_tasks_to_subagents" (macher-agent-workspace-tools-registry (macher-agent--get-context-workspace (macher-agent-current-context))))
+                           (delegate-tool (or (gethash "delegate_tasks_to_subagents" (macher-agent-workspace-tools-registry (macher-agent--get-context-workspace (macher-agent-resolve-context))))
                                               (bound-and-true-p macher-agent-delegate-tasks-to-subagents-tool))))
                       
                       ;; --- B. Spawn Sub-agents via Tool ---

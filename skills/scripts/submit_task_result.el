@@ -9,7 +9,11 @@
                                         ;; Synchronously hand the result back to the parent
                                         (when (boundp 'macher-agent--parent-callback)
                                           (funcall macher-agent--parent-callback 
-                                                   (list :status 'success :data final_answer :buffer_name worker-id)))
+                                                   ;; FIX: Yield the struct, not a plist
+                                                   (make-macher-agent-tool-response 
+                                                    :status 'success 
+                                                    :data final_answer 
+                                                    :buffer-name worker-id)))
                                         
                                         ;; Flag the buffer so the global idle timer knows it's safe to reap
                                         (setq-local macher-agent-task-finished t)

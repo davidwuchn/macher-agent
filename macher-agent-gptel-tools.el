@@ -13,11 +13,14 @@
 (declare-function macher-agent--clone-context "macher-agent-vfs-client")
 (declare-function macher-agent--ensure-access "macher-agent-vfs-client")
 (declare-function macher-agent-context-classify-entry "macher-agent-vfs-client")
-(declare-function macher-agent-vfs-entry-curr "macher-agent-vfs-client")
 
 (cl-defstruct macher-agent-tool-response
   type
-  payload)
+  payload
+  status
+  data
+  error
+  buffer-name)
 
 (defvar macher-agent-allowed-tools nil
   "List of custom tool names that should receive the macher-context.")
@@ -98,7 +101,6 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
                                                         (fboundp 'macher-context-p) 
                                                         (macher-context-p x))) 
                                        all-args))
-         ;; Safely remove ONLY the callback and injected context, preserving positional nil values
          (raw-tool-args (cl-remove-if (lambda (x) 
                                         (or (and callback (eq x callback)) 
                                             (and injected-context (eq x injected-context)))) 
@@ -203,12 +205,10 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
          (sandbox-dir (make-temp-file "macher-sandbox-" t)))
     (condition-case err
         (progn
-          ;; 1. Synchronous prep (rsync is fast enough not to block noticeably)
           (macher-agent--vfs-verify-clean-merge workspace-root context)
           (macher-agent--vfs-sync-baseline workspace-root sandbox-dir)
           (macher-agent--vfs-apply-overlay context sandbox-dir)
 
-          ;; 2. Asynchronous execution
           (let* ((out-buf (generate-new-buffer " *macher-sandbox-out*"))
                  (default-directory (file-name-as-directory sandbox-dir)))
             (make-process
@@ -221,16 +221,13 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
                  (let ((output (with-current-buffer out-buf (buffer-string)))
                        (exit-code (process-exit-status proc)))
                    
-                   ;; 3. Cleanup safely in the background
                    (kill-buffer out-buf)
                    (ignore-errors (delete-directory sandbox-dir t))
                    
-                   ;; 4. Trigger tool callbacks
                    (if (= exit-code 0)
                        (funcall on-success output)
                      (funcall on-error (list :status 'error :error output)))))))))
       (error
-       ;; Ensure cleanup if the prep phase fails before the process starts
        (ignore-errors (delete-directory sandbox-dir t))
        (funcall on-error (list :status 'error :error (error-message-string err)))))))
 
@@ -238,7 +235,7 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
 
 (defun macher-agent--read-file-vfs-aware (file-path context)
   "Read a file, prioritising the uncommitted VFS memory over the physical disk."
-  (let* ((vfs-entry (when context (assoc file-path (macher-context-contents context))))
+  (let* ((vfs-entry (when context (cl-find file-path (macher-context-contents context) :key #'macher-agent-vfs-entry-path :test #'equal)))
          (vfs-content (when vfs-entry (macher-agent-vfs-entry-curr vfs-entry))))
     (cond
      (vfs-content vfs-content)

@@ -9,7 +9,8 @@
 (declare-function macher-agent-sync-prompt-transformer "macher-agent-gptel-bridge" (prompt))
 (declare-function macher-agent-post-response-reaper "macher-agent-gptel-bridge" (beg end))
 (declare-function macher-agent--set-system-message "macher-agent-gptel-tools" (msg))
-(declare-function macher-agent-current-context "macher-agent-vfs-client")
+(declare-function macher-agent-resolve-context "macher-agent-vfs-client")
+(declare-function macher-agent--inject-context-state "macher-agent-vfs-client" (context &optional directives))
 (declare-function macher-agent--init-workspace-state "macher-agent-vfs-client")
 (declare-function macher-agent--auto-sync-context "macher-agent-vfs-client" (&optional ctx fsm))
 (declare-function macher-agent-vfs-entry-path "macher-agent-vfs-client")
@@ -41,13 +42,23 @@
                        (when (= completed total)
                          (funcall final-callback results)))))))))
 
+(defun macher-agent-subagent-p (&optional buffer)
+  "Return non-nil if BUFFER is a subagent."
+  (with-current-buffer (or buffer (current-buffer))
+    (bound-and-true-p macher-agent--is-subagent)))
+
+(defun macher-agent-ready-to-reap-p (&optional buffer)
+  "Return non-nil if BUFFER is ready to be reaped."
+  (with-current-buffer (or buffer (current-buffer))
+    (bound-and-true-p macher-agent--ready-to-reap)))
+
 (defun macher-agent--reap-buffer (buf)
   "An indestructible garbage collector that natively aborts hidden gptel networks."
   (condition-case nil
       (when (buffer-live-p buf)
         (with-current-buffer buf
-          (when (and (bound-and-true-p macher-agent--is-subagent)
-                     (bound-and-true-p macher-agent--ready-to-reap))
+          (when (and (macher-agent-subagent-p)
+                     (macher-agent-ready-to-reap-p))
             
             (set-buffer-modified-p nil)
 
@@ -77,20 +88,11 @@
               (kill-buffer buf)))))
     ((error quit) nil)))
 
-;; --- Resurrect and lock the timer ---
-;;(defvar macher-agent--reaper-timer nil)
-;;(when (timerp macher-agent--reaper-timer)
-;;  (cancel-timer macher-agent--reaper-timer))
-
-;;(setq macher-agent--reaper-timer 
-;;      (run-with-idle-timer 0.5 t #'macher-agent--reap-buffers-on-idle))
-
 (defun macher-agent--apply-preset (preset)
   "Apply the PRESET directive securely, flawlessly merging buffer and preset tools."
-  (let* ((raw-str (if (symbolp preset) (symbol-name preset) preset))
-         (clean-str (replace-regexp-in-string "^@+" "" raw-str))
-         (clean-sym (intern clean-str))
-         (spec (gptel-get-preset clean-sym)))
+  (let* ((clean-sym (macher-normalise-preset-name preset))
+         (spec (when (and clean-sym (boundp 'gptel--known-presets)) 
+                 (alist-get clean-sym gptel--known-presets))))
     (when spec
       (setq-local macher-agent--active-skill-sym clean-sym)
       (setq-local gptel--preset clean-sym)
@@ -113,9 +115,10 @@
         (when tokens
           (setq-local gptel-max-tokens tokens))
         (when tools
-          (let ((resolved-tools (macher-agent-resolve-and-flatten-tools tools))
-                (default-tools (default-value 'gptel-tools)))
-            (setq-local gptel-tools (macher-agent-deduplicate-tools (append default-tools gptel-tools resolved-tools)))))))))
+          (let* ((actual-tools (if (eq (car tools) :append) (cdr tools) tools))
+                 (resolved-tools (macher-agent-normalize-tools actual-tools))
+                 (default-tools (default-value 'gptel-tools)))
+            (setq-local gptel-tools (macher-agent-normalize-tools (append default-tools gptel-tools resolved-tools)))))))))
 
 (defvar macher-agent--is-subagent nil)
 (defvar macher-agent--ready-to-reap nil)
@@ -131,22 +134,14 @@
          (is-background (and (listp task) (plist-get task :background)))
          (buf (get-buffer buf-name)))
     (if (not buf)
-        (funcall callback (list :status 'error :error (format "ERROR: Sub-agent buffer '%s' not found." buf-name) :buffer_name buf-name))
+        (funcall callback (make-macher-agent-tool-response :status 'error :error (format "ERROR: Sub-agent buffer '%s' not found." buf-name) :buffer-name buf-name))
       (macher-agent--prepare-subagent-instructions buf instructions preset)
       (with-current-buffer buf
         (unless is-background
           (macher-agent--show-ui buf))
         
-        ;; Guarantee this buffer is marked as a subagent locally
         (setq-local macher-agent--is-subagent t)
         
-        ;; Wrap the parent callback to guarantee the death flag is set upon execution,
-        ;; completely mitigating bypasses triggered by explicit tool usage like `submit_task_result`.
-        ;; (setq-local macher-agent--parent-callback 
-        ;;             (lambda (res)
-        ;;               (when (buffer-live-p buf)
-        ;;                 (with-current-buffer buf (setq-local macher-agent--ready-to-reap t)))
-        ;;               (funcall callback res)))
         (setq-local macher-agent--parent-callback 
                     (lambda (res)
                       (when (buffer-live-p buf)
@@ -154,13 +149,7 @@
                           (unless is-background
                             (setq-local macher-agent--ready-to-reap t))))
                       
-                      (funcall callback res)
-
-                      ;; removed -- use already in place sentinel
-                      ;;(when (buffer-live-p buf)
-                      ;; (run-at-time 0.1 nil #'macher-agent--reap-buffer buf))
-                      )
-                    )
+                      (funcall callback res)))
 
         (let* ((raw-str (when preset (if (symbolp preset) (symbol-name preset) preset)))
                (clean-sym (when raw-str (intern (replace-regexp-in-string "^@+" "" raw-str))))
@@ -173,9 +162,9 @@
           (macher-agent-gptel-transmit
            task-ctx
            (list :on-success (lambda (res)
-                               (funcall macher-agent--parent-callback (list :status 'success :data res :buffer_name buf-name)))
+                               (funcall macher-agent--parent-callback (make-macher-agent-tool-response :status 'success :data res :buffer-name buf-name)))
                  :on-error (lambda (err)
-                             (funcall macher-agent--parent-callback (list :status 'error :error (format "ERROR: %s" err) :buffer_name buf-name))))))))))
+                             (funcall macher-agent--parent-callback (make-macher-agent-tool-response :status 'error :error (format "ERROR: %s" err) :buffer-name buf-name))))))))))
 
 (defvar macher-agent-subagent-setup-hook nil)
 
@@ -183,18 +172,20 @@
   (get-buffer-create buf-name)
   (when persistent-context
     (let* ((contents (macher-agent--get-context-contents persistent-context))
-           (entry (assoc buf-name contents)))
+           (entry (cl-find buf-name contents :key #'macher-agent-vfs-entry-path :test #'equal)))
       (unless entry
         (let ((orig (with-current-buffer buf-name (buffer-substring-no-properties (point-min) (point-max)))))
           (macher-agent--set-context-contents persistent-context
-                                              (cons (cons buf-name (cons orig orig)) contents))))))
+                                              (cons (macher-agent-vfs-make-entry buf-name orig orig) contents))))))
   (run-hooks 'macher-agent-context-mutated-hook))
 
 ;;;###autoload
 (defun macher-agent-add-buffer-to-scope (buffer)
   (interactive "BAdd buffer to current agent's scope: ")
   (let* ((buf-name (if (stringp buffer) buffer (buffer-name buffer)))
-         (ctx (macher-agent-current-context)))
+         (ctx (macher-agent-resolve-context)))
+    (unless ctx
+      (error "No active agent session found"))
     (macher-agent--add-buffer-to-scope-headless buf-name ctx)
     (message "SUCCESS: Added '%s' to the agent's restricted scope." buf-name)))
 
@@ -204,15 +195,20 @@
 (defun macher-agent--prepare-subagent-buffer (buf full-dir context &optional preset parent-tools parent-model parent-backend parent-presets parent-directives parent-temp parent-tokens)
   "Prepare a subagent buffer, locking its directory strictly to the workspace root."
   (with-current-buffer buf
-    (setq default-directory (file-name-as-directory (macher-agent--get-project-root full-dir)))
+    (setq default-directory (file-name-as-directory (macher-agent-root full-dir)))
     
     (when (and (fboundp 'markdown-mode) (not (derived-mode-p 'markdown-mode)))
       (markdown-mode))
+    
+    (setq-local macher-agent--is-subagent t)
+    
     (when (and (fboundp 'gptel-mode) (not gptel-mode))
       (gptel-mode 1))
     
     (setq-local gptel-stream nil)
-    (setq-local macher-agent--is-subagent t)
+    
+    (when context
+      (macher-agent--inject-context-state context))
     
     (when parent-model (setq-local gptel-model parent-model))
     (when parent-backend (setq-local gptel-backend parent-backend))
@@ -225,12 +221,11 @@
     (make-local-variable 'gptel-tools)
     
     (when parent-tools
-      (setq gptel-tools (macher-agent-deduplicate-tools (append gptel-tools parent-tools))))
+      (setq gptel-tools (macher-agent-normalize-tools (append gptel-tools parent-tools))))
     
     (when preset
       (macher-agent--apply-preset preset))
     
-    ;; Local pre-flight sync hook and post-response reaper
     (add-hook 'gptel-prompt-transform-functions #'macher-agent-sync-prompt-transformer nil t)
     (add-hook 'gptel-post-response-functions #'macher-agent-post-response-reaper nil t)
     
@@ -240,7 +235,6 @@
 (defun macher-agent-add-subagent (name dir &optional instructions context preset)
   "Create and prepare a new subagent buffer, inheriting parent state."
   (let* ((parent-tools (bound-and-true-p gptel-tools))
-         ;; Capture parent model, backend, presets, directives, temperature, and tokens
          (parent-model (bound-and-true-p gptel-model))
          (parent-backend (bound-and-true-p gptel-backend))
          (parent-presets (bound-and-true-p gptel--known-presets))
@@ -249,7 +243,6 @@
          (parent-tokens (bound-and-true-p gptel-max-tokens))
          (buf (get-buffer-create name)))
     
-    ;; Pass them into the preparation buffer
     (macher-agent--prepare-subagent-buffer
      buf dir context preset parent-tools parent-model parent-backend
      parent-presets parent-directives parent-temp parent-tokens)
@@ -263,7 +256,7 @@
 
 (defun macher-agent-apply-virtual-buffers ()
   (interactive)
-  (let* ((ctx (macher-agent-current-context))
+  (let* ((ctx (macher-agent-resolve-context))
          (contents (and ctx (macher-agent--get-context-contents ctx))))
     (when contents
       (dolist (entry contents)
@@ -279,7 +272,6 @@
 (defun macher-agent--prepare-subagent-instructions (buf instructions &optional preset)
   "Insert INSTRUCTIONS into BUF and strictly bind its preset system message."
   (with-current-buffer buf
-    (erase-buffer)
     (unless (string-empty-p instructions)
       (insert (substring-no-properties instructions)))
     (when preset
@@ -287,7 +279,7 @@
 
 (add-hook 'gptel-pre-response-hook
           (lambda ()
-            (let ((ctx (ignore-errors (macher-agent-current-context))))
+            (let ((ctx (ignore-errors (macher-agent-resolve-context))))
               (when ctx (macher-agent--auto-sync-context ctx)))))
 
 (provide 'macher-agent-orchestration)

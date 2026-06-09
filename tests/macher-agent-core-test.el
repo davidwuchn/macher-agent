@@ -15,7 +15,7 @@
 
 (describe "Macher-Agent Core Behaviours"
           
-          (describe "1. VFS & Optimistic Concurrency"
+          (describe "1. VFS and Optimistic Concurrency"
                     (it "asserts that a VFS write is rejected if the underlying file has drifted"
                         (let* ((workspace (make-macher-agent-workspace :project-root "/mock/proj/"))
                                (file-path "/mock/proj/test.el")
@@ -73,7 +73,7 @@
                             
                             (expect written-to-sandbox :to-equal "VFS Overlay Content")))))
 
-          (describe "3. Context & Isolation (Lexical Survival)"
+          (describe "3. Context and Isolation (Lexical Survival)"
                     (it "asserts that lexical context survives async gptel callbacks without buffer bleeding"
                         (let* ((workspace (make-macher-agent-workspace :project-root "/mock/proj/"))
                                (session (make-macher-agent-session :id "Agent-A" :workspace workspace))
@@ -88,9 +88,7 @@
                               
                               ;; Execute a mock async tool callback
                               (with-temp-buffer ;; "Wandering" buffer context
-                                (let* ((info (if (fboundp 'gptel-fsm-info)
-                                                 (funcall 'gptel-fsm-info fsm)
-                                               (funcall 'mock-gptel-fsm-info fsm)))
+                                (let* ((info (macher-agent--extract-fsm-info fsm))
                                        (fsm-session (plist-get info :macher-agent-session)))
                                   (when fsm-session
                                     (setq executed-workspace (macher-agent-session-workspace fsm-session)))))
@@ -121,11 +119,11 @@
                     (it "asserts that virtual buffer modifications are split from physical file modifications"
                         (let* ((workspace (make-macher-agent-workspace :project-root "/mock/proj/"))
                                (context (macher--make-context :workspace (cons 'project "/mock/proj/")
-                                                              :contents '(("/mock/proj/disk-file.el" . ("old" . "new"))
-                                                                          ("*scratch*" . ("old" . "new")))))
+                                                              :contents (list (macher-agent-vfs-make-entry "/mock/proj/disk-file.el" "old" "new")
+                                                                              (macher-agent-vfs-make-entry "*scratch*" "old" "new"))))
                                (fsm 'mock-fsm))
                           
-                          (spy-on 'macher-agent-current-context :and-return-value context)
+                          (spy-on 'macher-agent-resolve-context :and-return-value context)
                           (spy-on 'gptel-fsm-info :and-return-value (list :macher-agent-session (make-macher-agent-session :workspace workspace)))
                           (setf (macher-context-dirty-p context) t)
                           
@@ -152,23 +150,28 @@
                         (let* ((workspace (make-macher-agent-workspace :project-root "/mock/proj/"))
                                (file-path "/mock/proj/live-file.el")
                                (context (macher--make-context :workspace (cons 'project "/mock/proj/")
-                                                              :contents `((,file-path . ("old content" . "new virtual content")))))
+                                                              :contents (list (macher-agent-vfs-make-entry file-path "old content" "new virtual content"))))
                                (fsm 'mock-fsm)
                                ;; Create an actual live buffer visiting that file
                                (live-buf (get-buffer-create "live-file.el")))
                           
                           (with-current-buffer live-buf
-                            (setq buffer-file-name file-path)
-                            (setq buffer-file-truename (file-truename file-path))
+                            (set-visited-file-name file-path t t)
+                            (auto-save-mode -1)
                             (insert "old content")
                             (set-buffer-modified-p nil))
                           
-                          (spy-on 'macher-agent-current-context :and-return-value context)
+                          (spy-on 'macher-agent-resolve-context :and-return-value context)
                           (spy-on 'gptel-fsm-info :and-return-value (list :macher-agent-session (make-macher-agent-session :workspace workspace)))
                           (setf (macher-context-dirty-p context) t)
                           
                           ;; Spy on macher--get-buffer to prevent real buffer rendering of the patch itself
                           (spy-on 'macher--get-buffer :and-return-value (list (get-buffer-create "*patch*")))
+                          
+                          ;; Force deferred buffer cleanups to happen synchronously during the test
+                          (spy-on 'run-at-time :and-call-fake
+                                  (lambda (_time _repeat fn &rest args)
+                                    (apply fn args)))
                           
                           (let ((shadow-buffer-verified nil)
                                 (original-buffer-hidden nil))
@@ -185,7 +188,7 @@
                                (let ((shadow (get-buffer "live-file.el")))
                                  (expect shadow :not :to-be nil)
                                  (when shadow
-                                   (expect (buffer-file-name shadow) :to-equal file-path)
+                                   (expect (buffer-file-name shadow) :to-be nil)
                                    (with-current-buffer shadow
                                      (expect (buffer-string) :to-equal "new virtual content")
                                      (expect default-directory :to-equal (file-name-directory (expand-file-name file-path))))
@@ -209,7 +212,7 @@
                               (setq buffer-file-name nil))
                             (kill-buffer live-buf)))))
 
-          (describe "5. Sandbox Security & Path Traversal (Jailbreaks)"
+          (describe "5. Sandbox Security and Path Traversal (Jailbreaks)"
                     
                     (before-each
                      (setq sandbox-root "/tmp/macher-sandbox/"))
@@ -241,15 +244,15 @@
                             (error (setq threw t)))
                           (expect threw :to-be t))))
 
-          (describe "6. Agent Orchestration & Sub-agent Delegation"
+          (describe "6. Agent Orchestration and Sub-agent Delegation"
                     
                     (it "handles missing buffers gracefully and returns the buffer_name in the error payload"
-                        (spy-on 'macher-agent-current-context :and-return-value nil)
+                        (spy-on 'macher-agent-resolve-context :and-return-value nil)
                         (spy-on 'macher-agent-add-subagent :and-return-value nil)
                         (let* ((callback-result nil)
                                (task '(:buffer_name "non_existent_agent" :instructions "Do something"))
                                (callback (lambda (res) (setq callback-result res))))
                           (macher-agent-spawn-task task callback)
-                          (expect (plist-get callback-result :status) :to-be 'error)
-                          (expect (plist-get callback-result :buffer_name) :to-equal "non_existent_agent")
-                          (expect (plist-get callback-result :error) :to-match "ERROR: Sub-agent buffer 'non_existent_agent' not found.")))))
+                          (expect (macher-agent-tool-response-status callback-result) :to-be 'error)
+                          (expect (macher-agent-tool-response-buffer-name callback-result) :to-equal "non_existent_agent")
+                          (expect (macher-agent-tool-response-error callback-result) :to-match "ERROR: Sub-agent buffer 'non_existent_agent' not found.")))))

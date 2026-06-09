@@ -5,11 +5,11 @@ An Emacs-native LLM agent harness with isolated sandboxing, asynchronous sub-age
 https://github.com/user-attachments/assets/461e695a-1315-4975-bbfb-c3a411819e11
 
 ## Table of Contents
-1. [Core Concepts and Architecture](#core-concepts--architecture)
+1. [Core Concepts and Architecture](#core-concepts-and-architecture)
 2. [Quick Start and Installation](#quick-start-and-installation)
-3. [Tool Creation and The Sandbox](#tool-creation--the-sandbox)
-4. [Agent Skills and Registration](#agent-skills--registration)
-5. [Advanced Context (Media and Instructions)](#advanced-context-media--instructions)
+3. [Tool Creation and The Sandbox](#tool-creation-and-the-sandbox)
+4. [Agent Skills and Registration](#agent-skills-and-registration)
+5. [Advanced Context (Media and Instructions)](#advanced-context-media-and-instructions)
 6. [Orchestrating Workflows](#orchestrating-workflows)
 7. [Command Reference](#command-reference)
 
@@ -57,17 +57,9 @@ The agent interacts with a `macher` context rather than live files. This environ
 (use-package macher-agent
   :after (gptel macher)
   :bind (("C-c m" . macher-agent-inject-thought))
-  :preface
-  ;; Define our custom ediff handler before the package loads
-  (defun my-macher-agent-ediff-display (buffer)
-    "Automatically trigger ediff for agent results instead of diff-mode."
-    (require 'ediff)
-    (pop-to-buffer buffer)
-    (call-interactively 'ediff-patch-buffer))
   :custom
   ;; You can place custom SKILL.md and .el scripts in this directory:
-  (macher-agent-global-skills-directory (expand-file-name "skills" user-emacs-directory))
-  (macher-agent-patch-display-function #'my-macher-agent-ediff-display)
+  (macher-agent-skill-directories (list (expand-file-name "skills" user-emacs-directory)))
   :config
   ;; Initialise skills to populate gptel-directives and macher-agent-tools-registry
   (macher-agent-initialize-skills))
@@ -81,8 +73,11 @@ The agent interacts with a `macher` context rather than live files. This environ
 
 `macher-agent` provides a declarative DSL for defining tools: `macher-agent-make-tool`. This macro handles `condition-case` errors automatically, and bridges directly into the `macher` context middleware.
 
-Here is an example demonstrating a tool that executes a shell command safely across the workspace. Your `:command-fn` must return a `macher-agent-tool-response` struct. For shell commands, set the type to `'process`. For synchronous Emacs Lisp results, set the type to `'lisp-result`.
+Your `:command-fn` receives the tool payload. If your function accepts three arguments, it will also receive the active `context` struct and the workspace `root` path. It must return a `macher-agent-tool-response` struct. For shell commands, set the type to `'process`. For synchronous Emacs Lisp results, set the type to `'lisp-result`.
 
+### Examples
+
+**Shell Execution Tool:**
 ```elisp
 (macher-agent-make-tool macher-agent-cargo-check-tool
   "Run 'cargo check' to compile the project."
@@ -96,6 +91,22 @@ Here is an example demonstrating a tool that executes a shell command safely acr
                   (concat "SUCCESS: The code compiled perfectly with no errors.\n\n=== COMPILER OUTPUT ===\n" output))))
 ```
 
+**Emacs Lisp VFS Tool:**
+By accepting `payload`, `context`, and `root`, you can utilise the virtual file system accessors (`macher-agent-context-read` and `macher-agent-context-update`) to interact directly with the agent's virtual memory.
+
+```elisp
+(macher-agent-make-tool macher-agent-custom-read-tool
+  "Read a file from the virtual file system."
+  :category "workspace"
+  :args '((:name "path" :type string :description "File path"))
+  :command-fn (lambda (payload context _root)
+                (let* ((path (plist-get payload :path))
+                       (content (macher-agent-context-read context path)))
+                  (if content
+                      (make-macher-agent-tool-response :type 'lisp-result :payload content)
+                    (error "File not found in the virtual file system: %s" path)))))
+```
+
 ## Agent Skills and Registration
 
 Agent Skills are defined via folders containing a `SKILL.md` file. 
@@ -106,7 +117,7 @@ A skill includes YAML or JSON frontmatter specifying a name, description, an opt
 You can build custom skills and Emacs Lisp tools inside your global skills directory (for example `~/.config/emacs/skills/`). 
 - If a skill specifies `allowed-tools: ["my_tool"]`, `macher-agent` will automatically search for `~/.config/emacs/skills/scripts/my_tool.el`.
 - Script files must contain exactly one `macher-agent-make-tool` call and are dynamically evaluated with strict lexical scoping.
-- If a `model` property is provided (for example`model: "Qwen3.6-35B-A3B"`), it is extracted and bound locally to `gptel-model` for that specific agent, ensuring requests are automatically routed to the correct LLM backend.
+- If a `model` property is provided (for example, `model: "Qwen3.6-35B-A3B"`), it is extracted and bound locally to `gptel-model` for that specific agent, ensuring requests are automatically routed to the correct LLM backend.
 
 ### Example Skill
 
@@ -171,7 +182,6 @@ Alternatively, you can create sub-agents manually using interactive commands. Yo
 
 | Command                                  | Description                                                              |
 |------------------------------------------|--------------------------------------------------------------------------|
-| `M-x macher-agent-add-subagent`          | Prompts for a name and directory, creating an isolated sub-agent buffer. |
 | `M-x macher-agent-add-buffer-to-scope`   | Adds an existing Emacs buffer to the agent's context.                    |
 | `M-x macher-agent-clear-context`         | Clears the virtual memory and pending edits.                             |
 | `M-x macher-agent-branch-chat`           | Branch chat in new buffer.                                               |
