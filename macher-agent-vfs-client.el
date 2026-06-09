@@ -5,6 +5,8 @@
 (require 'gptel nil t)
 (require 'xref)
 
+(declare-function macher-agent-sync-prompt-transformer "macher-agent-gptel-bridge")
+
 (cl-defstruct macher-agent-workspace
   "A shared singleton per project root managing the VFS state."
   project-root
@@ -230,6 +232,9 @@ If REPLACE-ALL is nil, errors if OLD-TEXT occurs more than once."
          (context (macher-agent--make-vfs-context :workspace macher-ws :contents nil)))
     (setq-local macher--workspace macher-ws)
     (setq-local macher-agent--persistent-context context)
+    
+    ;; Local pre-flight sync hook
+    (add-hook 'gptel-prompt-transform-functions #'macher-agent-sync-prompt-transformer nil t)
     
     (let ((skills-dir (expand-file-name "skills" workspace-root)))
       (when (fboundp 'macher-agent-initialize-skills)

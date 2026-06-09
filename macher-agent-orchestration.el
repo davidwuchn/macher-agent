@@ -6,6 +6,8 @@
 (require 'macher-agent-vfs-client)
 
 (declare-function macher-agent-gptel-transmit "macher-agent-gptel-bridge" (task-context callbacks))
+(declare-function macher-agent-sync-prompt-transformer "macher-agent-gptel-bridge" (prompt))
+(declare-function macher-agent-post-response-reaper "macher-agent-gptel-bridge" (beg end))
 (declare-function macher-agent--set-system-message "macher-agent-gptel-tools" (msg))
 (declare-function macher-agent-current-context "macher-agent-vfs-client")
 (declare-function macher-agent--init-workspace-state "macher-agent-vfs-client")
@@ -197,7 +199,7 @@
 (defun macher-agent--resolve-buffer-name (name)
   (substring-no-properties name))
 
-(defun macher-agent--prepare-subagent-buffer (buf full-dir context &optional preset parent-tools parent-model parent-backend)
+(defun macher-agent--prepare-subagent-buffer (buf full-dir context &optional preset parent-tools parent-model parent-backend parent-presets parent-directives parent-temp parent-tokens)
   "Prepare a subagent buffer, locking its directory strictly to the workspace root."
   (with-current-buffer buf
     (setq default-directory (file-name-as-directory (macher-agent--get-project-root full-dir)))
@@ -212,6 +214,10 @@
     
     (when parent-model (setq-local gptel-model parent-model))
     (when parent-backend (setq-local gptel-backend parent-backend))
+    (when parent-presets (setq-local gptel--known-presets parent-presets))
+    (when parent-directives (setq-local gptel-directives parent-directives))
+    (when parent-temp (setq-local gptel-temperature parent-temp))
+    (when parent-tokens (setq-local gptel-max-tokens parent-tokens))
     
     (unless (boundp 'gptel-tools) (setq gptel-tools nil))
     (make-local-variable 'gptel-tools)
@@ -222,19 +228,29 @@
     (when preset
       (macher-agent--apply-preset preset))
     
+    ;; Local pre-flight sync hook and post-response reaper
+    (add-hook 'gptel-prompt-transform-functions #'macher-agent-sync-prompt-transformer nil t)
+    (add-hook 'gptel-post-response-functions #'macher-agent-post-response-reaper nil t)
+    
     (run-hooks 'macher-agent-subagent-setup-hook)))
 
 ;;;###autoload
 (defun macher-agent-add-subagent (name dir &optional instructions context preset)
   "Create and prepare a new subagent buffer, inheriting parent state."
   (let* ((parent-tools (bound-and-true-p gptel-tools))
-         ;; Capture the parent's model and backend
+         ;; Capture parent model, backend, presets, directives, temperature, and tokens
          (parent-model (bound-and-true-p gptel-model))
          (parent-backend (bound-and-true-p gptel-backend))
+         (parent-presets (bound-and-true-p gptel--known-presets))
+         (parent-directives (bound-and-true-p gptel-directives))
+         (parent-temp (bound-and-true-p gptel-temperature))
+         (parent-tokens (bound-and-true-p gptel-max-tokens))
          (buf (get-buffer-create name)))
     
     ;; Pass them into the preparation buffer
-    (macher-agent--prepare-subagent-buffer buf dir context preset parent-tools parent-model parent-backend)
+    (macher-agent--prepare-subagent-buffer
+     buf dir context preset parent-tools parent-model parent-backend
+     parent-presets parent-directives parent-temp parent-tokens)
     
     (when context
       (let ((workspace (macher-agent--get-context-workspace context)))

@@ -8,16 +8,28 @@
 (declare-function macher-agent--auto-sync-context "macher-agent-vfs-client")
 (declare-function macher-agent--split-context "macher-agent-vfs-client")
 (declare-function macher-agent--build-virtual-patch "macher-agent-vfs-client")
+(declare-function macher-agent--reap-buffer "macher-agent-orchestration")
+(declare-function macher-agent-initialize-skills "macher-agent-api")
 
-(defun macher-agent--gptel-pre-send-advice (orig-fun &rest args)
-  "Ensure the agent VFS is synchronised before sending."
+(defun macher-agent-sync-prompt-transformer (prompt)
+  "Synchronise the active virtual file system state and registries before the prompt is sent."
   (let* ((macher-agent--allow-lazy-init t)
          (ctx (macher-agent-current-context)))
-    (when ctx (macher-agent--auto-sync-context ctx)))
-  (apply orig-fun args))
+    (when ctx
+      (macher-agent--auto-sync-context ctx)
+      (when (fboundp 'macher-agent-initialize-skills)
+        (macher-agent-initialize-skills ctx))))
+  prompt)
 
-(advice-add 'gptel-send :around #'macher-agent--gptel-pre-send-advice)
-(advice-add 'gptel-request :around #'macher-agent--gptel-pre-send-advice)
+(defun macher-agent-post-response-reaper (_beg _end)
+  "Cleanly reap the sub-agent buffer if flagged for disposal."
+  (when (and (bound-and-true-p macher-agent--is-subagent)
+             (eq (bound-and-true-p macher-agent--ready-to-reap) t))
+    (let ((buf (current-buffer)))
+      (run-at-time 0 nil (lambda ()
+                           (when (and (buffer-live-p buf)
+                                      (fboundp 'macher-agent--reap-buffer))
+                             (macher-agent--reap-buffer buf)))))))
 
 (defun macher-agent-gptel-transmit (task-context callbacks)
   "Facade to transmit network request, attaching async-safe local hooks."
@@ -124,29 +136,6 @@
 (advice-add 'gptel--insert-response :around #'macher-agent--protect-nil-responses)
 (advice-add 'gptel-curl--stream-insert-response :around #'macher-agent--protect-nil-responses)
 
-(defun macher-agent--transform-apply-preset-advice (orig-fun &rest args)
-  "Inject the original buffer's presets, safely padding arguments for sub-agents."
-  (let* ((fsm (car args))
-         (info (when fsm 
-                 (if (fboundp 'gptel-fsm-info) 
-                     (funcall 'gptel-fsm-info fsm) 
-                   (funcall 'mock-gptel-fsm-info fsm))))
-         (orig-buf (if info (plist-get info :buffer) (current-buffer)))
-         (gptel--known-presets (if (buffer-live-p orig-buf) 
-                                   (buffer-local-value 'gptel--known-presets orig-buf) 
-                                 gptel--known-presets))
-         (gptel-directives (if (buffer-live-p orig-buf) 
-                               (buffer-local-value 'gptel-directives orig-buf) 
-                             gptel-directives)))
-    
-    ;; Execute gracefully. If the native function chokes on the delegate's missing/nil 
-    ;; context and throws a stringp error, silently swallow it so the sentinel can finish.
-    (condition-case nil
-        (apply orig-fun (or args (list nil)))
-      (error nil))))
-
-(advice-add 'gptel--transform-apply-preset :around #'macher-agent--transform-apply-preset-advice)
-
 (defvar macher-agent--allow-gptel-restore nil
   "Dynamic variable controlling whether `gptel--restore-state' is allowed to execute.")
 
@@ -213,37 +202,13 @@ Also aligns `gptel-backend` with `gptel-model` if the model belongs to a differe
 
 (advice-add 'gptel--apply-preset :after #'macher-agent--after-apply-preset-advice)
 
-(defun macher-agent--tolerate-and-reap-sentinel (orig-fn proc event &rest args)
-  "Run gptel's sentinel safely and reap sub-agents only when explicitly flagged."
-  (let* ((internal-buf (process-buffer proc))
-         (fsm (car (alist-get proc gptel--request-alist)))
-         (proc-info (when fsm (gptel-fsm-info fsm)))
-         
-         ;; Extract the agent buffer via gptel's tracking keys
-         (agent-buf (when proc-info
-                      (or (plist-get proc-info :buffer)
-                          (let ((pos (plist-get proc-info :position)))
-                            (when (markerp pos) (marker-buffer pos)))))))
+(defun macher-agent-setup-gptel-buffer ()
+  "Set up a gptel buffer with macher-agent capabilities if in an active agent session."
+  (let* ((macher-agent--allow-lazy-init nil)
+         (ctx (ignore-errors (macher-agent-current-context))))
+    (when ctx
+      (add-hook 'gptel-prompt-transform-functions #'macher-agent-sync-prompt-transformer nil t))))
 
-    ;; 1. Always run the original sentinel so gptel can process tool loops / callbacks
-    (condition-case err
-        (apply orig-fn proc event args)
-      ((error quit) nil))
-
-    ;; 2. Only reap if the buffer is live AND the flag is explicitly t
-    (when (and agent-buf (buffer-live-p agent-buf))
-      (let ((ready-to-reap (condition-case nil
-                               (buffer-local-value 'macher-agent--ready-to-reap agent-buf)
-                             (void-variable nil))))
-        (if (eq ready-to-reap t)
-            (progn
-              (message "Macher-Agent: Explicit flag detected. Reaping %s now." agent-buf)
-              (macher-agent--reap-buffer agent-buf))
-          ;; Do nothing if the flag is nil or void (e.g. during intermediate tool calls)
-          (message "Macher-Agent: Deferred reaping for %s (flag is %S)" 
-                   (buffer-name agent-buf) 
-                   (if (equal ready-to-reap nil) "nil" "unbound")))))))
-
-(advice-add 'gptel-curl--sentinel :around #'macher-agent--tolerate-and-reap-sentinel)
+(add-hook 'gptel-mode-hook #'macher-agent-setup-gptel-buffer)
 
 (provide 'macher-agent-gptel-bridge)
