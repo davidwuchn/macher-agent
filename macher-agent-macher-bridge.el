@@ -6,6 +6,8 @@
 (declare-function macher-agent-workspace-project-root "macher-agent-vfs-client")
 (declare-function macher-agent-workspace-p "macher-agent-vfs-client")
 (declare-function macher-agent-current-context "macher-agent-vfs-client")
+(declare-function macher-agent-vfs-entry-path "macher-agent-vfs-client")
+(declare-function macher-agent-vfs-entry-curr "macher-agent-vfs-client")
 
 ;; --- Workspace Helpers ---
 
@@ -119,8 +121,8 @@
       ;; Identify physical files that have active open back buffers visiting them,
       ;; and construct the shadow descriptors to temporarily redirect buffer operations.
       (dolist (entry physical-contents)
-        (let* ((file-path (car entry))
-               (new-content (cdr (cdr entry)))
+        (let* ((file-path (macher-agent-vfs-entry-path entry))
+               (new-content (macher-agent-vfs-entry-curr entry))
                (orig-buf (or (get-file-buffer file-path)
                              (find-buffer-visiting file-path))))
           (when (and orig-buf (buffer-live-p orig-buf))

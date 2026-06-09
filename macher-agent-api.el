@@ -570,15 +570,6 @@
 
 (add-hook 'gptel-mode-hook #'macher-agent-gptel-mode-setup)
 
-(defun macher-agent--get-project-root (&optional dir)
-  "Resolve the absolute root path of the project for DIR."
-  (let* ((d (or dir default-directory))
-         (proj (and (fboundp 'project-current) (project-current nil d))))
-    (expand-file-name
-     (or (and proj (if (fboundp 'project-root) (project-root proj) (cdr proj)))
-         (and (fboundp 'vc-root-dir) (let ((default-directory d)) (vc-root-dir)))
-         d))))
-
 (defun macher-agent-branch-chat (new-name)
   "Clone the current chat, establishing lineage and inheriting all agent state."
   (interactive "sNew branch name: ")

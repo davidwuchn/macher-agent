@@ -24,7 +24,7 @@
                                                (parsed-limit (when limit (round limit))))
                                           (macher-agent--ensure-access context actual-name)
                                           (let* ((contents (assoc actual-name (macher-agent--get-context-contents context)))
-                                                 (content (if contents (cdr (cdr contents))
+                                                 (content (if contents (macher-agent-vfs-entry-curr contents)
                                                             (with-current-buffer (get-buffer actual-name)
                                                               (buffer-substring-no-properties (point-min) (point-max))))))
                                             (make-macher-agent-tool-response :type 'lisp-result :payload (macher--read-string content parsed-offset parsed-limit show_line_numbers)))))))

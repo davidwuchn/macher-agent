@@ -97,7 +97,7 @@
                           
                           (expect (assoc "*new-virtual-asset*" (macher-context-contents ctx)) :not :to-be nil)
                           (let ((contents (assoc "*new-virtual-asset*" (macher-context-contents ctx))))
-                            (expect (cdr (cdr contents)) :to-equal "Ghost content"))))
+                            (expect (macher-agent-vfs-entry-curr contents) :to-equal "Ghost content"))))
                     
                     (it "rejects fuzzy security matching in read_buffer_in_workspace"
                         (let* ((ctx (macher--make-context :contents '(("*scratch*" . ("" . "content")))))
@@ -126,7 +126,7 @@
                           (let* ((response (funcall tool-fn "test-buf" "New virtual content")))
                             (expect response :to-match "SUCCESS")
                             (expect (macher-context-dirty-p ctx) :to-be t)
-                            (expect (cdr (cdr (assoc "test-buf" (macher-context-contents ctx)))) :to-equal "New virtual content"))))
+                            (expect (macher-agent-vfs-entry-curr (assoc "test-buf" (macher-context-contents ctx))) :to-equal "New virtual content"))))
 
                     (it "multi_edit_buffer_in_workspace uses a decoupled deterministic scratchpad"
                         (let* ((ctx (macher--make-context :contents '(("test-file.rs" . ("line1\nline2" . "line1\nline2")))))
@@ -138,7 +138,7 @@
                             (expect response :to-match "SUCCESS")
                             
                             (let ((contents (assoc "test-file.rs" (macher-context-contents ctx))))
-                              (expect (cdr (cdr contents)) :to-equal "line1\nline3"))))))
+                              (expect (macher-agent-vfs-entry-curr contents) :to-equal "line1\nline3"))))))
 
           (describe "Agent Skills (macher-agent-skills.el)"
                     (before-each

@@ -12,6 +12,8 @@
 (declare-function macher-agent-current-context "macher-agent-vfs-client")
 (declare-function macher-agent--init-workspace-state "macher-agent-vfs-client")
 (declare-function macher-agent--auto-sync-context "macher-agent-vfs-client" (&optional ctx fsm))
+(declare-function macher-agent-vfs-entry-path "macher-agent-vfs-client")
+(declare-function macher-agent-vfs-entry-curr "macher-agent-vfs-client")
 
 (defvar macher-agent-submit-task-result-tool)
 
@@ -265,8 +267,8 @@
          (contents (and ctx (macher-agent--get-context-contents ctx))))
     (when contents
       (dolist (entry contents)
-        (let* ((path-or-buf (car entry))
-               (new-content (cddr entry)))
+        (let* ((path-or-buf (macher-agent-vfs-entry-path entry))
+               (new-content (macher-agent-vfs-entry-curr entry)))
           (when (and new-content (get-buffer path-or-buf))
             (with-current-buffer (get-buffer path-or-buf)
               (erase-buffer)
