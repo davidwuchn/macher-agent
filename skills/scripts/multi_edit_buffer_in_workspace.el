@@ -12,7 +12,7 @@
                                       (let* ((buffer_name (plist-get payload :buffer_name))
                                              (edits (plist-get payload :edits))
                                              (actual-name (macher-agent--resolve-buffer-name buffer_name))
-                                             (content (let ((contents (assoc actual-name (macher-agent--get-context-contents context))))
+                                             (content (let ((contents (cl-find actual-name (macher-agent--get-context-contents context) :key #'macher-agent-vfs-entry-path :test #'equal)))
                                                         (if contents
                                                             (macher-agent-vfs-entry-curr contents)
                                                           (error "Buffer '%s' not found in workspace" actual-name)))))

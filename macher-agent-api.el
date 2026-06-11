@@ -8,21 +8,32 @@
 (require 'macher-agent-orchestration)
 (require 'macher-agent-gptel-tools)
 
-;; --- Global Registries & Configuration ---
+;; --- Global Registries and Configuration ---
 
-(defcustom macher-agent-global-skills-directory nil
-  "Global directory for user-defined SKILL.md files."
-  :type '(choice (const :tag "None" nil) string)
-  :group 'macher-agent)
-
-(defcustom macher-agent-extra-skill-directories nil
-  "List of additional directories to scan for SKILL.md files."
+(defcustom macher-agent-skill-directories nil
+  "List of user-defined directories to scan for SKILL.md files."
   :type '(repeat string)
   :group 'macher-agent)
 
-(defvar macher-agent-bundled-skills-directory
+(defcustom macher-agent-global-skills-directory nil
+  "Deprecated: use `macher-agent-skill-directories' instead."
+  :type '(choice (const :tag "None" nil) string)
+  :group 'macher-agent)
+(make-obsolete-variable 'macher-agent-global-skills-directory 'macher-agent-skill-directories "1.0.0")
+
+(defcustom macher-agent-extra-skill-directories nil
+  "Deprecated: use `macher-agent-skill-directories' instead."
+  :type '(repeat string)
+  :group 'macher-agent)
+(make-obsolete-variable 'macher-agent-extra-skill-directories 'macher-agent-skill-directories "1.0.0")
+
+(defvar macher-agent-bundled-skills-directory nil
+  "Deprecated: default skills are now handled internally.")
+(make-obsolete-variable 'macher-agent-bundled-skills-directory 'macher-agent--bundled-skills-dir "1.0.0")
+
+(defvar macher-agent--bundled-skills-dir
   (expand-file-name "skills" (file-name-directory (or load-file-name buffer-file-name)))
-  "Path to the default skills directory bundled with the macher-agent package.")
+  "Internal path to bundled skills.")
 
 (defvar macher-agent-tools-registry (make-hash-table :test 'equal)
   "Global registry for all loaded macher-agent tools.")
@@ -38,7 +49,7 @@
 
 (defmacro macher-agent-with-project-root (&rest body)
   "Execute BODY with `default-directory` strictly bound to the absolute project root."
-  `(let ((default-directory (file-name-as-directory (macher-agent--get-project-root))))
+  `(let ((default-directory (file-name-as-directory (macher-agent-root))))
      ,@body))
 
 ;; --- Public Context API ---
@@ -62,9 +73,8 @@
   "Submit the final RESULT for the current agent task."
   (setq-local macher-agent--final-result result)
   (when (boundp 'macher-agent--parent-callback)
-    (funcall macher-agent--parent-callback (list :status 'success :data result :buffer_name (buffer-name)))
+    (funcall macher-agent--parent-callback (make-macher-agent-tool-response :status 'success :data result :buffer-name (buffer-name)))
     (makunbound 'macher-agent--parent-callback)
-    ;;(push (current-buffer) macher-agent--garbage-queue)
     ))
 
 (defun macher-agent-ui-show (&optional buf)
@@ -75,18 +85,33 @@
       (macher-agent-workspace-project-root workspace)
     (macher--workspace-root workspace)))
 
+(defun macher-context-workspace-root (context)
+  "Navigate the context struct to retrieve the root directory cleanly."
+  (let ((workspace (when context (macher-agent--get-context-workspace context))))
+    (when workspace (macher-agent-root workspace))))
+
+(defun macher-normalise-preset-name (preset)
+  "Remove leading character symbols and convert PRESET to a uniform symbol."
+  (when (and preset (or (symbolp preset) (stringp preset)))
+    (let* ((raw-str (if (symbolp preset) (symbol-name preset) preset))
+           (clean-str (replace-regexp-in-string "^@+" "" raw-str)))
+      (intern clean-str))))
+
+(defun macher-tool-valid-p (tool)
+  "Check if TOOL is a valid struct safely."
+  (and tool (fboundp 'gptel-tool-p) (gptel-tool-p tool)))
+
 (defun macher-agent-force-review ()
   "Manually trigger the diff review screen for any pending virtual edits."
   (interactive)
-  (let ((context (macher-agent-current-context))
+  (let ((context (macher-agent-resolve-context))
         (fsm (bound-and-true-p macher--fsm-latest)))
     (if (not (and context (macher-agent--get-context-dirty-p context)))
         (message "No pending edits to review.")
-      ;; Route directly to the upstream builder (which we intercept to split the UI)
       (macher--build-patch context fsm)
       (message "SUCCESS: Patch review screen(s) generated for pending edits."))))
 
-;; --- Parsers & Loaders ---
+;; --- Parsers and Loaders ---
 
 (defun macher-agent--parse-yaml-array (text key)
   "Extract a YAML list for KEY from TEXT."
@@ -144,31 +169,46 @@
               :allowed-tools tools
               :body body)))))
 
+(defun macher-agent--secure-ast-p (form)
+  "Return t if FORM is a secure AST node (no top-level definitions)."
+  (not (and (consp form)
+            (memq (car form) '(defun cl-defun defvar defcustom defmacro)))))
+
+(defun macher-agent--parse-safe-forms (content &optional validation-cb)
+  "Parse CONTENT and return a list of trusted forms.
+If VALIDATION-CB is provided, it is called on each form; if it returns nil, an error is signaled."
+  (with-temp-buffer
+    (insert content)
+    (goto-char (point-min))
+    (let ((forms nil))
+      (condition-case nil
+          (while t
+            (let ((form (read (current-buffer))))
+              (when validation-cb
+                (unless (funcall validation-cb form)
+                  (error "Validation failed for form: %S" form)))
+              (push form forms)))
+        (end-of-file nil))
+      (nreverse forms))))
+
 (defun macher-agent--evaluate-and-cache-tool (content tool-name registry)
   "Evaluate string CONTENT and cache it in REGISTRY under TOOL-NAME."
-  (let ((tool (with-temp-buffer
-                (insert content)
-                (goto-char (point-min))
-                (let ((val nil)
-                      (form nil)
-                      (security-fail nil))
-                  (condition-case err
-                      (while (not security-fail)
-                        (setq form (read (current-buffer)))
-                        (if (and (consp form)
-                                 (memq (car form) '(defun cl-defun defvar defcustom defmacro)))
-                            (progn
-                              (setq security-fail t)
-                              (error "SECURITY WARNING: Tool attempts to evaluate top-level definition: %s" (car form)))
-                          (setq val (eval form t))))
-                    (end-of-file nil)
-                    (error
-                     (message "Macher-Agent: Failed to load tool %s - %s" tool-name err)
-                     (setq val nil)))
-                  (unless security-fail
-                    (if (and (symbolp val) (boundp val))
-                        (symbol-value val)
-                      val))))))
+  (let ((tool nil))
+    (condition-case err
+        (let* ((forms (macher-agent--parse-safe-forms content
+                                                      (lambda (f)
+                                                        (if (macher-agent--secure-ast-p f)
+                                                            t
+                                                          (error "SECURITY WARNING: Tool attempts to evaluate top-level definition: %s" (car f))))))
+               (val (progn
+                      (let ((res nil))
+                        (dolist (form forms res)
+                          (setq res (eval form t)))))))
+          (setq tool (if (and (symbolp val) (boundp val))
+                         (symbol-value val)
+                       val)))
+      (error
+       (message "Macher-Agent: Failed to load tool %s - %s" tool-name err)))
     (when tool
       (puthash tool-name tool registry))
     tool))
@@ -187,19 +227,96 @@
         (macher-agent--evaluate-and-cache-tool disk-content tool-name registry)
       tool-name)))
 
-(defun macher-agent--invalidate-tool-cache-on-mutation (&optional path &rest _)
-  "Invalidate the tool cache if the mutated PATH is a tool script."
-  (when (and path (stringp path) (string-match "scripts/\\([^/]+\\)\\.el$" path))
-    (let* ((tool-name (match-string 1 path))
-           (workspace (when (bound-and-true-p macher-agent--persistent-context)
-                        (macher-agent--get-context-workspace macher-agent--persistent-context)))
-           (registry (if workspace
-                         (macher-agent-workspace-tools-registry workspace)
-                       macher-agent-tools-registry)))
-      (remhash tool-name registry)
-      (remhash (intern tool-name) registry))))
+(defun macher-agent--is-managed-path-p (path)
+  "Evaluate if PATH resides within managed skill or script directories."
+  (and path
+       (stringp path)
+       (or (string-match-p "SKILL\\.md$" path)
+           (string-match-p "skills/.*\\.el$" path)
+           (string-match-p "scripts/.*\\.el$" path))))
 
-(add-hook 'macher-agent-context-mutated-hook #'macher-agent--invalidate-tool-cache-on-mutation)
+(defun macher-agent--mutation-dispatcher (&optional path &rest _)
+  "Route file system events to appropriate invalidation or reload handlers."
+  (when (macher-agent--is-managed-path-p path)
+    (let* ((workspace (when (bound-and-true-p macher-agent--persistent-context)
+                        (macher-agent--get-context-workspace macher-agent--persistent-context))))
+      ;; Handle script cache invalidation
+      (when (string-match "scripts/\\([^/]+\\)\\.el$" path)
+        (let* ((tool-name (match-string 1 path))
+               (registry (if workspace
+                             (macher-agent-workspace-tools-registry workspace)
+                           macher-agent-tools-registry)))
+          (remhash tool-name registry)
+          (remhash (intern tool-name) registry)))
+      
+      ;; Handle skill reloading
+      (when (and macher-agent--persistent-context workspace)
+        (let ((skills-dir (expand-file-name "skills" (macher-agent-root workspace))))
+          (when (and skills-dir (file-directory-p skills-dir))
+            (macher-agent-initialize-skills macher-agent--persistent-context skills-dir)))))))
+
+(add-hook 'macher-agent-context-mutated-hook #'macher-agent--mutation-dispatcher)
+
+(defun macher-agent--locate-tool-source (tool-name context dir-context script-paths workspace)
+  "Locate the tool source content for TOOL-NAME."
+  (let ((vfs-content (when context
+                       (let* ((vfs-path (when dir-context (expand-file-name (format "scripts/%s.el" tool-name) dir-context)))
+                              (workspace-root (macher-context-workspace-root context))
+                              (rel-to-workspace (when (and workspace-root vfs-path)
+                                                  (file-relative-name vfs-path workspace-root)))
+                              (rel-to-dir (when (and dir-context vfs-path)
+                                            (file-relative-name vfs-path dir-context)))
+                              (visiting-buf (when vfs-path (find-buffer-visiting vfs-path)))
+                              (visiting-buf-name (when visiting-buf (buffer-name visiting-buf)))
+                              (std-name (format "scripts/%s.el" tool-name))
+                              (base-name (format "%s.el" tool-name))
+                              (candidates (delq nil (list vfs-path rel-to-workspace rel-to-dir visiting-buf-name std-name base-name)))
+                              (found-content nil))
+                         (cl-loop for cand in candidates
+                                  until found-content
+                                  do (setq found-content (ignore-errors (macher-agent--read-context-file context cand))))
+                         found-content))))
+    (if vfs-content
+        vfs-content
+      (let ((disk-content nil))
+        (catch 'found
+          (dolist (path script-paths)
+            (when (file-exists-p path)
+              (with-temp-buffer
+                (insert-file-contents path)
+                (setq disk-content (buffer-string))
+                (throw 'found t)))))
+        disk-content))))
+
+(defun macher-agent--parse-and-validate-tool-ast (content tool-name)
+  "Parse CONTENT and validate the AST for security. Returns a list of trusted forms."
+  (condition-case err
+      (macher-agent--parse-safe-forms content
+                                      (lambda (f)
+                                        (if (macher-agent--secure-ast-p f)
+                                            t
+                                          (message "Macher-Agent SECURITY WARNING: Skipped tool '%s' because it attempts to evaluate top-level definition: %s" tool-name (car f))
+                                          nil)))
+    (error
+     (message "Macher-Agent: Failed to parse tool %s - %s" tool-name err)
+     nil)))
+
+(defun macher-agent--evaluate-trusted-tool-ast (forms tool-name)
+  "Evaluate trusted FORMS and return the captured tool struct."
+  (let ((captured-tool nil))
+    (condition-case err
+        (dolist (form forms)
+          (let ((res (eval form t)))
+            (cond
+             ((macher-tool-valid-p res)
+              (setq captured-tool res))
+             ((and (symbolp res) (boundp res) 
+                   (macher-tool-valid-p (symbol-value res)))
+              (setq captured-tool (symbol-value res))))))
+      (error
+       (message "Macher-Agent: Failed to evaluate tool %s - %s" tool-name err)
+       (setq captured-tool nil)))
+    captured-tool))
 
 (defun macher-agent-resolve-tool (tool-name context dir-context)
   "Retrieve TOOL-NAME from workspace registry or load from VFS/disk, deferring native tools."
@@ -208,102 +325,30 @@
          (cached (gethash tool-name registry))
          (script-paths (delq nil (list
                                   (when dir-context (expand-file-name (format "scripts/%s.el" tool-name) dir-context))
-                                  (expand-file-name (format "scripts/%s.el" tool-name) macher-agent-bundled-skills-directory))))
-         
-         ;; 1. Prioritise checking Virtual File System (VFS) first
-         (vfs-content (when context
-                        (let* ((vfs-path (when dir-context (expand-file-name (format "scripts/%s.el" tool-name) dir-context)))
-                               (workspace-root (when workspace (macher-agent--get-workspace-root workspace)))
-                               (rel-to-workspace (when (and workspace-root vfs-path)
-                                                   (file-relative-name vfs-path workspace-root)))
-                               (rel-to-dir (when (and dir-context vfs-path)
-                                             (file-relative-name vfs-path dir-context)))
-                               (visiting-buf (when vfs-path (find-buffer-visiting vfs-path)))
-                               (visiting-buf-name (when visiting-buf (buffer-name visiting-buf)))
-                               (std-name (format "scripts/%s.el" tool-name))
-                               (base-name (format "%s.el" tool-name))
-                               (candidates (delq nil (list vfs-path rel-to-workspace rel-to-dir visiting-buf-name std-name base-name)))
-                               (found-content nil))
-                          (cl-loop for cand in candidates
-                                   until found-content
-                                   do (setq found-content (ignore-errors (macher-agent--read-context-file context cand))))
-                          found-content)))
-         
-         (content-to-eval vfs-content)
+                                  (expand-file-name (format "scripts/%s.el" tool-name) (or (bound-and-true-p macher-agent--bundled-skills-dir) macher-agent-bundled-skills-directory)))))
          (loaded-tool nil))
 
-    ;; 2. Determine state: VFS (re-eval), Cache (use), or Disk (read & eval)
-    (if vfs-content
-        ;; VFS exists. We skip the cache and evaluate `content-to-eval` below.
-        nil 
-      (if cached
-          ;; No VFS, but we have a cache. Use it.
-          (setq loaded-tool cached)
-
-        ;; No VFS and no cache. Try the physical disk.
-        (catch 'found
-          (dolist (path script-paths)
-            (when (file-exists-p path)
-              (with-temp-buffer
-                (insert-file-contents path)
-                (setq content-to-eval (buffer-string))
-                (throw 'found t)))))))
-
-    ;; 3. Evaluation pipeline (runs if we found text in VFS or Disk)
-    (when (and content-to-eval (not loaded-tool))
-      (setq loaded-tool
-            (with-temp-buffer
-              (insert content-to-eval)
-              (goto-char (point-min))
-              (let ((captured-tool nil)
-                    (security-triggered nil)
-                    (form nil))
-                (condition-case err
-                    (while (not security-triggered)
-                      (setq form (read (current-buffer)))
-                      (let* (;; AST-based security check
-                             (has-security-violation
-                              (and (consp form)
-                                   (memq (car form) '(defun cl-defun defvar defcustom defmacro)))))
-                        (if has-security-violation
-                            (progn
-                              (setq security-triggered t)
-                              (message "Macher-Agent SECURITY WARNING: Skipped tool '%s' because it attempts to evaluate top-level definition: %s" tool-name (car form)))
-                          ;; Lexical scoping is forced by the 't' parameter here
-                          (let ((res (eval form t)))
-                            ;; Robustly capture the tool struct, ignoring `provide`, `require`, etc.
-                            (cond
-                             ;; If evaluation returns the struct directly
-                             ((and (fboundp 'gptel-tool-p) (gptel-tool-p res))
-                              (setq captured-tool res))
-
-                             ;; If evaluation returns a symbol bound to the struct
-                             ((and (symbolp res) (boundp res) 
-                                   (fboundp 'gptel-tool-p) (gptel-tool-p (symbol-value res)))
-                              (setq captured-tool (symbol-value res))))))))
-                  (end-of-file nil)
-                  (error
-                   (message "Macher-Agent: Failed to load tool %s - %s" tool-name err)
-                   (setq captured-tool nil)))
-                (unless security-triggered
-                  captured-tool)))))
+    (if cached
+        (setq loaded-tool cached)
+      (let ((content-to-eval (macher-agent--locate-tool-source tool-name context dir-context script-paths workspace)))
+        (when content-to-eval
+          (let ((trusted-forms (macher-agent--parse-and-validate-tool-ast content-to-eval tool-name)))
+            (when trusted-forms
+              (setq loaded-tool (macher-agent--evaluate-trusted-tool-ast trusted-forms tool-name)))))))
     
-    ;; 3.5 Resolve statically defined / in-memory symbols and native gptel tools
     (unless loaded-tool
       (let* ((tool-sym (if (symbolp tool-name) tool-name (intern-soft tool-name)))
              (sym-val (when (and tool-sym (boundp tool-sym)) (symbol-value tool-sym))))
-        (if (and sym-val (fboundp 'gptel-tool-p) (gptel-tool-p sym-val))
+        (if (and sym-val (macher-tool-valid-p sym-val))
             (setq loaded-tool sym-val)
           (let ((tool-name-str (if (symbolp tool-name) (symbol-name tool-name) tool-name)))
             (setq loaded-tool 
                   (ignore-errors 
                     (gptel-get-tool tool-name-str)))))))
     
-    ;; 4. Cache and return
     (when loaded-tool
       (puthash tool-name loaded-tool registry))
 
-    ;; Return the loaded struct, or return the string to satisfy gptel constraints
     (or loaded-tool tool-name)))
 
 (defun macher-agent--load-scripts-from-dir (skills-dir context)
@@ -339,7 +384,7 @@
                                    (delq nil (mapcar (lambda (tname)
                                                        (macher-agent-resolve-tool tname context skills-dir))
                                                      tool-names)))))
-            ;; Store metadata safely in the private alist
+            ;; Store metadata in the private alist
             (setf (alist-get sym alist)
                   (list :system body :description desc :model (when model (intern model)) :tools resolved-tools))
             (if workspace
@@ -364,7 +409,7 @@
 (defun macher-agent--get-system-message-name (sys-msg)
   "Reverse lookup SYS-MSG to find its short name in local or global skills."
   (when (and sys-msg (stringp sys-msg) (not (string-empty-p sys-msg)))
-    (let* ((ctx (ignore-errors (macher-agent-current-context)))
+    (let* ((ctx (ignore-errors (macher-agent-resolve-context)))
            (ws (when ctx (macher-agent--get-context-workspace ctx)))
            (ws-skills (when ws (macher-agent-workspace-skills-alist ws)))
            (global-skills macher-agent-global-skills-alist))
@@ -383,10 +428,15 @@
 (defun macher-agent-initialize-skills (&optional context dir)
   "Initialise agent skills from all registered directories."
   (interactive)
-  (let ((directories (delq nil (append (list macher-agent-bundled-skills-directory
-                                             macher-agent-global-skills-directory
-                                             dir)
-                                       macher-agent-extra-skill-directories))))
+  (let* ((bundled (or (and (boundp 'macher-agent--bundled-skills-dir) macher-agent--bundled-skills-dir)
+                      (and (boundp 'macher-agent-bundled-skills-directory) macher-agent-bundled-skills-directory)))
+         (directories (delq nil (append (list dir
+                                              bundled
+                                              macher-agent-global-skills-directory)
+                                        (if (listp macher-agent-skill-directories)
+                                            macher-agent-skill-directories
+                                          (list macher-agent-skill-directories))
+                                        macher-agent-extra-skill-directories))))
     
     (cl-loop for d in (delete-dups directories)
              do (when (file-directory-p d)
@@ -396,7 +446,10 @@
     (let* ((workspace (when context (macher-agent--get-context-workspace context)))
            (ws-skills (when workspace (macher-agent-workspace-skills-alist workspace)))
            (global-skills macher-agent-global-skills-alist)
-           (merged-skills (append ws-skills global-skills)))
+           (merged-skills (cl-remove-duplicates (append ws-skills global-skills)
+                                                :key #'car
+                                                :test #'eq
+                                                :from-end t)))
       
       (unless (local-variable-p 'gptel-directives)
         (setq-local gptel-directives (copy-tree (default-value 'gptel-directives))))
@@ -409,7 +462,7 @@
                for desc = (plist-get meta :description)
                for model = (plist-get meta :model)
                for tools = (plist-get meta :tools)
-               for tool-names = (mapcar (lambda (t_) (if (and (fboundp 'gptel-tool-p) (gptel-tool-p t_)) (gptel-tool-name t_) (if (symbolp t_) (symbol-name t_) t_))) tools)
+               for tool-names = (mapcar (lambda (t_) (if (macher-tool-valid-p t_) (gptel-tool-name t_) (if (symbolp t_) (symbol-name t_) t_))) tools)
                do (when system-prompt
                     (setf (alist-get sym gptel-directives) system-prompt)
                     (let ((preset-spec (list :description (or desc (format "Agent Profile: %s" sym))
@@ -429,14 +482,14 @@
          (normalized-target (replace-regexp-in-string "-" "_" t-str))
          (found nil))
     
-    ;; 1. Check the active/buffer-local tools list first
+    ;; Check the active/buffer-local tools list first
     (dolist (t_ (append (default-value 'gptel-tools) (bound-and-true-p gptel-tools)))
-      (when (and (not found) (fboundp 'gptel-tool-p) (gptel-tool-p t_))
+      (when (and (not found) (macher-tool-valid-p t_))
         (let ((t-name (format "%s" (gptel-tool-name t_))))
           (when (equal (replace-regexp-in-string "-" "_" t-name) normalized-target)
             (setq found t_)))))
     
-    ;; 2. Look in the global gptel registry (where `gptel-make-tool` stores everything)
+    ;; Look in the global gptel registry (where `gptel-make-tool` stores everything)
     ;; Structure: ((category . ((name . tool-struct) ...)) ...)
     (unless found
       (when (boundp 'gptel--known-tools)
@@ -445,99 +498,86 @@
                  do (let ((tools-alist (cdr category-alist)))
                       (cl-loop for (name . tool) in tools-alist
                                until found
-                               do (when (and (fboundp 'gptel-tool-p) (gptel-tool-p tool))
+                               do (when (macher-tool-valid-p tool)
                                     (let ((t-name (format "%s" (gptel-tool-name tool))))
                                       (when (equal (replace-regexp-in-string "-" "_" t-name) normalized-target)
                                         (setq found tool)))))))))
     found))
 
-(defun macher-agent-resolve-and-flatten-tools (tools)
-  "Resolve a list of tool names, structs, functions, or nested lists into a flat list of structs."
-  (cl-mapcan
-   (lambda (t-item)
-     (cond
-      ;; If nil, ignore
-      ((null t-item) nil)
-      ;; If a list, recurse
-      ((listp t-item)
-       (macher-agent-resolve-and-flatten-tools t-item))
-      ;; If already a gptel-tool struct, return a list containing it
-      ((and (fboundp 'gptel-tool-p) (gptel-tool-p t-item))
-       (list t-item))
-      ;; If a function, execute it and resolve the result recursively
-      ((functionp t-item)
-       (let ((result (condition-case nil
-                         (funcall t-item)
-                       (error nil))))
-         (when result
-           (macher-agent-resolve-and-flatten-tools (ensure-list result)))))
-      ;; If a symbol that is fboundp, execute it
-      ((and (symbolp t-item) (fboundp t-item))
-       (let ((result (condition-case nil
-                         (funcall t-item)
-                       (error nil))))
-         (when result
-           (macher-agent-resolve-and-flatten-tools (ensure-list result)))))
-      ;; If a string or symbol, resolve it via macher-agent-resolve-tool
-      ((or (stringp t-item) (symbolp t-item))
-       (let* ((ctx (ignore-errors (macher-agent-current-context)))
-              (ws (when ctx (macher-agent--get-context-workspace ctx)))
-              (skills-dir (when ws (macher-agent-workspace-root ws)))
-              (resolved (macher-agent-resolve-tool t-item ctx skills-dir)))
-         (if (and resolved (fboundp 'gptel-tool-p) (gptel-tool-p resolved))
-             (list resolved)
-           nil)))
-      (t nil)))
-   (ensure-list tools)))
+(defun macher-agent--resolve-tool-in-env (item)
+  "Resolve a tool ITEM using the current workspace environment."
+  (let* ((ctx (ignore-errors (macher-agent-resolve-context)))
+         (skills-dir (when ctx (macher-agent-context-root ctx)))
+         (resolved (macher-agent-resolve-tool item ctx skills-dir)))
+    (if (and resolved (macher-tool-valid-p resolved))
+        (list resolved)
+      (let ((native (macher-agent--find-native-tool item)))
+        (when native (list native))))))
+
+(defun macher-agent--flatten-tools (tools)
+  "Recursively flatten a list of tools."
+  (cond
+   ((null tools) nil)
+   ((listp tools) (cl-mapcan #'macher-agent--flatten-tools tools))
+   (t (list tools))))
+
+(defun macher-agent--resolve-tool-item (item)
+  "Resolve a single tool ITEM into a `gptel-tool' struct."
+  (cond
+   ((macher-tool-valid-p item) item)
+   ((functionp item)
+    (let ((res (ignore-errors (funcall item))))
+      (when res
+        (if (listp res)
+            (mapcar #'macher-agent--resolve-tool-item res)
+          (macher-agent--resolve-tool-item res)))))
+   ((and (symbolp item) (fboundp item))
+    (let ((res (ignore-errors (funcall item))))
+      (if res
+          (if (listp res)
+              (mapcar #'macher-agent--resolve-tool-item res)
+            (macher-agent--resolve-tool-item res))
+        (macher-agent--resolve-tool-in-env item))))
+   ((or (stringp item) (symbolp item))
+    (macher-agent--resolve-tool-in-env item))
+   (t nil)))
+
+(defun macher-agent-normalize-tools (tools)
+  "Normalise, resolve, and deduplicate a mixed list of TOOLS.
+Accepts a list of tool representations (names, symbols, structs, functions, or nested lists),
+recursively flattens them, resolves them to `gptel-tool' structs via `macher-agent-resolve-tool'
+or native fallback, filters out nil, and deduplicates by name in a single pass."
+  (let* ((flat-tools (macher-agent--flatten-tools tools))
+         (resolved-nested (mapcar #'macher-agent--resolve-tool-item flat-tools))
+         (flat-resolved (macher-agent--flatten-tools resolved-nested)))
+    (cl-remove-duplicates
+     (delq nil flat-resolved)
+     :key (lambda (t_) (format "%s" (gptel-tool-name t_)))
+     :test #'equal)))
 
 (defun macher-agent-resolve-to-struct (t-item)
   "Convert a tool item safely into a gptel-tool struct."
-  (car (macher-agent-resolve-and-flatten-tools t-item)))
+  (car (macher-agent-normalize-tools t-item)))
 
 (defun macher-agent--wrap-tool-for-project-root (tool)
   "Clone and wrap the tool so it ALWAYS runs in the project root."
-  (if (and tool (fboundp 'gptel-tool-p) (gptel-tool-p tool))
+  (if (macher-tool-valid-p tool)
       (let* ((orig-fn (gptel-tool-function tool))
              (tool-sym (intern (gptel-tool-name tool)))
              (cached-wrapped-fn (get tool-sym 'macher-agent-wrapped-fn)))
         
-        ;; If already wrapped, skip to prevent nesting
         (if (eq orig-fn cached-wrapped-fn)
             tool
           
-          ;; Otherwise, safely clone and inject the project root macro
           (let ((new-tool (copy-sequence tool)))
             (setf (gptel-tool-function new-tool)
                   (lambda (&rest args)
                     (macher-agent-with-project-root 
                      (apply orig-fn args))))
             
-            ;; Cache the new lambda so we recognise it next time
             (put tool-sym 'macher-agent-wrapped-fn (gptel-tool-function new-tool))
             new-tool)))
     tool))
-
-(defun macher-agent-deduplicate-tools (tools)
-  "Resolve raw strings to gptel structs and deduplicate."
-  (cl-remove-duplicates 
-   (macher-agent-resolve-and-flatten-tools tools)
-   :key (lambda (t_) (format "%s" (gptel-tool-name t_)))
-   :test #'equal))
-
-(defun macher-agent-resolve-profile-tools (skill-tools)
-  "Convert a list of tool names/strings into a verified list of gptel-tool structs."
-  (let ((resolved-tools nil))
-    (when skill-tools
-      (dolist (t_ skill-tools)
-        (if (and (fboundp 'gptel-tool-p) (gptel-tool-p t_))
-            (push t_ resolved-tools)
-          (let* ((t-str (if (symbolp t_) (symbol-name t_) t_))
-                 (found-tool (when (fboundp 'macher-agent--find-native-tool)
-                               (macher-agent--find-native-tool t-str))))
-            (if found-tool
-                (push found-tool resolved-tools)
-              (message "Macher-Agent WARNING: Tool '%s' could not be resolved." t-str))))))
-    (nreverse resolved-tools)))
 
 (defvar macher-agent--allow-gptel-restore)
 
@@ -557,13 +597,13 @@
   (setq-local gptel--set-buffer-locally t)
   
   ;; Initialise tools to core defaults and resolve them to structs
-  (setq-local gptel-tools (macher-agent-deduplicate-tools (append (default-value 'gptel-tools) gptel-tools)))
+  (setq-local gptel-tools (macher-agent-normalize-tools (append (default-value 'gptel-tools) gptel-tools)))
 
-  (when default-directory
-    (macher-agent--init-workspace-state 
-     (file-name-as-directory (macher-agent--get-project-root default-directory))))
+  (unless (macher-agent-subagent-p)
+    (when default-directory
+      (macher-agent--init-workspace-state 
+       (file-name-as-directory (macher-agent-root default-directory)))))
   
-  ;; Safely trigger the postponed gptel--restore-state now that workspace is loaded.
   (when (fboundp 'gptel--restore-state)
     (let ((macher-agent--allow-gptel-restore t))
       (gptel--restore-state))))
@@ -587,7 +627,6 @@
       (gptel-mode)
       (insert content)
 
-      ;; Metadata to allow users to render buffer trees
       (setq-local macher-agent-parent-buffer parent-name)
       
       (when active-backend (setq-local gptel-backend active-backend))

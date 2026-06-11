@@ -25,8 +25,8 @@
                                         (dolist (task normalized-tasks)
                                           (macher-agent-spawn-task task (lambda (res) 
                                                                           (message "Background subagent %s task execution completed with status: %s"
-                                                                                   (plist-get res :buffer_name)
-                                                                                   (plist-get res :status)))))
+                                                                                   (macher-agent-tool-response-buffer-name res)
+                                                                                   (macher-agent-tool-response-status res)))))
                                         (make-macher-agent-tool-response
                                          :type 'lisp-result
                                          :payload (format "SUCCESS: Dispatched %d sub-agents in the background. They are executing independently and asynchronously. Your current buffer remains unblocked and you can proceed with other tasks immediately."

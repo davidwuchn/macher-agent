@@ -26,6 +26,8 @@
 
 (defvar macher-agent-context-mutated-hook nil)
 (defvar macher-agent--allow-lazy-init nil)
+(defvar macher-agent-active-workspaces (make-hash-table :test 'equal)
+  "Registry mapping expanded project roots to their active persistent contexts.")
 
 (defun macher-agent-vfs-get-node (workspace path)
   "Retrieve a node's content from the virtual file system."
@@ -52,25 +54,22 @@
         content
       (macher-agent--read-content-from-disk-or-buffer file-path))))
 
-(defsubst macher-agent-vfs-entry-path (entry)
-  "Get the path from a VFS context ENTRY."
-  (car entry))
+(cl-defstruct macher-agent-vfs-entry
+  "A formal structure representing a virtual file system entry."
+  path
+  orig
+  curr)
 
-(defsubst macher-agent-vfs-entry-orig (entry)
-  "Get the original content from a VFS context ENTRY."
-  (cadr entry))
+(defun macher-agent-vfs-make-entry (path orig curr)
+  "Create a virtual file system entry structure.
+PATH is the file or buffer path, ORIG is the original content,
+and CURR is the current modified content."
+  (make-macher-agent-vfs-entry :path path :orig orig :curr curr))
 
-(defsubst macher-agent-vfs-entry-curr (entry)
-  "Get the current content from a VFS context ENTRY."
-  (cddr entry))
-
-(defun macher-agent-vfs-entry-update (entry new-content)
-  "Update a VFS context ENTRY with NEW-CONTENT."
-  (setcdr (cdr entry) new-content))
-
-(defun macher-agent-vfs-entry-set-orig (entry orig)
-  "Set the original content of a VFS context ENTRY."
-  (setcar (cdr entry) orig))
+(defun macher-agent-vfs-entry-modified-p (entry)
+  "Return non-nil if ENTRY has been modified from its original content."
+  (not (equal (macher-agent-vfs-entry-orig entry)
+              (macher-agent-vfs-entry-curr entry))))
 
 (defun macher-agent-media-file-p (path)
   "Return non-nil if PATH represents a media file."
@@ -82,20 +81,55 @@
                            (string-prefix-p "audio/" mime)))
              (string-match-p "\\.\\(png\\|jpe?g\\|gif\\|webp\\|svg\\|pdf\\|mp4\\|mov\\|mp3\\|wav\\)$" path)))))
 
-(defun macher-agent--get-project-root (&optional dir)
-  "Resolve the absolute root path of the project for DIR."
-  (let* ((d (or dir default-directory))
-         (proj (and (fboundp 'project-current) (project-current nil d))))
+(cl-defgeneric macher-agent-root (&optional obj)
+  "Resolve the absolute project or workspace root path from OBJ.
+OBJ can be a string path, a buffer, a virtual file system context, a workspace struct, or nil.
+Returns the absolute path string, or nil if unresolved.")
+
+(cl-defmethod macher-agent-root ((obj string))
+  (let* ((proj (and (fboundp 'project-current) (project-current nil obj))))
     (expand-file-name
      (or (and proj (if (fboundp 'project-root) (project-root proj) (cdr proj)))
-         (and (fboundp 'vc-root-dir) (let ((default-directory d)) (vc-root-dir)))
-         d))))
+         (and (fboundp 'vc-root-dir) (let ((default-directory obj)) (vc-root-dir)))
+         obj))))
+
+(cl-defmethod macher-agent-root ((obj buffer))
+  (with-current-buffer obj
+    (macher-agent-root default-directory)))
+
+(cl-defmethod macher-agent-root ((obj macher-agent-workspace))
+  (macher-agent-workspace-project-root obj))
+
+(cl-defmethod macher-agent-root ((obj cons))
+  (cond
+   ((and (eq (car obj) 'agent) (not (stringp (cdr obj))))
+    (let ((ws (cdr obj)))
+      (if ws
+          (macher-agent-root ws)
+        (macher-agent-root default-directory))))
+   ((and (eq (car obj) 'project) (stringp (cdr obj)))
+    (expand-file-name (cdr obj)))
+   (t (macher-agent-root default-directory))))
+
+(cl-defmethod macher-agent-root ((obj null))
+  (macher-agent-root default-directory))
+
+(cl-defmethod macher-agent-root (obj)
+  (cond
+   ((and obj (fboundp 'macher-context-p) (macher-context-p obj))
+    (let ((ws (macher-agent--get-context-workspace obj)))
+      (if ws
+          (macher-agent-root ws)
+        (macher-agent-root default-directory))))
+   ((and obj (fboundp 'macher--workspace-root))
+    (ignore-errors (macher--workspace-root obj)))
+   (t (macher-agent-root default-directory))))
 
 (defun macher-agent--resolve-safe-path (unsafe-path base-dir)
   "Resolves UNSAFE-PATH strictly within BASE-DIR, preventing jailbreaks."
   ;; SECURITY HARDENING: Explicitly reject absolute paths. No "Ghost" routing.
   (when (file-name-absolute-p unsafe-path)
-    (error "SECURITY ERROR: Absolute paths are forbidden. You must use relative paths (e.g., ./file). Path attempted: %s" unsafe-path))
+    (error "SECURITY ERROR: Absolute paths are forbidden. You must use relative paths (for example, ./file). Path attempted: %s" unsafe-path))
   
   (let* ((relative (if (string-prefix-p "~" unsafe-path) (concat "./" unsafe-path) unsafe-path))
          (resolved (expand-file-name relative base-dir)))
@@ -104,26 +138,35 @@
         resolved
       (error "SECURITY ERROR: Path traversal jailbreak detected: %s" unsafe-path))))
 
+(defun macher-agent--vfs-process-entries (entries sandbox-path entry-path-fn entry-content-fn)
+  (let ((sandbox-root (file-name-as-directory (expand-file-name sandbox-path))))
+    (mapc (lambda (entry)
+            (let ((relative-path (funcall entry-path-fn entry))
+                  (new-content (funcall entry-content-fn entry)))
+              (when (stringp new-content)
+                (let ((sandbox-target-path (macher-agent--resolve-safe-path relative-path sandbox-root)))
+                  (make-directory (file-name-directory sandbox-target-path) t)
+                  (write-region new-content nil sandbox-target-path nil 'silent)))))
+          entries)))
+
 (defun macher-agent-sandbox-inflate (session)
   (let* ((workspace (macher-agent-session-workspace session))
          (sandbox-path (macher-agent-session-sandbox-path session))
-         (vfs-buffers (macher-agent-workspace-vfs-buffers workspace)))
+         (vfs-buffers (macher-agent-workspace-vfs-buffers workspace))
+         (ws-root (macher-agent-workspace-project-root workspace)))
     (when sandbox-path
-      (let ((sandbox-root (file-name-as-directory (expand-file-name sandbox-path))))
-        (maphash (lambda (path content)
-                   (let* ((relative-path (if (file-name-absolute-p path)
-                                             (file-relative-name path (macher-agent-workspace-project-root workspace))
-                                           path))
-                          (sandbox-target-path (macher-agent--resolve-safe-path relative-path sandbox-root)))
-                     (make-directory (file-name-directory sandbox-target-path) t)
-                     (write-region content nil sandbox-target-path nil 'silent)))
-                 vfs-buffers)))))
+      (let ((entries (hash-table-keys vfs-buffers)))
+        (macher-agent--vfs-process-entries
+         entries
+         sandbox-path
+         (lambda (key)
+           (if (file-name-absolute-p key)
+               (file-relative-name key ws-root)
+             key))
+         (lambda (key) (gethash key vfs-buffers)))))))
 
 (defun macher-agent-context-root (context)
-  (if-let* ((workspace (when context (macher-agent--get-context-workspace context)))
-            (root (macher-agent--get-workspace-root workspace)))
-      root
-    default-directory))
+  (or (macher-agent-root context) default-directory))
 
 (defun macher-agent--vfs-verify-clean-merge (workspace-root context) t)
 
@@ -151,6 +194,8 @@
 (defun macher-agent--edit-string-fast (content old-text new-text replace-all)
   "Replace OLD-TEXT with NEW-TEXT in CONTENT.
 If REPLACE-ALL is nil, errors if OLD-TEXT occurs more than once."
+  (when (string-empty-p old-text)
+    (error "Cannot replace an empty string. Provide exact text to match."))
   (let ((count 0)
         (start 0))
     (while (string-match (regexp-quote old-text) content start)
@@ -164,19 +209,22 @@ If REPLACE-ALL is nil, errors if OLD-TEXT occurs more than once."
      (t
       (replace-regexp-in-string (regexp-quote old-text) new-text content t t)))))
 
+(defun macher-agent--vfs-apply-overlay-stateless (contents ws-root sandbox-dir)
+  (macher-agent--vfs-process-entries
+   contents
+   sandbox-dir
+   (lambda (entry)
+     (let ((path (macher-agent-vfs-entry-path entry)))
+       (if (file-name-absolute-p path)
+           (file-relative-name path ws-root)
+         path)))
+   #'macher-agent-vfs-entry-curr))
+
 (defun macher-agent--vfs-apply-overlay (context sandbox-dir)
   (when (and context (macher-agent--get-context-dirty-p context))
-    (let ((sandbox-root (file-name-as-directory (expand-file-name sandbox-dir)))
-          (ws-root (file-name-as-directory (expand-file-name (macher-agent-context-root context)))))
-      (dolist (entry (macher-agent--get-context-contents context))
-        (let* ((original-path (macher-agent-vfs-entry-path entry))
-               (new-content (macher-agent-vfs-entry-curr entry)))
-          (when (stringp new-content)
-            (let* ((expanded-orig (expand-file-name original-path ws-root))
-                   (relative-path (file-relative-name expanded-orig ws-root))
-                   (sandbox-target-path (macher-agent--resolve-safe-path relative-path sandbox-root)))
-              (make-directory (file-name-directory sandbox-target-path) t)
-              (write-region new-content nil sandbox-target-path nil 'silent))))))))
+    (let ((ws-root (macher-agent-context-root context))
+          (contents (macher-agent--get-context-contents context)))
+      (macher-agent--vfs-apply-overlay-stateless contents ws-root sandbox-dir))))
 
 (defun macher-agent-call-with-strict-vfs-pipeline (context body-fn)
   (let* ((workspace-root (macher-agent-context-root context))
@@ -194,88 +242,63 @@ If REPLACE-ALL is nil, errors if OLD-TEXT occurs more than once."
   `(macher-agent-call-with-strict-vfs-pipeline ,context (lambda () ,@body)))
 
 (defun macher-agent--ensure-access (context path)
-  (let* ((actual-name (substring-no-properties path))
-         (contents (and context (macher-agent--get-context-contents context))))
-    (unless (assoc actual-name contents)
-      (error "SECURITY ERROR: You do not have permission to access '%s'. Use list_buffers_in_workspace to see your allowed scope." actual-name))))
-
-(defun macher-agent--find-workspace-directives (context)
-  "Find the gptel-directives from the workspace buffer associated with CONTEXT."
-  (let ((ws-root (and context
-                      (let ((ws (macher-agent--get-context-workspace context)))
-                        (and ws (macher-agent--get-workspace-root ws)))))
-        (directives nil))
-    (when ws-root
-      (let ((ws-root-expanded (expand-file-name ws-root))
-            (buffers (buffer-list))
-            (found nil))
-        (while (and buffers (not found))
-          (let ((buf (car buffers)))
-            (with-current-buffer buf
-              (when (and (bound-and-true-p macher-agent--is-workspace)
-                         (bound-and-true-p macher-agent--persistent-context))
-                (let* ((ws (macher-agent--get-context-workspace macher-agent--persistent-context))
-                       (r (and ws (macher-agent--get-workspace-root ws)))
-                       (re (and r (expand-file-name r))))
-                  (when (and re (string= ws-root-expanded re))
-                    (setq directives gptel-directives)
-                    (setq found t))))))
-          (setq buffers (cdr buffers)))))
-    directives))
+  (macher-agent--ensure-access-stateless (and context (macher-agent--get-context-contents context)) path))
 
 (defun macher-agent--inject-context-state (context &optional directives)
   "Explicitly inject the active agent CONTEXT and optional DIRECTIVES into the current buffer."
   (when context
     (setq-local macher-agent--persistent-context context)
-    (let ((dirs (or directives (macher-agent--find-workspace-directives context))))
-      (when dirs
-        (setq-local gptel-directives dirs)))))
+    (when directives
+      (setq-local gptel-directives directives))))
 
-(defun macher-agent--find-active-context ()
-  "Statelessly retrieve the active context by scanning buffers or checking FSM state."
-  (let* ((fsm (macher-agent--get-fsm-latest))
-         (fsm-info (when fsm
-                     (if (fboundp 'gptel-fsm-info) (funcall 'gptel-fsm-info fsm)
-                       (when (fboundp 'mock-gptel-fsm-info) (funcall 'mock-gptel-fsm-info fsm)))))
-         (fsm-ctx (when fsm-info (plist-get fsm-info :macher--context)))
-         (local-ctx (bound-and-true-p macher-agent--persistent-context)))
-    (cond
-     (fsm-ctx fsm-ctx)
-     (local-ctx local-ctx)
-     (t
-      (let* ((active-root (macher-agent--get-project-root))
-             (active-root-expanded (and active-root (expand-file-name active-root)))
-             (primary-ctx nil))
-        ;; Search for the active workspace buffer matching active-root-expanded
-        (let ((buffers (buffer-list))
-              (found nil))
-          (while (and buffers (not found))
-            (let ((buf (car buffers)))
-              (with-current-buffer buf
-                (when (and (bound-and-true-p macher-agent--is-workspace)
-                           (bound-and-true-p macher-agent--persistent-context))
-                  (let* ((ws (macher-agent--get-context-workspace macher-agent--persistent-context))
-                         (ws-root (and ws (macher-agent--get-workspace-root ws)))
-                         (ws-root-expanded (and ws-root (expand-file-name ws-root))))
-                    (when (or (not active-root-expanded)
-                              (and ws-root-expanded (string= active-root-expanded ws-root-expanded)))
-                      (setq primary-ctx macher-agent--persistent-context)
-                      (setq found t))))))
-            (setq buffers (cdr buffers))))
-        
-        ;; Fallback lazy initialisation
-        (unless primary-ctx
-          (if macher-agent--allow-lazy-init
-              (save-excursion
-                (let ((current-root (macher-agent--get-project-root)))
-                  (macher-agent--init-workspace-state current-root)
-                  (setq primary-ctx (bound-and-true-p macher-agent--persistent-context))))
-            (error "No active agent session found")))
-        primary-ctx)))))
+(defun macher-agent-current-context (&optional ctx-or-fsm)
+  "Alias for `macher-agent-resolve-context'."
+  (macher-agent-resolve-context ctx-or-fsm))
 
-(defun macher-agent-current-context ()
-  "Pure and stateless retrieval of the active agent context."
-  (macher-agent--find-active-context))
+(defun macher-agent--extract-fsm-info (fsm)
+  "Safely extract the info plist from a finite-state machine (FSM)."
+  (when fsm
+    (if (fboundp 'gptel-fsm-info)
+        (funcall 'gptel-fsm-info fsm)
+      (when (fboundp 'mock-gptel-fsm-info)
+        (funcall 'mock-gptel-fsm-info fsm)))))
+
+(defun macher-agent--extract-fsm-context (fsm)
+  "Extract the active context from a finite-state machine (FSM)."
+  (let ((info (macher-agent--extract-fsm-info fsm)))
+    (and info (plist-get info :macher--context))))
+
+(defun macher-agent-resolve-context (&optional ctx-or-fsm)
+  "Resolve the active context from CTX-OR-FSM or state.
+Follows a predictable waterfall:
+1. If CTX-OR-FSM satisfies `macher-context-p', return it.
+2. If CTX-OR-FSM is a finite-state machine (FSM), extract its context.
+3. If `macher-agent--persistent-context' is bound locally in the current buffer, return it.
+4. Try to get context from the latest FSM via `macher-agent--get-fsm-latest'.
+5. Fallback to registry-based active workspace context lookup."
+  (cond
+   ((and ctx-or-fsm (fboundp 'macher-context-p) (macher-context-p ctx-or-fsm))
+    ctx-or-fsm)
+   ((macher-agent--extract-fsm-context ctx-or-fsm))
+   ((bound-and-true-p macher-agent--persistent-context)
+    macher-agent--persistent-context)
+   ((let ((fsm (macher-agent--get-fsm-latest)))
+      (macher-agent--extract-fsm-context fsm)))
+   (t
+    (let* ((active-root (macher-agent-root default-directory))
+           (active-root-expanded (and active-root (expand-file-name active-root)))
+           (primary-ctx (and active-root-expanded
+                             (gethash active-root-expanded macher-agent-active-workspaces))))
+      
+      (unless primary-ctx
+        (if macher-agent--allow-lazy-init
+            (save-excursion
+              (let ((current-root (macher-agent-root default-directory)))
+                (macher-agent--init-workspace-state current-root)
+                (setq primary-ctx (bound-and-true-p macher-agent--persistent-context))))
+          (error "No active agent session found")))
+
+      primary-ctx))))
 
 (defun macher-agent--read-content-from-disk-or-buffer (path)
   (let ((buf (or (get-file-buffer path) (get-buffer path)))
@@ -298,75 +321,98 @@ If REPLACE-ALL is nil, errors if OLD-TEXT occurs more than once."
     (setq-local macher--workspace macher-ws)
     (macher-agent--inject-context-state context)
     
-    ;; Local pre-flight sync hook
+    (puthash (expand-file-name workspace-root) context macher-agent-active-workspaces)
+    
     (add-hook 'gptel-prompt-transform-functions #'macher-agent-sync-prompt-transformer nil t)
     
-    (let ((skills-dir (expand-file-name "skills" workspace-root)))
+    (let ((skills-dir (expand-file-name "skills" workspace-root))
+          (bundled (or (and (boundp 'macher-agent--bundled-skills-dir) macher-agent--bundled-skills-dir)
+                       (and (boundp 'macher-agent-bundled-skills-directory) macher-agent-bundled-skills-directory))))
       (when (fboundp 'macher-agent-initialize-skills)
-        (when (and (boundp 'macher-agent-bundled-skills-directory) macher-agent-bundled-skills-directory)
-          (macher-agent-initialize-skills context macher-agent-bundled-skills-directory))
+        (when bundled
+          (macher-agent-initialize-skills context bundled))
         (when (file-directory-p skills-dir)
           (macher-agent-initialize-skills context skills-dir))))))
 
-(defun macher-agent--reload-skills-on-mutation (&rest _args)
-  (when macher-agent--persistent-context
-    (let* ((workspace (macher-agent--get-context-workspace macher-agent--persistent-context))
-           (skills-dir (when workspace (expand-file-name "skills" (macher-agent--get-workspace-root workspace)))))
-      (when (and skills-dir (file-directory-p skills-dir) (fboundp 'macher-agent-initialize-skills))
-        (macher-agent-initialize-skills macher-agent--persistent-context skills-dir)))))
 
-(add-hook 'macher-agent-context-mutated-hook #'macher-agent--reload-skills-on-mutation)
+
+(defun macher-agent--partition-vfs-entries (contents &optional root-dir)
+  "Split raw VFS CONTENTS into pure virtual and physical lists.
+Returns a cons cell (virtual-entries . physical-entries)."
+  (let ((virtual-contents nil)
+        (physical-contents nil))
+    (dolist (entry contents)
+      (let* ((name (macher-agent-vfs-entry-path entry))
+             (type (macher-agent-context-classify-entry name root-dir)))
+        (if (eq type 'buffer)
+            (push entry virtual-contents)
+          (push entry physical-contents))))
+    (cons (nreverse virtual-contents) (nreverse physical-contents))))
 
 (defun macher-agent--split-context (ctx)
   (let ((file-ctx (macher-agent--clone-context ctx))
         (buf-ctx (macher-agent--clone-context ctx))
-        (file-contents nil)
-        (buf-contents nil)
         (workspace (when ctx (macher-agent--get-context-workspace ctx))))
-    (let ((root (and workspace (macher-agent--get-workspace-root workspace))))
-      (when ctx
-        (dolist (entry (macher-agent--get-context-contents ctx))
-          (let* ((path (macher-agent-vfs-entry-path entry))
-                 (orig (macher-agent-vfs-entry-orig entry))
-                 (new (macher-agent-vfs-entry-curr entry))
-                 (class (macher-agent-context-classify-entry path root)))
-            (unless (equal orig new)
-              (if (eq class 'buffer) (push entry buf-contents) (push entry file-contents)))))))
-    (when file-ctx (macher-agent--set-context-contents file-ctx (nreverse file-contents)))
-    (when buf-ctx (macher-agent--set-context-contents buf-ctx (nreverse buf-contents)))
-    (cons file-ctx buf-ctx)))
+    (let* ((root (and workspace (macher-agent-root workspace)))
+           (contents (when ctx (macher-agent--get-context-contents ctx)))
+           ;; Only partition modified entries for split context
+           (modified-contents (cl-remove-if (lambda (e) (equal (macher-agent-vfs-entry-orig e) (macher-agent-vfs-entry-curr e))) contents))
+           (partitioned (macher-agent--partition-vfs-entries modified-contents root))
+           (buf-contents (car partitioned))
+           (file-contents (cdr partitioned)))
+      (when file-ctx (macher-agent--set-context-contents file-ctx file-contents))
+      (when buf-ctx (macher-agent--set-context-contents buf-ctx buf-contents))
+      (cons file-ctx buf-ctx))))
 
-(defun macher-agent--get-buffer-content (context path)
-  (let* ((workspace (when context (macher-agent--get-context-workspace context)))
-         (workspace-root (when workspace (macher-agent--get-workspace-root workspace))))
-    (if workspace-root
-        (let* ((relative-path (if (file-name-absolute-p path)
-                                  (file-relative-name path workspace-root)
-                                path))
-               (safe-path (macher-agent--resolve-safe-path relative-path workspace-root)))
-          (macher-agent--read-content-from-disk-or-buffer safe-path))
-      (macher-agent--read-content-from-disk-or-buffer path))))
+(defun macher-agent--get-buffer-content-stateless (path workspace-root)
+  "Read buffer content statelessly using an explicit WORKSPACE-ROOT."
+  (if workspace-root
+      (let* ((relative-path (if (file-name-absolute-p path)
+                                (file-relative-name path workspace-root)
+                              path))
+             (safe-path (macher-agent--resolve-safe-path relative-path workspace-root)))
+        (macher-agent--read-content-from-disk-or-buffer safe-path))
+    (macher-agent--read-content-from-disk-or-buffer path)))
 
 (defun macher-agent--update-context-file (context path new-content)
   (let* ((contents (macher-agent--get-context-contents context))
-         (entry (assoc path contents)))
+         (entry (cl-find path contents :key #'macher-agent-vfs-entry-path :test #'equal)))
     (if entry
-        (macher-agent-vfs-entry-update entry new-content)
-      (let ((orig (macher-agent--get-buffer-content context path)))
+        (setf (macher-agent-vfs-entry-curr entry) new-content)
+      (let* ((workspace-root (macher-context-workspace-root context))
+             (orig (macher-agent--get-buffer-content-stateless path workspace-root)))
         (macher-agent--set-context-contents context
-                                            (cons (cons path (cons orig new-content)) contents))))
+                                            (cons (make-macher-agent-vfs-entry :path path :orig orig :curr new-content) contents))))
     (macher-agent--set-context-dirty-p context t)
     (macher-agent--persist-vfs-to-hidden-buffer context)
     (run-hook-with-args 'macher-agent-context-mutated-hook path)))
 
+(defun macher-agent--ensure-access-stateless (contents path)
+  "Ensure PATH is within the explicitly scoped CONTENTS list."
+  (let ((actual-name (substring-no-properties path)))
+    (unless (cl-find actual-name contents :key #'macher-agent-vfs-entry-path :test #'equal)
+      (error "SECURITY ERROR: You do not have permission to access '%s'. Use list_buffers_in_workspace to see your allowed scope." actual-name))))
+
 (defun macher-agent--read-context-file (context path)
-  (macher-agent--ensure-access context path)
-  (let* ((virtual-entry (when context (assoc path (macher-agent--get-context-contents context))))
-         (virtual-content (when virtual-entry (macher-agent-vfs-entry-curr virtual-entry))))
-    (cond
-     (virtual-content virtual-content)
-     ((get-buffer path) (macher-agent--get-buffer-content context path))
-     (t (error "ERROR: Buffer '%s' does not exist." path)))))
+  "Read PATH from CONTEXT. Prioritises VFS, then active buffers, then physical disk.
+Uniformly applies security and path normalisation checks."
+  (let* ((contents (and context (macher-agent--get-context-contents context)))
+         (workspace-root (macher-context-workspace-root context)))
+    (macher-agent--ensure-access-stateless contents path)
+    (let* ((virtual-entry (cl-find path contents :key #'macher-agent-vfs-entry-path :test #'equal))
+           (virtual-content (when virtual-entry (macher-agent-vfs-entry-curr virtual-entry))))
+      (cond
+       (virtual-content virtual-content)
+       (workspace-root
+        (let* ((relative-path (if (file-name-absolute-p path)
+                                  (file-relative-name path workspace-root)
+                                path))
+               (safe-path (macher-agent--resolve-safe-path relative-path workspace-root)))
+          (or (macher-agent--read-content-from-disk-or-buffer safe-path)
+              (error "ERROR: File/Buffer '%s' does not exist." path))))
+       (t
+        (or (macher-agent--read-content-from-disk-or-buffer path)
+            (error "ERROR: File/Buffer '%s' does not exist." path)))))))
 
 (defun macher-agent-context-classify-entry (path-or-buf &optional root-dir)
   (let* ((expanded (if root-dir (expand-file-name path-or-buf root-dir) (expand-file-name path-or-buf)))
@@ -452,7 +498,7 @@ If REPLACE-ALL is nil, errors if OLD-TEXT occurs more than once."
              (orig (macher-agent-vfs-entry-orig child-entry))
              (new (macher-agent-vfs-entry-curr child-entry)))
         (when (or (not (equal orig new))
-                  (not (assoc path parent-contents)))
+                  (not (cl-find path parent-contents :key #'macher-agent-vfs-entry-path :test #'equal)))
           (macher-agent--update-context-file parent-ctx path new))))))
 
 (defun macher-agent--sync-context-entry (entry)
@@ -462,10 +508,10 @@ If REPLACE-ALL is nil, errors if OLD-TEXT occurs more than once."
          (current-state (macher-agent--read-content-from-disk-or-buffer path)))
     (if (not (equal orig current-state))
         (if (equal new current-state)
-            (progn (macher-agent-vfs-entry-set-orig entry current-state) t)
+            (progn (setf (macher-agent-vfs-entry-orig entry) current-state) t)
           (progn
-            (macher-agent-vfs-entry-set-orig entry current-state)
-            (macher-agent-vfs-entry-update entry current-state)
+            (setf (macher-agent-vfs-entry-orig entry) current-state)
+            (setf (macher-agent-vfs-entry-curr entry) current-state)
             t))
       nil)))
 
@@ -483,7 +529,7 @@ If REPLACE-ALL is nil, errors if OLD-TEXT occurs more than once."
 
 (defun macher-agent--persist-vfs-to-hidden-buffer (ctx)
   (let* ((workspace (when ctx (macher-agent--get-context-workspace ctx)))
-         (root-dir (if workspace (macher-agent--get-workspace-root workspace) "default"))
+         (root-dir (if workspace (macher-agent-root workspace) "default"))
          (buf-name (format " *macher-agent-vfs-state-%s*" (md5 (expand-file-name root-dir))))
          (vfs-buf (get-buffer-create buf-name)))
     (with-current-buffer vfs-buf
@@ -503,11 +549,11 @@ If REPLACE-ALL is nil, errors if OLD-TEXT occurs more than once."
   (interactive)
   (unless (derived-mode-p 'diff-mode) (user-error "Not in a patch/diff buffer"))
   (let* ((patch-content (buffer-substring-no-properties (point-min) (point-max)))
-         (ctx (ignore-errors (macher-agent-current-context)))
+         (ctx (ignore-errors (macher-agent-resolve-context)))
          (ws (or (when ctx (macher-agent--get-context-workspace ctx))
                  (bound-and-true-p macher--workspace)))
          (root (if ws
-                   (macher-agent--get-workspace-root ws)
+                   (macher-agent-root ws)
                  (or (locate-dominating-file default-directory ".git") default-directory)))
          (default-directory (file-name-as-directory (expand-file-name root)))
          (use-git (locate-dominating-file default-directory ".git"))
@@ -536,6 +582,10 @@ If REPLACE-ALL is nil, errors if OLD-TEXT occurs more than once."
   (interactive)
   (if (not macher-agent--persistent-context)
       (message "No active context to clear in this buffer.")
+    (let* ((ws (macher-agent--get-context-workspace macher-agent--persistent-context))
+           (ws-root (and ws (macher-agent-root ws))))
+      (when ws-root
+        (remhash (expand-file-name ws-root) macher-agent-active-workspaces)))
     (setq-local macher-agent--persistent-context nil)
     (setq-local macher--fsm-latest nil)
     (run-hooks 'macher-agent-context-mutated-hook)

@@ -6,7 +6,7 @@
                 (let* ((active-buffers nil))
                   (when context
                     (dolist (entry (macher-agent--get-context-contents context))
-                      (let* ((buf-name (car entry))
+                      (let* ((buf-name (macher-agent-vfs-entry-path entry))
                              (classification (macher-agent-context-classify-entry buf-name root-dir)))
                         (when (memq classification '(buffer external))
                           (push buf-name active-buffers)))))

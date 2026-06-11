@@ -27,9 +27,9 @@
                                       (let ((output (list "All sub-agents completed. Outputs:\n")))
                                         (cl-loop for res across (if (vectorp results) results (vconcat results))
                                                  do (push (format "=== Response from %s ===\n%s\n" 
-                                                                  (plist-get res :buffer_name)
-                                                                  (if (eq (plist-get res :status) 'success)
-                                                                      (plist-get res :data)
-                                                                    (plist-get res :error)))
+                                                                  (macher-agent-tool-response-buffer-name res)
+                                                                  (if (eq (macher-agent-tool-response-status res) 'success)
+                                                                      (macher-agent-tool-response-data res)
+                                                                    (macher-agent-tool-response-error res)))
                                                           output))
                                         (string-join (nreverse output) "\n"))))

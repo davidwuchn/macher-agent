@@ -5,21 +5,14 @@
 
 (declare-function macher-agent-workspace-project-root "macher-agent-vfs-client")
 (declare-function macher-agent-workspace-p "macher-agent-vfs-client")
-(declare-function macher-agent-current-context "macher-agent-vfs-client")
+(declare-function macher-agent-resolve-context "macher-agent-vfs-client")
 (declare-function macher-agent-vfs-entry-path "macher-agent-vfs-client")
 (declare-function macher-agent-vfs-entry-curr "macher-agent-vfs-client")
 
 ;; --- Workspace Helpers ---
 
 (defun macher-agent--get-workspace-root (ws)
-  (cond
-   ((and (fboundp 'macher-agent-workspace-p) (macher-agent-workspace-p ws))
-    (macher-agent-workspace-project-root ws))
-   ((and (consp ws) (eq (car ws) 'agent) (not (stringp (cdr ws))))
-    (macher-agent-workspace-project-root (cdr ws)))
-   ((fboundp 'macher--workspace-root)
-    (ignore-errors (macher--workspace-root ws)))
-   (t nil)))
+  (macher-agent-root ws))
 
 (defun macher-agent--get-workspace-name (ws)
   (cond
@@ -38,7 +31,7 @@
   (let ((virtual-contents nil)
         (physical-contents nil))
     (dolist (entry contents)
-      (let* ((name (car entry))
+      (let* ((name (macher-agent-vfs-entry-path entry))
              (live-buf (get-buffer name))
              (is-pure-virtual (and live-buf (null (buffer-file-name live-buf)))))
         (if is-pure-virtual
@@ -72,7 +65,6 @@
   (let ((persistent-ctx (bound-and-true-p macher-agent--persistent-context)))
     (if (and persistent-ctx (not macher-agent--bypass-context-override))
         (progn
-          ;; Safely update dynamic request properties on the persistent singleton
           (when (plist-member kwargs :prompt)
             (setf (macher-context-prompt persistent-ctx) (plist-get kwargs :prompt)))
           (when (plist-member kwargs :process-request-function)
@@ -89,119 +81,179 @@
 
 ;; --- The Elegant UI Splitter (Buffer Rename Paradigm) ---
 
-(defun macher-agent--override-build-patch (orig-fn context &optional fsm)
-  "Override the upstream patch builder to support split Virtual/Physical diffs.
-  Uses the buffer-rename paradigm to let the upstream core do all the heavy lifting."
-  (let* ((vfs-ctx (ignore-errors (macher-agent-current-context)))
+(defun macher-agent--hydrate-vfs-entry (e project-root)
+  "Hydrate an upstream context list or existing struct into a fully populated VFS struct."
+  (let* ((is-struct (and (fboundp 'macher-agent-vfs-entry-p) (macher-agent-vfs-entry-p e)))
+         (path (if is-struct (macher-agent-vfs-entry-path e) (car e)))
+         (full-path (expand-file-name path project-root))
+         
+         (orig-raw (cond (is-struct (macher-agent-vfs-entry-orig e))
+                         ((consp (cdr e)) (car (cdr e)))
+                         (t nil)))
+         (new-raw (cond (is-struct (macher-agent-vfs-entry-curr e))
+                        ((consp (cdr e)) (cdr (cdr e)))
+                        (t (cdr e))))
+         
+         (orig-str (cond ((stringp orig-raw) orig-raw)
+                         ((file-exists-p full-path)
+                          (macher-agent--read-content-from-disk-or-buffer full-path))
+                         (t nil)))
+         (new-str (if (stringp new-raw) new-raw nil)))
+    (macher-agent-vfs-make-entry path orig-str new-str)))
+
+(defun macher-agent--dehydrate-vfs-entry (entry)
+  "Dehydrate a VFS struct back into the legacy list format expected by the core macher package."
+  (cons (macher-agent-vfs-entry-path entry)
+        (cons (macher-agent-vfs-entry-orig entry)
+              (macher-agent-vfs-entry-curr entry))))
+
+(defun macher-agent--prepare-patch-contexts (context fsm project-root)
+  "Calculate and return isolated contexts for virtual buffers and physical files."
+  (let* ((vfs-ctx (or (ignore-errors (macher-agent-resolve-context (or fsm context))) context))
          (raw-contents (or (when vfs-ctx (macher-agent--get-context-contents vfs-ctx))
-                           (macher-context-contents context)))
-         (categorised (macher-agent--split-vfs-contents raw-contents))
+                           (macher-agent--get-context-contents context)))
+         (struct-contents (mapcar (lambda (e) (macher-agent--hydrate-vfs-entry e project-root)) raw-contents))
+         (categorised (macher-agent--partition-vfs-entries struct-contents project-root))
          (virtual-contents (car categorised))
          (physical-contents (cdr categorised))
-         (ws (macher-context-workspace context)))
+         (macher-compatible-ws (cons 'project project-root))
+         (v-ctx (when virtual-contents
+                  (let ((ctx (macher-agent--make-vfs-context :workspace macher-compatible-ws
+                                                             :contents (mapcar #'macher-agent--dehydrate-vfs-entry virtual-contents))))
+                    (setf (macher-context-prompt ctx) (macher-agent--get-context-prompt context))
+                    ctx)))
+         (p-ctx (when physical-contents
+                  (let ((ctx (macher-agent--make-vfs-context :workspace macher-compatible-ws
+                                                             :contents (mapcar #'macher-agent--dehydrate-vfs-entry physical-contents))))
+                    (setf (macher-context-prompt ctx) (macher-agent--get-context-prompt context))
+                    ctx))))
+    (list v-ctx p-ctx physical-contents)))
+
+(defun macher-agent--override-build-patch (orig-fn context &optional fsm)
+  "Override the upstream patch builder to support split Virtual and Physical diffs."
+  (let* ((ws (macher-agent--get-context-workspace context))
+         (project-root (macher-agent-root ws))
+         (default-directory (file-name-as-directory (expand-file-name project-root)))
+         (prepared (macher-agent--prepare-patch-contexts context fsm project-root))
+         (v-ctx (nth 0 prepared))
+         (p-ctx (nth 1 prepared))
+         (physical-contents (nth 2 prepared)))
 
     ;; 1. VIRTUAL BUFFERS
-    (when virtual-contents
-      (let ((v-ctx (macher-agent--make-vfs-context :workspace ws :contents virtual-contents)))
-        (setf (macher-context-prompt v-ctx) (macher-context-prompt context))
-        (funcall orig-fn v-ctx fsm)
-        
-        ;; Intercept the newly minted patch buffer and rename it to protect it from the next run
-        (when-let ((patch-buf (car (macher--get-buffer "patch" ws nil))))
-          (with-current-buffer patch-buf
-            (rename-buffer (format "*macher-virtual-patch:%s*" (macher-agent--get-workspace-name ws)) t)))))
+    (when v-ctx
+      (funcall orig-fn v-ctx fsm)
+      (when-let ((patch-buf (car (macher--get-buffer "patch" ws nil))))
+        (with-current-buffer patch-buf
+          (rename-buffer (format "*macher-virtual-patch:%s*" (macher-agent--get-workspace-name ws)) t))))
 
     ;; 2. PHYSICAL FILES
-    ;; Always run this pass even if empty, so the core package naturally generates 
-    ;; its native "No changes were made" UI if needed.
-    (let ((p-ctx (macher-agent--make-vfs-context :workspace ws :contents physical-contents))
-          (shadow-descriptors nil))
-      (setf (macher-context-prompt p-ctx) (macher-context-prompt context))
-      
-      ;; Identify physical files that have active open back buffers visiting them,
-      ;; and construct the shadow descriptors to temporarily redirect buffer operations.
-      (dolist (entry physical-contents)
-        (let* ((file-path (macher-agent-vfs-entry-path entry))
-               (new-content (macher-agent-vfs-entry-curr entry))
-               (orig-buf (or (get-file-buffer file-path)
-                             (find-buffer-visiting file-path))))
-          (when (and orig-buf (buffer-live-p orig-buf))
-            (push (list :original-buffer orig-buf
-                        :original-file-name (buffer-file-name orig-buf)
-                        :original-buffer-name (buffer-name orig-buf)
-                        :file-path file-path
-                        :new-content new-content
-                        :shadow-buffer nil)
-                  shadow-descriptors))))
-      
-      (unwind-protect
-          (progn
-            ;; Temporarily rename and detach the user's real buffers, and create shadow buffers
-            (dolist (desc shadow-descriptors)
-              (let* ((orig-buf (plist-get desc :original-buffer))
-                     (orig-name (plist-get desc :original-buffer-name))
-                     (file-path (plist-get desc :file-path))
-                     (new-content (plist-get desc :new-content))
-                     (temp-name (generate-new-buffer-name (format " *macher-hidden-%s*" orig-name))))
-                (with-current-buffer orig-buf
-                  (rename-buffer temp-name t)
-                  (setq buffer-file-name nil))
-                
-                (let* ((shadow-buf (get-buffer-create orig-name))
-                       (exact-dir (file-name-directory (expand-file-name file-path))))
-                  (with-current-buffer shadow-buf
-                    (setq default-directory exact-dir)
-                    (setq buffer-file-name file-path)
-                    (setq buffer-file-truename (file-truename file-path))
-                    (insert new-content)
-                    (set-buffer-modified-p nil))
-                  (plist-put desc :shadow-buffer shadow-buf))))
-            
-            ;; Execute the core patch builder
-            (funcall orig-fn p-ctx fsm))
-        
-        ;; Cleanup phase: destroy shadow buffers and perfectly restore original buffers
-        (dolist (desc shadow-descriptors)
-          (let ((shadow (plist-get desc :shadow-buffer))
-                (orig-buf (plist-get desc :original-buffer))
-                (orig-name (plist-get desc :original-buffer-name))
-                (orig-file (plist-get desc :original-file-name)))
-            (when (and shadow (buffer-live-p shadow))
-              (with-current-buffer shadow
-                (setq buffer-file-name nil))
-              (kill-buffer shadow))
+    (when p-ctx
+      (let ((shadow-descriptors nil))
+        (dolist (entry physical-contents)
+          (let* ((raw-path (macher-agent-vfs-entry-path entry))
+                 (file-path (expand-file-name raw-path project-root))
+                 (raw-val (macher-agent-vfs-entry-curr entry))
+                 (new-content (if (consp raw-val) (cdr raw-val) raw-val))
+                 (orig-buf (or (get-file-buffer file-path)
+                               (find-buffer-visiting file-path))))
             (when (and orig-buf (buffer-live-p orig-buf))
-              (with-current-buffer orig-buf
-                (setq buffer-file-name orig-file)
-                (rename-buffer orig-name t)))))))))
+              (push (list :original-buffer orig-buf
+                          :original-file-name (buffer-file-name orig-buf)
+                          :original-buffer-name (buffer-name orig-buf)
+                          :file-path file-path
+                          :new-content new-content
+                          :shadow-buffer nil)
+                    shadow-descriptors))))
+        
+        (setq shadow-descriptors
+              (mapcar (lambda (desc)
+                        (let* ((orig-buf (plist-get desc :original-buffer))
+                               (orig-name (plist-get desc :original-buffer-name))
+                               (file-path (plist-get desc :file-path))
+                               (new-content (plist-get desc :new-content))
+                               (temp-name (generate-new-buffer-name (format " *macher-hidden-%s*" orig-name))))
+                          (with-current-buffer orig-buf
+                            (rename-buffer temp-name t)
+                            (setq buffer-file-name nil))
+                          (let ((shadow-buf (get-buffer-create orig-name)))
+                            (with-current-buffer shadow-buf
+                              (setq-local default-directory (file-name-as-directory project-root))
+                              (when (stringp new-content) (insert new-content))
+                              (setq-local buffer-file-name nil)
+                              (setq-local buffer-file-truename nil)
+                              (auto-save-mode -1))
+                            (plist-put desc :shadow-buffer shadow-buf))))
+                      shadow-descriptors))
+        
+        (when (fboundp 'macher-agent--set-context-shadow-buffers)
+          (macher-agent--set-context-shadow-buffers p-ctx shadow-descriptors))
+
+        (funcall orig-fn p-ctx fsm)
+        
+        (run-at-time "3 sec" nil
+                     (lambda (descs)
+                       (dolist (desc descs)
+                         (let ((shadow (plist-get desc :shadow-buffer))
+                               (orig-buf (plist-get desc :original-buffer))
+                               (orig-name (plist-get desc :original-buffer-name))
+                               (orig-file (plist-get desc :original-file-name)))
+                           (when (and shadow (buffer-live-p shadow))
+                             (with-current-buffer shadow
+                               (set-buffer-modified-p nil) 
+                               (setq buffer-file-name nil))
+                             (kill-buffer shadow))
+                           (when (and orig-buf (buffer-live-p orig-buf))
+                             (with-current-buffer orig-buf
+                               (setq buffer-file-name orig-file)
+                               (rename-buffer orig-name t))))))
+                     shadow-descriptors)))))
 
 (advice-add 'macher--build-patch :around #'macher-agent--override-build-patch)
 
 ;; --- Struct Accessors ---
 
 (defun macher-agent--get-context-workspace (ctx)
-  (let ((ws (and ctx (fboundp 'macher-context-workspace) (macher-context-workspace ctx))))
-    (if (and (consp ws) (eq (car ws) 'agent))
-        (cdr ws)
-      ws)))
+  (cond
+   ((and ctx (fboundp 'macher-context-p) (macher-context-p ctx))
+    (let ((ws (and (fboundp 'macher-context-workspace) (macher-context-workspace ctx))))
+      (if (and (consp ws) (eq (car ws) 'agent))
+          (cdr ws)
+        ws)))
+   ((and (consp ctx) (eq (car ctx) 'agent))
+    (cdr ctx))
+   ((and ctx (fboundp 'macher-agent-workspace-p) (macher-agent-workspace-p ctx))
+    ctx)
+   (t nil)))
 
 (defun macher-agent--set-context-workspace (ctx ws)
-  (setf (macher-context-workspace ctx) ws))
+  (when (and ctx (fboundp 'macher-context-p) (macher-context-p ctx))
+    (setf (macher-context-workspace ctx) ws)))
 
-(defun macher-agent--get-context-contents (ctx)
-  (and ctx (fboundp 'macher-context-contents) (macher-context-contents ctx)))
+(defmacro macher-agent--def-context-accessor (name accessor &optional setter-name docstring)
+  "Define a safe accessor and optional setter for a Macher context struct."
+  (let ((getter `(defun ,name (ctx)
+                   ,(or docstring (format "Safely access `%s` on CTX." accessor))
+                   (and ctx
+                        (fboundp 'macher-context-p)
+                        (macher-context-p ctx)
+                        (fboundp ',accessor)
+                        (,accessor ctx)))))
+    (if setter-name
+        `(progn
+           ,getter
+           (defun ,setter-name (ctx val)
+             ,(format "Safely set `%s` on CTX." accessor)
+             (when (and ctx
+                        (fboundp 'macher-context-p)
+                        (macher-context-p ctx)
+                        (fboundp ',accessor))
+               (setf (,accessor ctx) val))))
+      getter)))
 
-(defun macher-agent--set-context-contents (ctx val)
-  (setf (macher-context-contents ctx) val))
-
-(defun macher-agent--get-context-dirty-p (ctx)
-  (and ctx (fboundp 'macher-context-dirty-p) (macher-context-dirty-p ctx)))
-
-(defun macher-agent--set-context-dirty-p (ctx val)
-  (setf (macher-context-dirty-p ctx) val))
-
-(defun macher-agent--get-context-prompt (ctx)
-  (and ctx (fboundp 'macher-context-prompt) (macher-context-prompt ctx)))
+(macher-agent--def-context-accessor macher-agent--get-context-contents macher-context-contents macher-agent--set-context-contents)
+(macher-agent--def-context-accessor macher-agent--get-context-dirty-p macher-context-dirty-p macher-agent--set-context-dirty-p)
+(macher-agent--def-context-accessor macher-agent--get-context-prompt macher-context-prompt)
+(macher-agent--def-context-accessor macher-agent--get-context-shadow-buffers macher-context-shadow-buffers macher-agent--set-context-shadow-buffers "Safely assign shadow buffers to the struct if the accessor is defined upstream.")
 
 (defun macher-agent--get-fsm-latest ()
   (bound-and-true-p macher--fsm-latest))
