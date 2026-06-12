@@ -22,7 +22,7 @@
   prompt)
 
 (defun macher-agent-post-response-reaper (_beg _end)
-  "Cleanly reap the sub-agent buffer if flagged for disposal."
+  "Reap the sub-agent buffer if flagged for disposal."
   (when (and (macher-agent-subagent-p)
              (macher-agent-ready-to-reap-p))
     (let ((buf (current-buffer)))
@@ -85,8 +85,6 @@
           (setf (gptel-fsm-info fsm) (plist-put info :macher-agent-session session))))))
   (apply orig-fn args))
 
-;; --- Media Injection Hook ---
-
 (defun macher-agent--inject-media-fsm-advice (orig-fun fsm &rest args)
   "Inject pending tool media into the FSM payload right before it hits the network."
   (let* ((info (macher-agent--extract-fsm-info fsm))
@@ -99,20 +97,16 @@
              (prompts (list msg-plist))
              (gptel-context pending))
         
-        ;; Have gptel natively encode the image to base64 JSON payload
         (when (fboundp 'gptel--inject-media)
           (gptel--inject-media (plist-get info :backend) prompts))
         
-        ;; Inject directly into the raw API payload data
         (when (fboundp 'gptel--inject-prompt)
           (gptel--inject-prompt (plist-get info :backend) 
                                 (plist-get info :data) 
                                 (car prompts)))
         
-        ;; Clear the queue for this session so we don't send the image twice
         (setf (macher-agent-session-pending-media session) nil)))
     
-    ;; Continue with the actual network request
     (apply orig-fun fsm args)))
 
 (advice-add 'gptel--handle-wait :around #'macher-agent--inject-media-fsm-advice)
@@ -147,7 +141,6 @@
         (macher-agent-initialize-skills ctx)))
     (apply orig-fun args)))
 
-;; Advise the actual internal function that gptel uses on mode startup
 (advice-add 'gptel--restore-state :around #'macher-agent--gptel-restore-advice)
 
 (defun macher-agent-resolve-backend-and-model (model-name)
@@ -185,7 +178,6 @@ Also aligns `gptel-backend` with `gptel-model` if the model belongs to a differe
               (setq preset-tools (cdr tools))))))
       (setq-local gptel-tools (macher-agent-normalize-tools (append default-tools gptel-tools preset-tools)))))
 
-  ;; Auto-resolve and align backend when `gptel-model' is updated via a preset
   (when (bound-and-true-p gptel-model)
     (let ((resolved (macher-agent-resolve-backend-and-model gptel-model)))
       (when resolved
@@ -206,7 +198,6 @@ Also aligns `gptel-backend` with `gptel-model` if the model belongs to a differe
   (let ((macher-agent--active-fsm fsm))
     (apply orig-fn fsm args)))
 
-;; Advise both pre and post hooks to guarantee the FSM is always available
 (advice-add 'gptel--handle-pre-tool :around #'macher-agent--bind-active-fsm-advice)
 (advice-add 'gptel--handle-post-tool :around #'macher-agent--bind-active-fsm-advice)
 

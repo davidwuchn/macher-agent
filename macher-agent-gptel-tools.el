@@ -25,8 +25,6 @@
 (defvar macher-agent-allowed-tools nil
   "List of custom tool names that should receive the macher-context.")
 
-;; --- Configuration & UI Hooks ---
-
 (defcustom macher-agent-display-subagent-fn nil
   "Function to call with a BUFFER to display it while running.
 If nil, the buffer executes silently in the background."
@@ -41,7 +39,7 @@ If nil, the buffer executes silently in the background."
   :group 'macher-agent)
 
 (defun macher-agent--resolve-context (passed-context)
-  "Attempt to resolve the current agent context."
+  "Resolve the current agent context."
   (or passed-context
       (ignore-errors (macher-agent-current-context))
       (when (and (boundp 'macher--fsm-latest) macher--fsm-latest)
@@ -81,8 +79,6 @@ If nil, the buffer executes silently in the background."
   (when macher-agent-hide-subagent-fn
     (funcall macher-agent-hide-subagent-fn buf)))
 
-;; --- Cloaking Mechanism ---
-
 (defun macher-agent--insert-hidden (text)
   "Insert TEXT visually hidden via a display overlay, but fully readable by gptel.
 This overrides font-lock and prevents markdown-mode from revealing the text."
@@ -91,8 +87,6 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
          (ov (make-overlay start (point))))
     (overlay-put ov 'display "")
     (overlay-put ov 'insert-behind-hooks '(ignore))))
-
-;; --- Middleware Pipeline and Tool Definition ---
 
 (defun macher-agent--middleware-pipeline (all-args schema next-fn)
   "Extracts context, isolates callbacks, and perfectly aligns the payload payload."
@@ -182,8 +176,6 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
          (funcall on-success payload))
         (_ (funcall on-success payload))))))
 
-;; --- Sandbox Tools ---
-
 (defun macher-agent--run-async-cmd (name cmd dir callback)
   "Executes a command using explicit lexical capture for background safety."
   (let* ((out-buf (generate-new-buffer (format " *%s*" name)))
@@ -231,8 +223,6 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
        (ignore-errors (delete-directory sandbox-dir t))
        (funcall on-error (list :status 'error :error (error-message-string err)))))))
 
-;; --- VFS and JIT Reloading ---
-
 (defun macher-agent--read-file-vfs-aware (file-path context)
   "Read a file, prioritising the uncommitted VFS memory over the physical disk."
   (let* ((vfs-entry (when context (cl-find file-path (macher-context-contents context) :key #'macher-agent-vfs-entry-path :test #'equal)))
@@ -242,8 +232,6 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
      ((file-exists-p file-path)
       (with-temp-buffer (insert-file-contents file-path) (buffer-string)))
      (t nil))))
-
-;; --- Additional Legacy Tooling Support ---
 
 (defun macher-agent--parse-tool-arg (arg)
   "Parse a JSON string argument into a Lisp object if applicable."
@@ -283,7 +271,8 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
 
 (defun macher-agent--gptel-base64-encode-advice (orig-fun file)
   "Read FILE from VFS if available before encoding."
-  (let* ((ctx (ignore-errors (macher-agent-current-context)))
+  (let* ((ctx (ignore-errors (macher-agen
+                              t-current-context)))
          (workspace (when ctx (macher-context-workspace ctx)))
          (workspace-root (when workspace (macher-agent--get-workspace-root workspace)))
          (actual-name (if (and workspace-root (file-name-absolute-p file))
@@ -317,7 +306,6 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
                                             (with-current-buffer target-buffer
                                               (when (bound-and-true-p auto-save-visited-mode)
                                                 (auto-save-visited-mode -1))
-                                              (erase-buffer)
                                               (insert content)
                                               (set-buffer-modified-p t))
                                             (when context

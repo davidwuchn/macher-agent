@@ -53,7 +53,7 @@
     (bound-and-true-p macher-agent--ready-to-reap)))
 
 (defun macher-agent--reap-buffer (buf)
-  "An indestructible garbage collector that natively aborts hidden gptel networks."
+  "A garbage collector that natively aborts hidden gptel networks."
   (condition-case nil
       (when (buffer-live-p buf)
         (with-current-buffer buf
@@ -89,7 +89,7 @@
     ((error quit) nil)))
 
 (defun macher-agent--apply-preset (preset)
-  "Apply the PRESET directive securely, flawlessly merging buffer and preset tools."
+  "Apply the PRESET directive, merging buffer and preset tools."
   (let* ((clean-sym (macher-normalise-preset-name preset))
          (spec (when (and clean-sym (boundp 'gptel--known-presets)) 
                  (alist-get clean-sym gptel--known-presets))))
@@ -193,7 +193,7 @@
   (substring-no-properties name))
 
 (defun macher-agent--prepare-subagent-buffer (buf full-dir context &optional preset parent-tools parent-model parent-backend parent-presets parent-directives parent-temp parent-tokens)
-  "Prepare a subagent buffer, locking its directory strictly to the workspace root."
+  "Prepare a subagent buffer, locking its directory to the workspace root."
   (with-current-buffer buf
     (setq default-directory (file-name-as-directory (macher-agent-root full-dir)))
     
@@ -270,7 +270,7 @@
     (message "Virtual buffers applied successfully.")))
 
 (defun macher-agent--prepare-subagent-instructions (buf instructions &optional preset)
-  "Insert INSTRUCTIONS into BUF and strictly bind its preset system message."
+  "Insert INSTRUCTIONS into BUF and bind its preset system message."
   (with-current-buffer buf
     (unless (string-empty-p instructions)
       (insert (substring-no-properties instructions)))

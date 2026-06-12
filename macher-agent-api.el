@@ -15,22 +15,6 @@
   :type '(repeat string)
   :group 'macher-agent)
 
-(defcustom macher-agent-global-skills-directory nil
-  "Deprecated: use `macher-agent-skill-directories' instead."
-  :type '(choice (const :tag "None" nil) string)
-  :group 'macher-agent)
-(make-obsolete-variable 'macher-agent-global-skills-directory 'macher-agent-skill-directories "1.0.0")
-
-(defcustom macher-agent-extra-skill-directories nil
-  "Deprecated: use `macher-agent-skill-directories' instead."
-  :type '(repeat string)
-  :group 'macher-agent)
-(make-obsolete-variable 'macher-agent-extra-skill-directories 'macher-agent-skill-directories "1.0.0")
-
-(defvar macher-agent-bundled-skills-directory nil
-  "Deprecated: default skills are now handled internally.")
-(make-obsolete-variable 'macher-agent-bundled-skills-directory 'macher-agent--bundled-skills-dir "1.0.0")
-
 (defvar macher-agent--bundled-skills-dir
   (expand-file-name "skills" (file-name-directory (or load-file-name buffer-file-name)))
   "Internal path to bundled skills.")
@@ -52,8 +36,6 @@
   `(let ((default-directory (file-name-as-directory (macher-agent-root))))
      ,@body))
 
-;; --- Public Context API ---
-
 (defun macher-agent-workspace-resolve-path (path)
   (macher-agent--resolve-buffer-name path))
 
@@ -74,8 +56,7 @@
   (setq-local macher-agent--final-result result)
   (when (boundp 'macher-agent--parent-callback)
     (funcall macher-agent--parent-callback (make-macher-agent-tool-response :status 'success :data result :buffer-name (buffer-name)))
-    (makunbound 'macher-agent--parent-callback)
-    ))
+    (makunbound 'macher-agent--parent-callback)))
 
 (defun macher-agent-ui-show (&optional buf)
   (macher-agent--show-ui buf))
@@ -86,7 +67,7 @@
     (macher--workspace-root workspace)))
 
 (defun macher-context-workspace-root (context)
-  "Navigate the context struct to retrieve the root directory cleanly."
+  "Navigate the context struct to retrieve the root directory."
   (let ((workspace (when context (macher-agent--get-context-workspace context))))
     (when workspace (macher-agent-root workspace))))
 
@@ -98,7 +79,7 @@
       (intern clean-str))))
 
 (defun macher-tool-valid-p (tool)
-  "Check if TOOL is a valid struct safely."
+  "Check if TOOL is a valid struct."
   (and tool (fboundp 'gptel-tool-p) (gptel-tool-p tool)))
 
 (defun macher-agent-force-review ()
@@ -110,8 +91,6 @@
         (message "No pending edits to review.")
       (macher--build-patch context fsm)
       (message "SUCCESS: Patch review screen(s) generated for pending edits."))))
-
-;; --- Parsers and Loaders ---
 
 (defun macher-agent--parse-yaml-array (text key)
   "Extract a YAML list for KEY from TEXT."
@@ -240,7 +219,7 @@ If VALIDATION-CB is provided, it is called on each form; if it returns nil, an e
   (when (macher-agent--is-managed-path-p path)
     (let* ((workspace (when (bound-and-true-p macher-agent--persistent-context)
                         (macher-agent--get-context-workspace macher-agent--persistent-context))))
-      ;; Handle script cache invalidation
+
       (when (string-match "scripts/\\([^/]+\\)\\.el$" path)
         (let* ((tool-name (match-string 1 path))
                (registry (if workspace
@@ -249,7 +228,6 @@ If VALIDATION-CB is provided, it is called on each form; if it returns nil, an e
           (remhash tool-name registry)
           (remhash (intern tool-name) registry)))
       
-      ;; Handle skill reloading
       (when (and macher-agent--persistent-context workspace)
         (let ((skills-dir (expand-file-name "skills" (macher-agent-root workspace))))
           (when (and skills-dir (file-directory-p skills-dir))
@@ -289,7 +267,7 @@ If VALIDATION-CB is provided, it is called on each form; if it returns nil, an e
         disk-content))))
 
 (defun macher-agent--parse-and-validate-tool-ast (content tool-name)
-  "Parse CONTENT and validate the AST for security. Returns a list of trusted forms."
+  "Parse CONTENT and validate the AST. Returns a list of trusted forms."
   (condition-case err
       (macher-agent--parse-safe-forms content
                                       (lambda (f)
@@ -384,7 +362,7 @@ If VALIDATION-CB is provided, it is called on each form; if it returns nil, an e
                                    (delq nil (mapcar (lambda (tname)
                                                        (macher-agent-resolve-tool tname context skills-dir))
                                                      tool-names)))))
-            ;; Store metadata in the private alist
+
             (setf (alist-get sym alist)
                   (list :system body :description desc :model (when model (intern model)) :tools resolved-tools))
             (if workspace
@@ -392,7 +370,7 @@ If VALIDATION-CB is provided, it is called on each form; if it returns nil, an e
               (setq macher-agent-global-skills-alist alist))))))))
 
 (defun macher-agent-api-register-skills-in-directory (skills-dir &optional context)
-  "Scan SKILLS-DIR for SKILL.md files and load them."
+  "Scan SKILLS-DIR for SKILL.md files and load."
   (let* ((expanded-dir (file-name-as-directory (expand-file-name skills-dir)))
          (target-dir (if (file-directory-p (expand-file-name "skills" expanded-dir))
                          (file-name-as-directory (expand-file-name "skills" expanded-dir))
@@ -442,7 +420,6 @@ If VALIDATION-CB is provided, it is called on each form; if it returns nil, an e
              do (when (file-directory-p d)
                   (macher-agent-api-register-skills-in-directory d context)))
     
-    ;; Sync workspace and global skills to gptel's buffer-local directives
     (let* ((workspace (when context (macher-agent--get-context-workspace context)))
            (ws-skills (when workspace (macher-agent-workspace-skills-alist workspace)))
            (global-skills macher-agent-global-skills-alist)
@@ -476,21 +453,17 @@ If VALIDATION-CB is provided, it is called on each form; if it returns nil, an e
     (gptel--setup-directive-menu 'gptel--system-message "Agent Profile")))
 
 (defun macher-agent--find-native-tool (tool-name)
-  "Safely find a gptel-tool registered natively via `gptel-make-tool`."
+  "Find a gptel-tool registered natively via `gptel-make-tool`."
   (let* ((t-str (if (symbolp tool-name) (symbol-name tool-name) tool-name))
-         ;; Normalise dashes to underscores for robust matching
          (normalized-target (replace-regexp-in-string "-" "_" t-str))
          (found nil))
     
-    ;; Check the active/buffer-local tools list first
     (dolist (t_ (append (default-value 'gptel-tools) (bound-and-true-p gptel-tools)))
       (when (and (not found) (macher-tool-valid-p t_))
         (let ((t-name (format "%s" (gptel-tool-name t_))))
           (when (equal (replace-regexp-in-string "-" "_" t-name) normalized-target)
             (setq found t_)))))
     
-    ;; Look in the global gptel registry (where `gptel-make-tool` stores everything)
-    ;; Structure: ((category . ((name . tool-struct) ...)) ...)
     (unless found
       (when (boundp 'gptel--known-tools)
         (cl-loop for category-alist in gptel--known-tools
@@ -515,7 +488,7 @@ If VALIDATION-CB is provided, it is called on each form; if it returns nil, an e
         (when native (list native))))))
 
 (defun macher-agent--flatten-tools (tools)
-  "Recursively flatten a list of tools."
+  "Flatten a list of tools."
   (cond
    ((null tools) nil)
    ((listp tools) (cl-mapcan #'macher-agent--flatten-tools tools))
@@ -556,7 +529,7 @@ or native fallback, filters out nil, and deduplicates by name in a single pass."
      :test #'equal)))
 
 (defun macher-agent-resolve-to-struct (t-item)
-  "Convert a tool item safely into a gptel-tool struct."
+  "Convert a tool item into a gptel-tool struct."
   (car (macher-agent-normalize-tools t-item)))
 
 (defun macher-agent--wrap-tool-for-project-root (tool)
@@ -583,7 +556,6 @@ or native fallback, filters out nil, and deduplicates by name in a single pass."
 
 (defun macher-agent-gptel-mode-setup ()
   "Initialise macher-agent defaults for all gptel buffers."
-  ;; Make variables buffer-local to prevent bleeding between sessions
   (make-local-variable 'gptel--preset)
   (make-local-variable 'gptel-tools)
   (make-local-variable 'gptel-model)
@@ -596,7 +568,6 @@ or native fallback, filters out nil, and deduplicates by name in a single pass."
 
   (setq-local gptel--set-buffer-locally t)
   
-  ;; Initialise tools to core defaults and resolve them to structs
   (setq-local gptel-tools (macher-agent-normalize-tools (append (default-value 'gptel-tools) gptel-tools)))
 
   (unless (macher-agent-subagent-p)

@@ -9,8 +9,6 @@
 (declare-function macher-agent-vfs-entry-path "macher-agent-vfs-client")
 (declare-function macher-agent-vfs-entry-curr "macher-agent-vfs-client")
 
-;; --- Workspace Helpers ---
-
 (defun macher-agent--get-workspace-root (ws)
   (macher-agent-root ws))
 
@@ -23,8 +21,6 @@
    ((fboundp 'macher--workspace-name)
     (ignore-errors (macher--workspace-name ws)))
    (t "unknown")))
-
-;; --- VFS Splitter ---
 
 (defun macher-agent--split-vfs-contents (contents)
   "Split raw VFS contents into pure virtual and physical lists."
@@ -39,8 +35,6 @@
           (push entry physical-contents))))
     (cons (nreverse virtual-contents) (nreverse physical-contents))))
 
-;; --- Core Crash Fixes ---
-
 (defun macher-agent--safe-workspace-hash (workspace &rest _args)
   "Nuke the core recursive hashing function which causes depth crashes."
   (let ((path (cond
@@ -54,8 +48,6 @@
     (md5 (or path "unknown-workspace"))))
 
 (advice-add 'macher--workspace-hash :override #'macher-agent--safe-workspace-hash)
-
-;; --- The Constructor Interceptor ---
 
 (defvar macher-agent--bypass-context-override nil
   "Internal flag to prevent intercepting our own ephemeral diff contexts.")
@@ -79,10 +71,8 @@
   (let ((macher-agent--bypass-context-override t))
     (macher--make-context :workspace workspace :contents contents)))
 
-;; --- The Elegant UI Splitter (Buffer Rename Paradigm) ---
-
 (defun macher-agent--hydrate-vfs-entry (e project-root)
-  "Hydrate an upstream context list or existing struct into a fully populated VFS struct."
+  "Hydrate an upstream context list or existing struct into a populated VFS struct."
   (let* ((is-struct (and (fboundp 'macher-agent-vfs-entry-p) (macher-agent-vfs-entry-p e)))
          (path (if is-struct (macher-agent-vfs-entry-path e) (car e)))
          (full-path (expand-file-name path project-root))
@@ -102,7 +92,7 @@
     (macher-agent-vfs-make-entry path orig-str new-str)))
 
 (defun macher-agent--dehydrate-vfs-entry (entry)
-  "Dehydrate a VFS struct back into the legacy list format expected by the core macher package."
+  "Dehydrate a VFS struct back into the legacy list format expected by core macher."
   (cons (macher-agent-vfs-entry-path entry)
         (cons (macher-agent-vfs-entry-orig entry)
               (macher-agent-vfs-entry-curr entry))))
@@ -139,14 +129,12 @@
          (p-ctx (nth 1 prepared))
          (physical-contents (nth 2 prepared)))
 
-    ;; 1. VIRTUAL BUFFERS
     (when v-ctx
       (funcall orig-fn v-ctx fsm)
       (when-let ((patch-buf (car (macher--get-buffer "patch" ws nil))))
         (with-current-buffer patch-buf
           (rename-buffer (format "*macher-virtual-patch:%s*" (macher-agent--get-workspace-name ws)) t))))
 
-    ;; 2. PHYSICAL FILES
     (when p-ctx
       (let ((shadow-descriptors nil))
         (dolist (entry physical-contents)
@@ -188,12 +176,8 @@
         (when (fboundp 'macher-agent--set-context-shadow-buffers)
           (macher-agent--set-context-shadow-buffers p-ctx shadow-descriptors))
 
-        ;; --- THE FIX BEGINS HERE ---
-        
-        ;; 1. Pause the VFS auto-sync to prevent it from reading the shadow buffers
         (setq macher-agent--pause-auto-sync t)
         
-        ;; 2. Create a self-removing cleanup closure attached to the upstream ready hook
         (let ((cleanup-fn nil))
           (setq cleanup-fn
                 (lambda ()
@@ -212,18 +196,15 @@
                             (with-current-buffer orig-buf
                               (setq buffer-file-name orig-file)
                               (rename-buffer orig-name t)))))
-                    ;; Always restore the sync flag and remove the hook, even if an error occurs
+
                     (setq macher-agent--pause-auto-sync nil)
                     (remove-hook 'macher-patch-ready-hook cleanup-fn))))
           
           (add-hook 'macher-patch-ready-hook cleanup-fn))
 
-        ;; 3. Trigger the asynchronous upstream builder
         (funcall orig-fn p-ctx fsm)))))
 
 (advice-add 'macher--build-patch :around #'macher-agent--override-build-patch)
-
-;; --- Struct Accessors ---
 
 (defun macher-agent--get-context-workspace (ctx)
   (cond

@@ -55,7 +55,7 @@
       (macher-agent--read-content-from-disk-or-buffer file-path))))
 
 (cl-defstruct macher-agent-vfs-entry
-  "A formal structure representing a virtual file system entry."
+  "A structure representing a virtual file system entry."
   path
   orig
   curr)
@@ -127,7 +127,6 @@ Returns the absolute path string, or nil if unresolved.")
 
 (defun macher-agent--resolve-safe-path (unsafe-path base-dir)
   "Resolves UNSAFE-PATH strictly within BASE-DIR, preventing jailbreaks."
-  ;; SECURITY HARDENING: Explicitly reject absolute paths. No "Ghost" routing.
   (when (file-name-absolute-p unsafe-path)
     (error "SECURITY ERROR: Absolute paths are forbidden. You must use relative paths (for example, ./file). Path attempted: %s" unsafe-path))
   
@@ -334,8 +333,6 @@ Follows a predictable waterfall:
         (when (file-directory-p skills-dir)
           (macher-agent-initialize-skills context skills-dir))))))
 
-
-
 (defun macher-agent--partition-vfs-entries (contents &optional root-dir)
   "Split raw VFS CONTENTS into pure virtual and physical lists.
 Returns a cons cell (virtual-entries . physical-entries)."
@@ -355,7 +352,7 @@ Returns a cons cell (virtual-entries . physical-entries)."
         (workspace (when ctx (macher-agent--get-context-workspace ctx))))
     (let* ((root (and workspace (macher-agent-root workspace)))
            (contents (when ctx (macher-agent--get-context-contents ctx)))
-           ;; Only partition modified entries for split context
+
            (modified-contents (cl-remove-if (lambda (e) (equal (macher-agent-vfs-entry-orig e) (macher-agent-vfs-entry-curr e))) contents))
            (partitioned (macher-agent--partition-vfs-entries modified-contents root))
            (buf-contents (car partitioned))
@@ -540,7 +537,7 @@ Used to prevent race conditions during shadow-buffer patch generation.")
     (with-current-buffer vfs-buf
       (erase-buffer)
       (insert ";;; Macher Agent Virtual File System State\n")
-      (insert ";;; This buffer is C-optimised and handles gigabytes of text effortlessly.\n\n")
+      (insert ";;; This buffer is native and handles large text blocks.\n\n")
       (when ctx
         (dolist (entry (macher-agent--get-context-contents ctx))
           (let ((path (macher-agent-vfs-entry-path entry))
