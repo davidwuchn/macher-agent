@@ -188,25 +188,38 @@
         (when (fboundp 'macher-agent--set-context-shadow-buffers)
           (macher-agent--set-context-shadow-buffers p-ctx shadow-descriptors))
 
-        (funcall orig-fn p-ctx fsm)
+        ;; --- THE FIX BEGINS HERE ---
         
-        (run-at-time "3 sec" nil
-                     (lambda (descs)
-                       (dolist (desc descs)
-                         (let ((shadow (plist-get desc :shadow-buffer))
-                               (orig-buf (plist-get desc :original-buffer))
-                               (orig-name (plist-get desc :original-buffer-name))
-                               (orig-file (plist-get desc :original-file-name)))
-                           (when (and shadow (buffer-live-p shadow))
-                             (with-current-buffer shadow
-                               (set-buffer-modified-p nil) 
-                               (setq buffer-file-name nil))
-                             (kill-buffer shadow))
-                           (when (and orig-buf (buffer-live-p orig-buf))
-                             (with-current-buffer orig-buf
-                               (setq buffer-file-name orig-file)
-                               (rename-buffer orig-name t))))))
-                     shadow-descriptors)))))
+        ;; 1. Pause the VFS auto-sync to prevent it from reading the shadow buffers
+        (setq macher-agent--pause-auto-sync t)
+        
+        ;; 2. Create a self-removing cleanup closure attached to the upstream ready hook
+        (let ((cleanup-fn nil))
+          (setq cleanup-fn
+                (lambda ()
+                  (unwind-protect
+                      (dolist (desc shadow-descriptors)
+                        (let ((shadow (plist-get desc :shadow-buffer))
+                              (orig-buf (plist-get desc :original-buffer))
+                              (orig-name (plist-get desc :original-buffer-name))
+                              (orig-file (plist-get desc :original-file-name)))
+                          (when (and shadow (buffer-live-p shadow))
+                            (with-current-buffer shadow
+                              (set-buffer-modified-p nil) 
+                              (setq buffer-file-name nil))
+                            (kill-buffer shadow))
+                          (when (and orig-buf (buffer-live-p orig-buf))
+                            (with-current-buffer orig-buf
+                              (setq buffer-file-name orig-file)
+                              (rename-buffer orig-name t)))))
+                    ;; Always restore the sync flag and remove the hook, even if an error occurs
+                    (setq macher-agent--pause-auto-sync nil)
+                    (remove-hook 'macher-patch-ready-hook cleanup-fn))))
+          
+          (add-hook 'macher-patch-ready-hook cleanup-fn))
+
+        ;; 3. Trigger the asynchronous upstream builder
+        (funcall orig-fn p-ctx fsm)))))
 
 (advice-add 'macher--build-patch :around #'macher-agent--override-build-patch)
 

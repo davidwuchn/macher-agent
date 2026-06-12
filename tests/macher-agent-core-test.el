@@ -14,6 +14,8 @@
 (cl-defstruct mock-gptel-fsm info state)
 
 (describe "Macher-Agent Core Behaviours"
+          (after-each
+           (setq macher-agent--pause-auto-sync nil))
           
           (describe "1. VFS and Optimistic Concurrency"
                     (it "asserts that a VFS write is rejected if the underlying file has drifted"
@@ -134,7 +136,9 @@
                           (let ((orig-called-with nil))
                             ;; Execute our bridge interceptor, mocking the core function to capture the splits
                             (macher-agent--override-build-patch 
-                             (lambda (ctx _fsm) (push (macher-context-contents ctx) orig-called-with))
+                             (lambda (ctx _fsm) 
+                               (push (macher-context-contents ctx) orig-called-with)
+                               (run-hooks 'macher-patch-ready-hook))
                              context fsm)
                             
                             ;; Assert that the core patch builder was called twice
@@ -192,7 +196,8 @@
                                    (with-current-buffer shadow
                                      (expect (buffer-string) :to-equal "new virtual content")
                                      (expect default-directory :to-equal (file-name-directory (expand-file-name file-path))))
-                                   (setq shadow-buffer-verified t))))
+                                   (setq shadow-buffer-verified t))
+                                 (run-hooks 'macher-patch-ready-hook)))
                              context fsm)
                             
                             ;; After orig-fn, everything must be perfectly restored
