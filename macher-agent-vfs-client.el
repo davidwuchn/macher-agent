@@ -515,8 +515,13 @@ Uniformly applies security and path normalisation checks."
             t))
       nil)))
 
+(defvar macher-agent--pause-auto-sync nil
+  "When non-nil, `macher-agent--auto-sync-context` will silently abort.
+Used to prevent race conditions during shadow-buffer patch generation.")
+
 (defun macher-agent--auto-sync-context (ctx &rest _args)
-  (when ctx
+  "Synchronise the active context with the physical disk, unless paused."
+  (when (and ctx (not macher-agent--pause-auto-sync))
     (let ((contents (macher-agent--get-context-contents ctx))
           (synced nil))
       (dolist (entry contents)
