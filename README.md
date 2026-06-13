@@ -170,7 +170,109 @@ If an agent is busy running a background task, you can interactively push instru
 
 ## Orchestrating Workflows
 
-You can run workflows autonomously or manually.
+You can run workflows autonomously (agent driven), programmatically (as macher-agent is a native Emacs implementation) or interactively.
+
+### Graph-Based Agent Workflows (LangGraph Pattern)
+
+If you are familiar with frameworks like `LangGraph`, you can build the exact same deterministic, node-based workflows natively in Emacs Lisp. This is especially useful for running, multi-step LLM pipelines in Emacs batch mode (`emacs -nw --batch`).
+
+#### The Graph Engine
+
+First, we define a lightweight graph runner. This engine takes your Nodes (functions), Edges (transitions), and State, and runs them sequentially in a controlled `while` loop.
+
+```elisp
+(require 'cl-lib)
+
+(cl-defstruct macher-agent-graph-app
+  nodes
+  edges
+  state
+  entrypoint)
+
+(defun macher-agent-graph-build (&key nodes edges state entrypoint)
+  "Compile the state machine graph."
+  (make-macher-agent-graph-app :nodes nodes :edges edges :state state :entrypoint entrypoint))
+
+(defun macher-agent-graph-run (app &key halt-after inputs)
+  "Run the graph, injecting initial INPUTS into the state."
+  (let* ((current-node (macher-agent-graph-app-entrypoint app))
+         (state (copy-sequence (macher-agent-graph-app-state app)))
+         (edges (macher-agent-graph-app-edges app))
+         (nodes (macher-agent-graph-app-nodes app)))
+    
+    (cl-loop for (k v) on inputs by 'cddr do (setq state (plist-put state k v)))
+    
+    (while current-node
+      (let ((node-fn (alist-get current-node nodes)))
+        (unless node-fn (error "No function defined for node: %s" current-node))
+        
+        (setq state (funcall node-fn state))
+        
+        (if (member current-node halt-after)
+            (setq current-node nil)
+          (setq current-node (alist-get current-node edges)))))
+    
+    state))
+```
+
+### Defining Nodes
+
+Because `macher-agent`'s tool and skill systems are decoupled from the UI, you can spin up temporary buffers inside a node, mount multiple skills natively, and trigger LLM requests synchronously using `accept-process-output`.
+
+```elisp
+(defun my-node-human-input (state)
+  "Extract the prompt and append it to the chat history state."
+  (let* ((prompt (plist-get state :prompt))
+         (history (plist-get state :chat_history))
+         (chat-item `(:role "user" :content ,prompt)))
+
+    (plist-put state :chat_history (append history (list chat-item)))))
+
+(defun my-node-ai-response (state)
+  "Query the LLM synchronously using macher-agent's native compositing engine."
+  (let* ((history (plist-get state :chat_history))
+         (prompt (mapconcat (lambda (x) (plist-get x :content)) history "\n\n"))
+         (response nil)
+         (done nil))
+    
+    (with-temp-buffer
+      (when (fboundp 'macher-agent--apply-composed-skills)
+        (macher-agent--apply-composed-skills '("macher-agent-worker")))
+      
+      (gptel-request prompt
+                     :callback (lambda (res info)
+                                 (setq response res)
+                                 (setq done t))))
+
+    (while (not done)
+      (accept-process-output nil 0.1))
+  
+    (let ((chat-item `(:role "system" :content ,response)))
+      (plist-put state :response response)
+      (plist-put state :chat_history (append history (list chat-item))))))
+```
+
+### Compiling and Executing the Graph
+
+Finally, wire the nodes and edges together to compile the application. This API allows you to map complex workflows, conditional routing, and infinite data pipelines cleanly.
+
+```elisp
+(setq my-agent-graph 
+      (macher-agent-graph-build
+       :nodes '((human_input . my-node-human-input)
+                (ai_response . my-node-ai-response))
+       :edges '((human_input . ai_response)
+                (ai_response . human_input))
+       :state '(:chat_history nil)
+       :entrypoint 'human_input))
+
+(setq final-state (macher-agent-graph-run my-agent-graph 
+                                          :halt-after '(ai_response) 
+                                          :inputs '(:prompt "Provide a summary of the project architecture.")))
+
+(message "Agent Response: %s" (plist-get final-state :response))
+
+```
 
 In an autonomous setup, a planner agent creates sub-agents, delegates tasks, and waits for a response via tool calls. The parent agent can run these sub-agents in the background using the event-bus orchestrator (`macher-agent-execute-parallel`), guaranteeing the sub-agents share the parent's uncommitted VFS memory.
 
