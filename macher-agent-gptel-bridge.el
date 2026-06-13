@@ -1,5 +1,6 @@
 ;;; macher-agent-gptel-bridge.el --- Clean gptel boundary -*- lexical-binding: t; -*-
 
+(require 'cl-lib)
 (require 'gptel)
 (require 'macher)
 (require 'macher-agent-vfs-client)
@@ -11,15 +12,31 @@
 (declare-function macher-agent--reap-buffer "macher-agent-orchestration")
 (declare-function macher-agent-initialize-skills "macher-agent-api")
 
-(defun macher-agent-sync-prompt-transformer (prompt)
-  "Synchronise the active virtual file system state and registries before the prompt is sent."
+(defun macher-agent-sync-prompt-transformer (&rest _args)
+  "Synchronise VFS, ephemerally compose skills, and strip tags."
   (let* ((macher-agent--allow-lazy-init t)
          (ctx (macher-agent-resolve-context)))
     (when ctx
       (macher-agent--auto-sync-context ctx)
       (when (fboundp 'macher-agent-initialize-skills)
         (macher-agent-initialize-skills ctx))))
-  prompt)
+
+  (save-excursion
+    (goto-char (point-min))
+    (let ((matched-skills nil))
+      
+      (while (re-search-forward "^@\\([[:alnum:]_-]+\\)\\b\\s-*" nil t)
+        (push (intern (match-string-no-properties 1)) matched-skills)
+        (replace-match ""))
+      
+      (unless matched-skills
+        (let ((active-sys gptel--system-message))
+          (when-let* ((sym (cl-loop for (s . sys) in gptel-directives
+                                    when (equal sys active-sys) return s)))
+            (push sym matched-skills))))
+      
+      (when (and matched-skills (fboundp 'macher-agent--apply-composed-skills))
+        (macher-agent--apply-composed-skills (nreverse matched-skills))))))
 
 (defun macher-agent-post-response-reaper (_beg _end)
   "Reap the sub-agent buffer if flagged for disposal."
@@ -161,34 +178,6 @@ Returns a cons cell (BACKEND . MODEL-FORMAT) if found, otherwise nil."
                   (when (equal m-str model-str)
                     (setq result (cons backend m-raw)))))))))
       result)))
-
-(defun macher-agent--after-apply-preset-advice (preset &rest _)
-  "Ensure gptel-tools is resolved to structs, includes default tools, and is deduplicated.
-Also aligns `gptel-backend` with `gptel-model` if the model belongs to a different backend."
-  (when (boundp 'gptel-tools)
-    (let* ((default-tools (default-value 'gptel-tools))
-           (clean-sym (macher-normalise-preset-name preset))
-           (preset-tools nil))
-      (when clean-sym
-        (setq-local macher-agent--active-skill-sym clean-sym)
-        (when (boundp 'gptel--known-presets)
-          (let* ((spec (alist-get clean-sym gptel--known-presets))
-                 (tools (plist-get spec :tools)))
-            (when (and tools (eq (car tools) :append))
-              (setq preset-tools (cdr tools))))))
-      (setq-local gptel-tools (macher-agent-normalize-tools (append default-tools gptel-tools preset-tools)))))
-
-  (when (bound-and-true-p gptel-model)
-    (let ((resolved (macher-agent-resolve-backend-and-model gptel-model)))
-      (when resolved
-        (let ((backend (car resolved))
-              (model-format (cdr resolved)))
-          (unless (eq gptel-backend backend)
-            (setq-local gptel-backend backend))
-          (unless (eq gptel-model model-format)
-            (setq-local gptel-model model-format)))))))
-
-(advice-add 'gptel--apply-preset :after #'macher-agent--after-apply-preset-advice)
 
 (defvar macher-agent--active-fsm nil
   "Dynamically bound to the active FSM during tool execution hooks.")

@@ -573,18 +573,18 @@
                     (describe "Tool Signatures (Macro Contracts)"
                               (before-all
                                (macher-agent-make-tool mock-async-contract-tool
-                                                       "Mock async tool"
-                                                       :category "test"
-                                                       :args (list (list :name "arg1" :type 'string) (list :name "arg2" :type 'string))
-                                                       :command-fn (lambda (payload)
-                                                                     (make-macher-agent-lisp-result-response :payload (format "Async %s %s" (plist-get payload :arg1) (plist-get payload :arg2)))))
+                                   "Mock async tool"
+                                 :category "test"
+                                 :args (list (list :name "arg1" :type 'string) (list :name "arg2" :type 'string))
+                                 :command-fn (lambda (payload)
+                                               (make-macher-agent-lisp-result-response :payload (format "Async %s %s" (plist-get payload :arg1) (plist-get payload :arg2)))))
 
                                (macher-agent-make-tool mock-sync-contract-tool
-                                                       "Mock sync tool"
-                                                       :category "test"
-                                                       :args (list (list :name "arg1" :type 'string))
-                                                       :command-fn (lambda (payload)
-                                                                     (make-macher-agent-lisp-result-response :payload (format "Sync %s" (plist-get payload :arg1))))))
+                                   "Mock sync tool"
+                                 :category "test"
+                                 :args (list (list :name "arg1" :type 'string))
+                                 :command-fn (lambda (payload)
+                                               (make-macher-agent-lisp-result-response :payload (format "Sync %s" (plist-get payload :arg1))))))
 
                               (it "generates variadic signatures for async tools to safely absorb FSM contexts"
                                   (let* ((tool-fn (gptel-tool-function mock-async-contract-tool))
@@ -628,7 +628,7 @@
                                       (insert "(setq workspace-tool-1 'workspace-loaded)"))
                                     
                                     ;; Test workspace parsing logic
-                                    (macher-agent--load-skill-from-path "tests/fixtures/skills/workspace/" "tests/fixtures/skills/workspace/SKILL.md" (macher-agent-resolve-context))
+                                    (macher-agent--load-skill-from-path "tests/fixtures/skills/workspace/" (macher-agent-resolve-context))
                                     (let* ((workspace (macher-agent--get-context-workspace (macher-agent-resolve-context)))
                                            (skill-meta (alist-get 'workspace-skill (macher-agent-workspace-skills-alist workspace))))
                                       (expect (plist-get skill-meta :context-dir) :to-be nil))

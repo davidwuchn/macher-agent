@@ -88,40 +88,60 @@
               (kill-buffer buf)))))
     ((error quit) nil)))
 
-(defun macher-agent--apply-preset (preset)
-  "Apply the PRESET directive, safely merging buffer and preset tools."
-  (let* ((clean-sym (if (fboundp 'macher-normalise-preset-name)
-                        (macher-normalise-preset-name preset)
-                      (if (stringp preset) (intern preset) preset)))
-         (spec (when (and clean-sym (boundp 'gptel--known-presets)) 
-                 (alist-get clean-sym gptel--known-presets))))
+(defun macher-normalise-preset-name (preset)
+  "Normalise a preset name, stripping @ symbols safely even if passed a list."
+  (let ((str (cond ((stringp preset) preset)
+                   ((symbolp preset) (symbol-name preset))
+                   ((and (listp preset) (stringp (car preset))) (car preset))
+                   (t (format "%s" preset)))))
+    (intern (replace-regexp-in-string "^@+" "" str))))
+
+(defun macher-agent--apply-preset (preset-or-presets)
+  "Polymorphic wrapper to safely route legacy calls into the modern compositor."
+  (let ((presets (cond ((listp preset-or-presets) preset-or-presets)
+                       ((vectorp preset-or-presets) (append preset-or-presets nil))
+                       (t (list preset-or-presets)))))
+    (when (fboundp 'macher-agent--apply-composed-skills)
+      (macher-agent--apply-composed-skills presets))))
+
+(defun macher-agent--apply-composed-skills (skill-syms)
+  "Compose multiple skills into a unified system prompt and toolset."
+  (let ((composed-system nil)
+        (composed-tools nil)
+        (final-model nil)
+        (final-temp nil)
+        (final-tokens nil))
     
-    (when spec
-      (setq-local macher-agent--active-skill-sym clean-sym)
-      (setq-local gptel--preset clean-sym)
-      
-      (let ((system-msg (or (plist-get spec :system)
-                            (plist-get spec :system-message)))
-            (model (plist-get spec :model))
-            (backend (plist-get spec :backend))
-            (temp (plist-get spec :temperature))
-            (tokens (plist-get spec :max-tokens))
-            (tools (plist-get spec :tools)))
-        
-        (when system-msg (setq-local gptel--system-message system-msg))
-        (when model (setq-local gptel-model model))
-        (when backend (setq-local gptel-backend backend))
-        (when temp (setq-local gptel-temperature temp))
-        (when tokens (setq-local gptel-max-tokens tokens))
-        
-        (when tools
-          (let* ((actual-tools (if (and (consp tools) (eq (car tools) :append)) 
-                                   (cdr tools) 
-                                 tools))
-                 (default-tools (default-value 'gptel-tools)))
-            (setq-local gptel-tools 
-                        (macher-agent-normalize-tools 
-                         (append default-tools gptel-tools actual-tools)))))))))
+    (dolist (sym skill-syms)
+      (let* ((clean-sym (if (fboundp 'macher-normalise-preset-name)
+                            (macher-normalise-preset-name sym) sym))
+             (spec (when (and clean-sym (boundp 'gptel--known-presets)) 
+                     (alist-get clean-sym gptel--known-presets))))
+        (when spec
+          (when-let ((sys (or (plist-get spec :system) (plist-get spec :system-message))))
+            (push (format "### Skill: %s\n%s\n" sym sys) composed-system))
+          
+          (when-let ((tools (plist-get spec :tools)))
+            (setq composed-tools 
+                  (append composed-tools 
+                          (if (and (consp tools) (eq (car tools) :append)) (cdr tools) tools))))
+          
+          (when-let ((mod (plist-get spec :model))) (setq final-model mod))
+          (when-let ((temp (plist-get spec :temperature))) (setq final-temp temp))
+          (when-let ((tok (plist-get spec :max-tokens))) (setq final-tokens tok)))))
+
+    (when composed-system
+      (setq-local gptel--system-message 
+                  (string-join (nreverse composed-system) "\n---\n")))
+    
+    (when final-model (setq-local gptel-model final-model))
+    (when final-temp (setq-local gptel-temperature final-temp))
+    (when final-tokens (setq-local gptel-max-tokens final-tokens))
+    
+    (when composed-tools
+      (setq-local gptel-tools 
+                  (macher-agent-normalize-tools 
+                   (append (default-value 'gptel-tools) gptel-tools composed-tools))))))
 
 (defvar macher-agent--is-subagent nil)
 (defvar macher-agent--ready-to-reap nil)
@@ -133,12 +153,12 @@
   "Spawn a task inside a target subagent."
   (let* ((buf-name (if (listp task) (plist-get task :buffer_name) task))
          (instructions (if (listp task) (plist-get task :instructions) ""))
-         (preset (if (listp task) (plist-get task :preset) nil))
+         (presets (if (listp task) (or (plist-get task :presets) (plist-get task :preset)) nil))
          (is-background (and (listp task) (plist-get task :background)))
          (buf (get-buffer buf-name)))
     (if (not buf)
         (funcall callback (make-macher-agent-delegate-response :status 'error :error (format "ERROR: Sub-agent buffer '%s' not found." buf-name) :buffer-name buf-name))
-      (macher-agent--prepare-subagent-instructions buf instructions preset)
+      (macher-agent--prepare-subagent-instructions buf instructions presets)
       (with-current-buffer buf
         (unless is-background
           (macher-agent--show-ui buf))
@@ -154,8 +174,12 @@
                       
                       (funcall callback res)))
 
-        (let* ((raw-str (when preset (if (symbolp preset) (symbol-name preset) preset)))
-               (clean-sym (when raw-str (intern (replace-regexp-in-string "^@+" "" raw-str))))
+        (let* ((first-preset (cond ((stringp presets) presets)
+                                   ((symbolp presets) (symbol-name presets))
+                                   ((and (listp presets) (stringp (car presets))) (car presets))
+                                   ((and (vectorp presets) (> (length presets) 0) (stringp (aref presets 0))) (aref presets 0))
+                                   (t nil)))
+               (clean-sym (when first-preset (intern (replace-regexp-in-string "^@+" "" first-preset))))
                (task-ctx (make-macher-agent-task-context
                           :workspace nil
                           :target-buffer buf
@@ -195,8 +219,8 @@
 (defun macher-agent--resolve-buffer-name (name)
   (substring-no-properties name))
 
-(defun macher-agent--prepare-subagent-buffer (buf full-dir context &optional preset parent-tools parent-model parent-backend parent-presets parent-directives parent-temp parent-tokens)
-  "Prepare a subagent buffer, locking its directory to the workspace root."
+(defun macher-agent--prepare-subagent-buffer (buf full-dir context &optional presets parent-tools parent-model parent-backend parent-presets parent-directives parent-temp parent-tokens)
+  "Prepare a subagent buffer, locking its directory and composing its requested skills."
   (with-current-buffer buf
     (setq default-directory (file-name-as-directory (macher-agent-root full-dir)))
     
@@ -225,18 +249,19 @@
     
     (when parent-tools
       (setq gptel-tools (macher-agent-normalize-tools (append gptel-tools parent-tools))))
-    
-    (when preset
-      (macher-agent--apply-preset preset))
+
+    (when presets
+      (let ((preset-list (if (listp presets) presets (list presets))))
+        (when (fboundp 'macher-agent--apply-composed-skills)
+          (macher-agent--apply-composed-skills preset-list))))
     
     (add-hook 'gptel-prompt-transform-functions #'macher-agent-sync-prompt-transformer nil t)
     (add-hook 'gptel-post-response-functions #'macher-agent-post-response-reaper nil t)
     
     (run-hooks 'macher-agent-subagent-setup-hook)))
 
-;;;###autoload
-(defun macher-agent-add-subagent (name dir &optional instructions context preset)
-  "Create and prepare a new subagent buffer, inheriting parent state."
+(defun macher-agent-add-subagent (name dir &optional instructions context presets)
+  "Create and prepare a new subagent buffer, inheriting parent state and composing PRESETS."
   (let* ((parent-tools (bound-and-true-p gptel-tools))
          (parent-model (bound-and-true-p gptel-model))
          (parent-backend (bound-and-true-p gptel-backend))
@@ -247,7 +272,7 @@
          (buf (get-buffer-create name)))
     
     (macher-agent--prepare-subagent-buffer
-     buf dir context preset parent-tools parent-model parent-backend
+     buf dir context presets parent-tools parent-model parent-backend
      parent-presets parent-directives parent-temp parent-tokens)
     
     (when context
@@ -256,6 +281,16 @@
           (push (cons name buf) (macher-agent-workspace-active-subagents workspace))))
       (macher-agent-scope-add-file name context))
     buf))
+
+(defun macher-agent--prepare-subagent-instructions (buf instructions &optional presets)
+  "Insert INSTRUCTIONS into BUF and compose its system message."
+  (with-current-buffer buf
+    (unless (string-empty-p instructions)
+      (insert (substring-no-properties instructions)))
+    (when presets
+      (let ((preset-list (if (listp presets) presets (list presets))))
+        (when (fboundp 'macher-agent--apply-composed-skills)
+          (macher-agent--apply-composed-skills preset-list))))))
 
 (defun macher-agent-apply-virtual-buffers ()
   (interactive)
@@ -271,14 +306,6 @@
               (insert new-content))))))
     (macher-agent--auto-sync-context ctx)
     (message "Virtual buffers applied successfully.")))
-
-(defun macher-agent--prepare-subagent-instructions (buf instructions &optional preset)
-  "Insert INSTRUCTIONS into BUF and bind its preset system message."
-  (with-current-buffer buf
-    (unless (string-empty-p instructions)
-      (insert (substring-no-properties instructions)))
-    (when preset
-      (macher-agent--apply-preset preset))))
 
 (add-hook 'gptel-pre-response-hook
           (lambda ()

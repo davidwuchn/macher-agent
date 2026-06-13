@@ -81,17 +81,25 @@
     (macher--make-context :workspace workspace :contents contents)))
 
 (defun macher-agent--hydrate-vfs-entry (e project-root)
-  "Hydrate an upstream context list into a populated VFS struct."
-  (let* ((path (car e))
+  "Hydrate an upstream context list or existing struct into a populated VFS struct."
+  (let* ((is-struct (and (fboundp 'macher-agent-vfs-entry-p) (macher-agent-vfs-entry-p e)))
+         (path (if is-struct (macher-agent-vfs-entry-path e) (car e)))
          (full-path (expand-file-name path project-root))
-         (orig-raw (if (consp (cdr e)) (car (cdr e)) nil))
-         (new-raw (if (consp (cdr e)) (cdr (cdr e)) (cdr e)))
+         
+         (orig-raw (cond (is-struct (macher-agent-vfs-entry-orig e))
+                         ((consp (cdr e)) (car (cdr e)))
+                         (t nil)))
+         (new-raw (cond (is-struct (macher-agent-vfs-entry-curr e))
+                        ((consp (cdr e)) (cdr (cdr e)))
+                        (t (cdr e))))
+         
          (orig-str (cond ((stringp orig-raw) orig-raw)
                          ((file-exists-p full-path)
                           (macher-agent--read-content-from-disk-or-buffer full-path))
-                         (t nil)))
-         (new-str (if (stringp new-raw) new-raw nil)))
-    (macher-agent-vfs-make-entry path orig-str new-str)))
+                         (t "")))
+         (new-str (if (stringp new-raw) new-raw orig-str)))
+    
+    (make-macher-agent-vfs-entry :path path :orig orig-str :curr new-str)))
 
 (defun macher-agent--dehydrate-vfs-entry (entry)
   "Dehydrate a VFS struct back into the legacy list format expected by core macher."
@@ -102,8 +110,9 @@
 (defun macher-agent--prepare-patch-contexts (context fsm project-root)
   "Calculate and return isolated contexts for virtual buffers and physical files."
   (let* ((vfs-ctx (or (ignore-errors (macher-agent-resolve-context (or fsm context))) context))
-         (struct-contents (or (when vfs-ctx (macher-agent--get-context-contents vfs-ctx))
-                              (macher-agent--get-context-contents context)))
+         (raw-contents (or (when vfs-ctx (macher-agent--get-context-contents vfs-ctx))
+                           (macher-agent--get-context-contents context)))
+         (struct-contents (mapcar (lambda (e) (macher-agent--hydrate-vfs-entry e project-root)) raw-contents))
          (categorised (macher-agent--partition-vfs-entries struct-contents project-root))
          (virtual-contents (car categorised))
          (physical-contents (cdr categorised))

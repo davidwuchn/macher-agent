@@ -147,7 +147,8 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
 (cl-defmacro macher-agent-make-tool (name-symbol description &key category args command-fn success-fn output-filter-fn)
   "Define a macher-agent tool compatible with gptel's tool framework."
   (declare (indent 2))
-  (let ((name (replace-regexp-in-string "^macher-agent-\\|-tool$" "" (symbol-name name-symbol))))
+  (let* ((stripped-name (replace-regexp-in-string "^macher-agent-\\|-tool$" "" (symbol-name name-symbol)))
+         (name (replace-regexp-in-string "-" "_" stripped-name)))
     `(progn
        (defvar ,name-symbol nil)
        (setq ,name-symbol
@@ -189,14 +190,24 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
 (cl-defmethod macher-agent-execute-response ((res macher-agent-process-response) context on-success on-error)
   (let ((payload (macher-agent-tool-response-payload res)))
     (if (stringp payload)
-        (macher-agent--run-in-persistent-sandbox context payload (lambda (_raw) (funcall on-success res)) on-error)
+        (macher-agent--run-in-persistent-sandbox 
+         context payload 
+         (lambda (process-output) 
+           (setf (macher-agent-tool-response-payload res) process-output)
+           (funcall on-success res)) 
+         on-error)
       (funcall on-error (list :status 'error :error "Process payload must be a string.")))))
 
 (cl-defmethod macher-agent-execute-response ((res macher-agent-delegate-response) _context on-success _on-error)
-  (macher-agent-execute-parallel (macher-agent-tool-response-payload res) (lambda (_raw) (funcall on-success res))))
+  (macher-agent-execute-parallel 
+   (macher-agent-tool-response-payload res) 
+   (lambda (sub-agent-results) 
+     (setf (macher-agent-tool-response-payload res) sub-agent-results)
+     (funcall on-success res))))
 
 (cl-defmethod macher-agent-execute-response ((res macher-agent-nohup-response) _context on-success _on-error)
   (macher-agent--run-async-cmd "detached" (macher-agent-tool-response-payload res) default-directory (lambda (_ _)))
+  (setf (macher-agent-tool-response-payload res) "SUCCESS: Process started.")
   (funcall on-success res))
 
 (cl-defmethod macher-agent-execute-response ((res macher-agent-lisp-result-response) _context on-success _on-error)
@@ -289,8 +300,7 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
 
 (defun macher-agent--gptel-base64-encode-advice (orig-fun file)
   "Read FILE from VFS if available before encoding."
-  (let* ((ctx (ignore-errors (macher-agen
-                              t-current-context)))
+  (let* ((ctx (ignore-errors (macher-agent-current-context)))
          (workspace (when ctx (macher-context-workspace ctx)))
          (workspace-root (when workspace (macher-agent--get-workspace-root workspace)))
          (actual-name (if (and workspace-root (file-name-absolute-p file))
