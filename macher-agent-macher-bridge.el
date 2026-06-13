@@ -61,6 +61,15 @@
             (setf (macher-context-prompt persistent-ctx) (plist-get kwargs :prompt)))
           (when (plist-member kwargs :process-request-function)
             (setf (macher-context-process-request-function persistent-ctx) (plist-get kwargs :process-request-function)))
+          
+          (when-let ((contents (plist-get kwargs :contents)))
+            (let* ((ws (macher-agent--get-context-workspace persistent-ctx))
+                   (project-root (if ws (macher-agent-root ws) default-directory)))
+              (dolist (e contents)
+                (let ((struct-entry (macher-agent--hydrate-vfs-entry e project-root)))
+                  (macher-agent--update-context-file persistent-ctx 
+                                                     (macher-agent-vfs-entry-path struct-entry) 
+                                                     (macher-agent-vfs-entry-curr struct-entry))))))
           persistent-ctx)
       (apply orig-fn kwargs))))
 
@@ -87,9 +96,10 @@
          (orig-str (cond ((stringp orig-raw) orig-raw)
                          ((file-exists-p full-path)
                           (macher-agent--read-content-from-disk-or-buffer full-path))
-                         (t nil)))
-         (new-str (if (stringp new-raw) new-raw nil)))
-    (macher-agent-vfs-make-entry path orig-str new-str)))
+                         (t "")))
+         (new-str (if (stringp new-raw) new-raw orig-str)))
+    
+    (make-macher-agent-vfs-entry :path path :orig orig-str :curr new-str)))
 
 (defun macher-agent--dehydrate-vfs-entry (entry)
   "Dehydrate a VFS struct back into the legacy list format expected by core macher."

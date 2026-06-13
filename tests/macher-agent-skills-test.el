@@ -17,8 +17,8 @@
                              (end-of-file val))))))
                     (it "guarantees list_buffers_in_workspace output perfectly matches context-tree buffer categorisation"
                         (let* ((ctx (macher--make-context :contents (list (macher-agent-vfs-make-entry "*pure-buffer*" "" "")
-                                                                      (macher-agent-vfs-make-entry "/external/path.txt" "" "")
-                                                                      (macher-agent-vfs-make-entry "/root/internal.txt" "" ""))))
+                                                                          (macher-agent-vfs-make-entry "/external/path.txt" "" "")
+                                                                          (macher-agent-vfs-make-entry "/root/internal.txt" "" ""))))
                                (list-tool-fn (gptel-tool-function macher-agent-list-buffers-in-workspace-tool)))
 
                           (spy-on 'macher-agent-resolve-context :and-return-value ctx)
@@ -170,7 +170,7 @@
                           
                           ;; Test workspace parsing logic
                           (let ((ctx (macher-agent-resolve-context)))
-                            (macher-agent--load-skill-from-path "tests/fixtures/skills/workspace/" "tests/fixtures/skills/workspace/SKILL.md" ctx)
+                            (macher-agent--load-skill-from-path "tests/fixtures/skills/workspace/" ctx)
                             (let* ((workspace (macher-agent--get-context-workspace ctx))
                                    (skill-meta (alist-get 'workspace-skill (macher-agent-workspace-skills-alist workspace))))
                               (expect (plist-get skill-meta :context-dir) :to-be nil)))

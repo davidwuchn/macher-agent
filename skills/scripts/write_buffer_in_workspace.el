@@ -16,4 +16,4 @@
                   (when context
                     (macher-agent--update-context-file context actual-name content))
                   
-                  (make-macher-agent-tool-response :type 'lisp-result :payload (format "SUCCESS: Virtual edit recorded for buffer '%s'. A patch will be generated at the end of the turn." actual-name)))))
+                  (make-macher-agent-lisp-result-response :payload (format "SUCCESS: Virtual edit recorded for buffer '%s'. A patch will be generated at the end of the turn." actual-name)))))

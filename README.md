@@ -84,7 +84,7 @@ Your `:command-fn` receives the tool payload. If your function accepts three arg
   :category "rust"
   :args nil
   :command-fn (lambda (_payload)
-                (make-macher-agent-tool-response :type 'process :payload "rtk cargo check </dev/null 2>&1"))
+                (make-macher-agent-process-response :payload "rtk cargo check </dev/null 2>&1"))
   :success-fn (lambda (output)
                 (if (string-match-p "error\\[" output)
                     output
@@ -103,7 +103,7 @@ By accepting `payload`, `context`, and `root`, you can utilise the virtual file 
                 (let* ((path (plist-get payload :path))
                        (content (macher-agent-context-read context path)))
                   (if content
-                      (make-macher-agent-tool-response :type 'lisp-result :payload content)
+                      (make-macher-agent-lisp-result-response :payload content)
                     (error "File not found in the virtual file system: %s" path)))))
 ```
 

@@ -15,12 +15,38 @@
 (declare-function macher-agent-context-classify-entry "macher-agent-vfs-client")
 
 (cl-defstruct macher-agent-tool-response
-  type
   payload
   status
   data
   error
   buffer-name)
+
+(cl-defstruct (macher-agent-process-response (:include macher-agent-tool-response)))
+(cl-defstruct (macher-agent-delegate-response (:include macher-agent-tool-response)))
+(cl-defstruct (macher-agent-nohup-response (:include macher-agent-tool-response)))
+(cl-defstruct (macher-agent-lisp-result-response (:include macher-agent-tool-response)))
+
+(cl-defgeneric macher-agent-execute-response (response context on-success on-error)
+  "Execute the action encapsulated by the RESPONSE struct.")
+
+(cl-defmethod macher-agent-execute-response ((res macher-agent-tool-response) _context on-success _on-error)
+  (funcall on-success (macher-agent-tool-response-payload res)))
+
+(cl-defmethod macher-agent-execute-response ((res macher-agent-process-response) context on-success on-error)
+  (let ((payload (macher-agent-tool-response-payload res)))
+    (if (stringp payload)
+        (macher-agent--run-in-persistent-sandbox context payload on-success on-error)
+      (funcall on-error (list :status 'error :error "Process payload must be a string.")))))
+
+(cl-defmethod macher-agent-execute-response ((res macher-agent-delegate-response) _context on-success _on-error)
+  (macher-agent-execute-parallel (macher-agent-tool-response-payload res) on-success))
+
+(cl-defmethod macher-agent-execute-response ((res macher-agent-nohup-response) _context on-success _on-error)
+  (macher-agent--run-async-cmd "detached" (macher-agent-tool-response-payload res) default-directory (lambda (_ _)))
+  (funcall on-success "SUCCESS: Process started."))
+
+(cl-defmethod macher-agent-execute-response ((res macher-agent-lisp-result-response) _context on-success _on-error)
+  (funcall on-success (macher-agent-tool-response-payload res)))
 
 (defvar macher-agent-allowed-tools nil
   "List of custom tool names that should receive the macher-context.")
@@ -105,76 +131,87 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
 
     (cl-loop for arg-def in schema
              for i from 0
+             for expected-type = (plist-get arg-def :type)
              for arg-key = (intern (concat ":" (plist-get arg-def :name)))
              for val = (nth i aligned-args)
-             do (setq payload (plist-put payload arg-key val)))
+             for parsed-val = (cond 
+                               ((and (eq expected-type 'object) (stringp val))
+                                (ignore-errors (json-parse-string val :object-type 'plist)))
+                               ((and (eq expected-type 'array) (stringp val))
+                                (ignore-errors (json-parse-string val :array-type 'vector)))
+                               (t val))
+             do (setq payload (plist-put payload arg-key (or parsed-val val))))
     
     (funcall next-fn payload context (or callback (lambda (res) res)))))
 
 (cl-defmacro macher-agent-make-tool (name-symbol description &key category args command-fn success-fn output-filter-fn)
-  "Declarative tool definition. Execution delegated to middleware with strict parsing and dynamic arity."
-  (let ((name (replace-regexp-in-string "^macher-agent-\\|-tool$" "" (symbol-name name-symbol))))
+  "Define a macher-agent tool compatible with gptel's tool framework."
+  (declare (indent 2))
+  (let* ((stripped-name (replace-regexp-in-string "^macher-agent-\\|-tool$" "" (symbol-name name-symbol)))
+         (name (replace-regexp-in-string "-" "_" stripped-name)))
     `(progn
        (defvar ,name-symbol nil)
        (setq ,name-symbol
              (gptel-make-tool
-              :name ,(replace-regexp-in-string "-" "_" name)
+              :name ,name
               :description ,description :category ,(or category "macher-agent") :args ,args :async t
               :function
               (lambda (&rest all-args)
-                (let* ((callback (cl-find-if #'functionp all-args))
-                       (context (ignore-errors (macher-agent-current-context)))
-                       (root (if context (macher-agent-context-root context) default-directory))
-                       (arg-names (ignore-errors (mapcar (lambda (a) (intern (concat ":" (plist-get a :name)))) ,args)))
-                       (payload nil)
-                       (cmd-eval ,command-fn)
-                       (succ-eval ,success-fn)
-                       (filter-eval ,output-filter-fn))
-                  
-                  (cl-loop for k in arg-names
-                           for v in (cl-remove-if #'functionp all-args)
-                           do (setq payload (plist-put payload k v)))
-                  
-                  (let ((wrap-cb (macher-agent--wrap-callback callback)))
-                    (condition-case err
-                        (let* ((action (let* ((arity (func-arity cmd-eval))
-                                              (max-args (cdr arity)))
-                                         (if (or (eq max-args 'many) (>= max-args 3))
-                                             (funcall cmd-eval payload context root)
-                                           (funcall cmd-eval payload))))
-                               (on-success 
-                                (lambda (raw-result)
-                                  (let* ((success-data (if succ-eval (funcall succ-eval raw-result) raw-result))
-                                         (final-data (if filter-eval (funcall filter-eval success-data) success-data)))
-                                    (funcall wrap-cb (list :status 'success :data final-data))))))
-                          (unless (macher-agent-tool-response-p action)
-                            (error "Tool contract violation: command must return a macher-agent-tool-response struct"))
-                          (macher-agent--execute-action action context on-success wrap-cb))
-                      (error
-                       (funcall wrap-cb (list :status 'error :error (error-message-string err)))))))))))))
+                (macher-agent--middleware-pipeline all-args ,args
+                                                   (lambda (payload context callback)
+                                                     (let* ((root (if context (macher-agent-context-root context) default-directory))
+                                                            (cmd-eval ,command-fn)
+                                                            (succ-eval ,success-fn)
+                                                            (filter-eval ,output-filter-fn)
+                                                            (wrap-cb (macher-agent--wrap-callback callback)))
+                                                       (condition-case err
+                                                           (let* ((action (let* ((arity (func-arity cmd-eval))
+                                                                                 (max-args (cdr arity)))
+                                                                            (if (or (eq max-args 'many) (>= max-args 3))
+                                                                                (funcall cmd-eval payload context root)
+                                                                              (funcall cmd-eval payload))))
+                                                                  
+                                                                  (on-success 
+                                                                   (lambda (response-obj)
+                                                                     (let* ((raw-payload (if (macher-agent-tool-response-p response-obj)
+                                                                                             (macher-agent-tool-response-payload response-obj)
+                                                                                           response-obj))
+                                                                            (success-data (if succ-eval (funcall succ-eval raw-payload) raw-payload))
+                                                                            (final-data (if filter-eval (funcall filter-eval success-data) success-data)))
+                                                                       (funcall wrap-cb (list :status 'success :data final-data))))))
+                                                             
+                                                             (unless (macher-agent-tool-response-p action)
+                                                               (error "Tool contract violation: command must return a macher-agent-tool-response struct"))
+                                                             
+                                                             (macher-agent-execute-response action context on-success wrap-cb))
+                                                         (error
+                                                          (funcall wrap-cb (list :status 'error :error (error-message-string err))))))))))))))
 
-(defun macher-agent--execute-action (action context on-success on-error)
-  "Routes the declarative ACTION to the appropriate asynchronous backend."
-  (if (not (macher-agent-tool-response-p action))
-      (pcase action
-        ((pred functionp)
-         (funcall on-error (list :status 'error :error "Tool evaluation failed. The command block returned a closure instead of a valid action payload.")))
-        (_ (funcall on-error (list :status 'error :error "Invalid tool response format."))))
-    (let ((type (macher-agent-tool-response-type action))
-          (payload (macher-agent-tool-response-payload action)))
-      (pcase type
-        ('process
-         (if (stringp payload)
-             (macher-agent--run-in-persistent-sandbox context payload on-success on-error)
-           (funcall on-error (list :status 'error :error "Process payload must be a string."))))
-        ('delegate
-         (macher-agent-execute-parallel payload on-success))
-        ('nohup
-         (macher-agent--run-async-cmd "detached" payload default-directory (lambda (_ _)))
-         (funcall on-success "SUCCESS: Process started."))
-        ('lisp-result
-         (funcall on-success payload))
-        (_ (funcall on-success payload))))))
+(cl-defmethod macher-agent-execute-response ((res macher-agent-process-response) context on-success on-error)
+  (let ((payload (macher-agent-tool-response-payload res)))
+    (if (stringp payload)
+        (macher-agent--run-in-persistent-sandbox 
+         context payload 
+         (lambda (process-output) 
+           (setf (macher-agent-tool-response-payload res) process-output)
+           (funcall on-success res)) 
+         on-error)
+      (funcall on-error (list :status 'error :error "Process payload must be a string.")))))
+
+(cl-defmethod macher-agent-execute-response ((res macher-agent-delegate-response) _context on-success _on-error)
+  (macher-agent-execute-parallel 
+   (macher-agent-tool-response-payload res) 
+   (lambda (sub-agent-results) 
+     (setf (macher-agent-tool-response-payload res) sub-agent-results)
+     (funcall on-success res))))
+
+(cl-defmethod macher-agent-execute-response ((res macher-agent-nohup-response) _context on-success _on-error)
+  (macher-agent--run-async-cmd "detached" (macher-agent-tool-response-payload res) default-directory (lambda (_ _)))
+  (setf (macher-agent-tool-response-payload res) "SUCCESS: Process started.")
+  (funcall on-success res))
+
+(cl-defmethod macher-agent-execute-response ((res macher-agent-lisp-result-response) _context on-success _on-error)
+  (funcall on-success res))
 
 (defun macher-agent--run-async-cmd (name cmd dir callback)
   "Executes a command using explicit lexical capture for background safety."
@@ -233,15 +270,7 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
       (with-temp-buffer (insert-file-contents file-path) (buffer-string)))
      (t nil))))
 
-(defun macher-agent--parse-tool-arg (arg)
-  "Parse a JSON string argument into a Lisp object if applicable."
-  (if (and (stringp arg)
-           (or (string-prefix-p "[" (string-trim arg))
-               (string-prefix-p "{" (string-trim arg))))
-      (condition-case nil
-          (json-parse-string arg :array-type 'vector :object-type 'plist)
-        (error arg))
-    arg))
+
 
 (defvar-local macher-agent--pending-instructions-queue nil
   "List of instruction strings to append to the tool's return payload.")
@@ -271,8 +300,7 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
 
 (defun macher-agent--gptel-base64-encode-advice (orig-fun file)
   "Read FILE from VFS if available before encoding."
-  (let* ((ctx (ignore-errors (macher-agen
-                              t-current-context)))
+  (let* ((ctx (ignore-errors (macher-agent-current-context)))
          (workspace (when ctx (macher-context-workspace ctx)))
          (workspace-root (when workspace (macher-agent--get-workspace-root workspace)))
          (actual-name (if (and workspace-root (file-name-absolute-p file))
@@ -293,27 +321,26 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
 (advice-add 'gptel--base64-encode :around #'macher-agent--gptel-base64-encode-advice)
 
 (macher-agent-make-tool macher-agent-commit-buffer-tool
-                        "Directly overwrite an Emacs buffer and synchronise the agent's memory immediately, bypassing the patch review step."
-                        :category "plan"
-                        :args (list '(:name "buffer_name" :type string)
-                                    '(:name "content" :type string))
-                        :command-fn (lambda (payload context _root)
-                                      (let ((buffer_name (plist-get payload :buffer_name))
-                                            (content (plist-get payload :content)))
-                                        (let ((actual-name (macher-agent--resolve-buffer-name buffer_name)))
-                                          (macher-agent--ensure-access context actual-name)
-                                          (let ((target-buffer (get-buffer-create actual-name)))
-                                            (with-current-buffer target-buffer
-                                              (when (bound-and-true-p auto-save-visited-mode)
-                                                (auto-save-visited-mode -1))
-                                              (insert content)
-                                              (set-buffer-modified-p t))
-                                            (when context
-                                              (macher-agent--update-context-file context actual-name content)
-                                              (macher-agent--auto-sync-context context))
-                                            (make-macher-agent-tool-response
-                                             :type 'lisp-result
-                                             :payload (format "SUCCESS: Buffer '%s' has been directly overwritten and synchronised. Awaiting user save." actual-name)))))))
+    "Directly overwrite an Emacs buffer and synchronise the agent's memory immediately, bypassing the patch review step."
+  :category "plan"
+  :args (list '(:name "buffer_name" :type string)
+              '(:name "content" :type string))
+  :command-fn (lambda (payload context _root)
+                (let ((buffer_name (plist-get payload :buffer_name))
+                      (content (plist-get payload :content)))
+                  (let ((actual-name (macher-agent--resolve-buffer-name buffer_name)))
+                    (macher-agent--ensure-access context actual-name)
+                    (let ((target-buffer (get-buffer-create actual-name)))
+                      (with-current-buffer target-buffer
+                        (when (bound-and-true-p auto-save-visited-mode)
+                          (auto-save-visited-mode -1))
+                        (insert content)
+                        (set-buffer-modified-p t))
+                      (when context
+                        (macher-agent--update-context-file context actual-name content)
+                        (macher-agent--auto-sync-context context))
+                      (make-macher-agent-lisp-result-response
+                       :payload (format "SUCCESS: Buffer '%s' has been directly overwritten and synchronised. Awaiting user save." actual-name)))))))
 
 (with-eval-after-load 'gptel-transient
   (ignore-errors

@@ -39,6 +39,5 @@
                                           (setf (macher-agent-session-pending-media session)
                                                 (list (list abs-path :mime mime)))
                                           
-                                          (make-macher-agent-tool-response 
-                                           :type 'lisp-result 
+                                          (make-macher-agent-lisp-result-response 
                                            :payload (format "SUCCESS: Media '%s' has been successfully read and attached to this response. You may now analyse it immediately." actual-name))))))

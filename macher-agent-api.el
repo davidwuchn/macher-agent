@@ -8,8 +8,6 @@
 (require 'macher-agent-orchestration)
 (require 'macher-agent-gptel-tools)
 
-;; --- Global Registries and Configuration ---
-
 (defcustom macher-agent-skill-directories nil
   "List of user-defined directories to scan for SKILL.md files."
   :type '(repeat string)
@@ -55,7 +53,11 @@
   "Submit the final RESULT for the current agent task."
   (setq-local macher-agent--final-result result)
   (when (boundp 'macher-agent--parent-callback)
-    (funcall macher-agent--parent-callback (make-macher-agent-tool-response :status 'success :data result :buffer-name (buffer-name)))
+    (funcall macher-agent--parent-callback 
+             (make-macher-agent-lisp-result-response 
+              :status 'success 
+              :data result 
+              :buffer-name (buffer-name)))
     (makunbound 'macher-agent--parent-callback)))
 
 (defun macher-agent-ui-show (&optional buf)
@@ -338,8 +340,8 @@ If VALIDATION-CB is provided, it is called on each form; if it returns nil, an e
                (tool (macher-agent-resolve-tool base context skills-dir)))
           (ignore tool))))))
 
-(defun macher-agent--load-skill-from-path (skills-dir path &optional context)
-  "Load a skill from PATH within SKILLS-DIR and register it natively with gptel."
+(defun macher-agent--load-skill-from-path (path &optional context)
+  "Load a skill from PATH and register it natively with gptel."
   (let ((skill-file (cond
                      ((and (file-directory-p path)
                            (file-exists-p (expand-file-name "SKILL.md" path)))
@@ -355,14 +357,17 @@ If VALIDATION-CB is provided, it is called on each form; if it returns nil, an e
              (desc (plist-get parsed :description))
              (model (plist-get parsed :model))
              (tool-names (plist-get parsed :allowed-tools))
-             (workspace (when context (macher-agent--get-context-workspace context))))
+             (workspace (when context (macher-agent--get-context-workspace context)))
+             (skill-base-dir (file-name-directory skill-file)))
+        
         (when (and sym body)
-          (let* ((alist (if workspace (macher-agent-workspace-skills-alist workspace) macher-agent-global-skills-alist))
+          (let* ((alist (if workspace 
+                            (macher-agent-workspace-skills-alist workspace) 
+                          macher-agent-global-skills-alist))
                  (resolved-tools (when tool-names
                                    (delq nil (mapcar (lambda (tname)
-                                                       (macher-agent-resolve-tool tname context skills-dir))
+                                                       (macher-agent-resolve-tool tname context skill-base-dir))
                                                      tool-names)))))
-
             (setf (alist-get sym alist)
                   (list :system body :description desc :model (when model (intern model)) :tools resolved-tools))
             (if workspace
@@ -370,7 +375,7 @@ If VALIDATION-CB is provided, it is called on each form; if it returns nil, an e
               (setq macher-agent-global-skills-alist alist))))))))
 
 (defun macher-agent-api-register-skills-in-directory (skills-dir &optional context)
-  "Scan SKILLS-DIR for SKILL.md files and load."
+  "Scan SKILLS-DIR for SKILL.md files and load them."
   (let* ((expanded-dir (file-name-as-directory (expand-file-name skills-dir)))
          (target-dir (if (file-directory-p (expand-file-name "skills" expanded-dir))
                          (file-name-as-directory (expand-file-name "skills" expanded-dir))
@@ -380,7 +385,7 @@ If VALIDATION-CB is provided, it is called on each form; if it returns nil, an e
       (let ((files (directory-files target-dir t "^[^.]")))
         (dolist (path files)
           (condition-case err
-              (macher-agent--load-skill-from-path target-dir path context)
+              (macher-agent--load-skill-from-path path context)
             (error
              (message "Error loading path %s: %S" path err))))))))
 
@@ -406,15 +411,11 @@ If VALIDATION-CB is provided, it is called on each form; if it returns nil, an e
 (defun macher-agent-initialize-skills (&optional context dir)
   "Initialise agent skills from all registered directories."
   (interactive)
-  (let* ((bundled (or (and (boundp 'macher-agent--bundled-skills-dir) macher-agent--bundled-skills-dir)
-                      (and (boundp 'macher-agent-bundled-skills-directory) macher-agent-bundled-skills-directory)))
-         (directories (delq nil (append (list dir
-                                              bundled
-                                              macher-agent-global-skills-directory)
-                                        (if (listp macher-agent-skill-directories)
-                                            macher-agent-skill-directories
-                                          (list macher-agent-skill-directories))
-                                        macher-agent-extra-skill-directories))))
+  (let ((directories (delq nil (append
+                                (list dir macher-agent--bundled-skills-dir)
+                                (if (listp macher-agent-skill-directories)
+                                    macher-agent-skill-directories
+                                  (list macher-agent-skill-directories))))))
     
     (cl-loop for d in (delete-dups directories)
              do (when (file-directory-p d)
@@ -487,42 +488,33 @@ If VALIDATION-CB is provided, it is called on each form; if it returns nil, an e
       (let ((native (macher-agent--find-native-tool item)))
         (when native (list native))))))
 
-(defun macher-agent--flatten-tools (tools)
-  "Flatten a list of tools."
-  (cond
-   ((null tools) nil)
-   ((listp tools) (cl-mapcan #'macher-agent--flatten-tools tools))
-   (t (list tools))))
+(cl-defgeneric macher-agent-resolve-item (item)
+  "Resolve an ITEM of any type into a list of gptel-tool structs."
+  nil)
 
-(defun macher-agent--resolve-tool-item (item)
-  "Resolve a single tool ITEM into a `gptel-tool' struct."
-  (cond
-   ((macher-tool-valid-p item) item)
-   ((functionp item)
-    (let ((res (ignore-errors (funcall item))))
-      (when res
-        (if (listp res)
-            (mapcar #'macher-agent--resolve-tool-item res)
-          (macher-agent--resolve-tool-item res)))))
-   ((and (symbolp item) (fboundp item))
-    (let ((res (ignore-errors (funcall item))))
-      (if res
-          (if (listp res)
-              (mapcar #'macher-agent--resolve-tool-item res)
-            (macher-agent--resolve-tool-item res))
-        (macher-agent--resolve-tool-in-env item))))
-   ((or (stringp item) (symbolp item))
-    (macher-agent--resolve-tool-in-env item))
-   (t nil)))
+(cl-defmethod macher-agent-resolve-item ((item cl-structure-object))
+  (when (macher-tool-valid-p item) (list item)))
+
+(cl-defmethod macher-agent-resolve-item ((item string))
+  (macher-agent--resolve-tool-in-env item))
+
+(cl-defmethod macher-agent-resolve-item ((item symbol))
+  (if (fboundp item)
+      (let ((res (ignore-errors (funcall item))))
+        (if res
+            (macher-agent-resolve-item res)
+          (macher-agent--resolve-tool-in-env item)))
+    (macher-agent--resolve-tool-in-env item)))
+
+(cl-defmethod macher-agent-resolve-item ((item list))
+  (cl-mapcan #'macher-agent-resolve-item item))
 
 (defun macher-agent-normalize-tools (tools)
   "Normalise, resolve, and deduplicate a mixed list of TOOLS.
 Accepts a list of tool representations (names, symbols, structs, functions, or nested lists),
 recursively flattens them, resolves them to `gptel-tool' structs via `macher-agent-resolve-tool'
 or native fallback, filters out nil, and deduplicates by name in a single pass."
-  (let* ((flat-tools (macher-agent--flatten-tools tools))
-         (resolved-nested (mapcar #'macher-agent--resolve-tool-item flat-tools))
-         (flat-resolved (macher-agent--flatten-tools resolved-nested)))
+  (let ((flat-resolved (macher-agent-resolve-item tools)))
     (cl-remove-duplicates
      (delq nil flat-resolved)
      :key (lambda (t_) (format "%s" (gptel-tool-name t_)))

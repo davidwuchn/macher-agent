@@ -27,4 +27,4 @@
                                                  (content (if contents (macher-agent-vfs-entry-curr contents)
                                                             (with-current-buffer (get-buffer actual-name)
                                                               (buffer-substring-no-properties (point-min) (point-max))))))
-                                            (make-macher-agent-tool-response :type 'lisp-result :payload (macher--read-string content parsed-offset parsed-limit show_line_numbers)))))))
+                                            (make-macher-agent-lisp-result-response :payload (macher--read-string content parsed-offset parsed-limit show_line_numbers)))))))
