@@ -27,7 +27,6 @@
                                                                           (message "Background subagent %s task execution completed with status: %s"
                                                                                    (macher-agent-tool-response-buffer-name res)
                                                                                    (macher-agent-tool-response-status res)))))
-                                        (make-macher-agent-tool-response
-                                         :type 'lisp-result
+                                        (make-macher-agent-lisp-result-response
                                          :payload (format "SUCCESS: Dispatched %d sub-agents in the background. They are executing independently and asynchronously. Your current buffer remains unblocked and you can proceed with other tasks immediately."
                                                           (length normalized-tasks))))))

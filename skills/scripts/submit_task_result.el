@@ -18,6 +18,5 @@
                                         ;; Flag the buffer so the global idle timer knows it's safe to reap
                                         (setq-local macher-agent-task-finished t)
                                         
-                                        (make-macher-agent-tool-response 
-                                         :type 'lisp-result 
+                                        (make-macher-agent-lisp-result-response 
                                          :payload "SUCCESS: Result submitted."))))

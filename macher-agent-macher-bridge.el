@@ -61,6 +61,15 @@
             (setf (macher-context-prompt persistent-ctx) (plist-get kwargs :prompt)))
           (when (plist-member kwargs :process-request-function)
             (setf (macher-context-process-request-function persistent-ctx) (plist-get kwargs :process-request-function)))
+          
+          (when-let ((contents (plist-get kwargs :contents)))
+            (let* ((ws (macher-agent--get-context-workspace persistent-ctx))
+                   (project-root (if ws (macher-agent-root ws) default-directory)))
+              (dolist (e contents)
+                (let ((struct-entry (macher-agent--hydrate-vfs-entry e project-root)))
+                  (macher-agent--update-context-file persistent-ctx 
+                                                     (macher-agent-vfs-entry-path struct-entry) 
+                                                     (macher-agent-vfs-entry-curr struct-entry))))))
           persistent-ctx)
       (apply orig-fn kwargs))))
 
@@ -72,18 +81,11 @@
     (macher--make-context :workspace workspace :contents contents)))
 
 (defun macher-agent--hydrate-vfs-entry (e project-root)
-  "Hydrate an upstream context list or existing struct into a populated VFS struct."
-  (let* ((is-struct (and (fboundp 'macher-agent-vfs-entry-p) (macher-agent-vfs-entry-p e)))
-         (path (if is-struct (macher-agent-vfs-entry-path e) (car e)))
+  "Hydrate an upstream context list into a populated VFS struct."
+  (let* ((path (car e))
          (full-path (expand-file-name path project-root))
-         
-         (orig-raw (cond (is-struct (macher-agent-vfs-entry-orig e))
-                         ((consp (cdr e)) (car (cdr e)))
-                         (t nil)))
-         (new-raw (cond (is-struct (macher-agent-vfs-entry-curr e))
-                        ((consp (cdr e)) (cdr (cdr e)))
-                        (t (cdr e))))
-         
+         (orig-raw (if (consp (cdr e)) (car (cdr e)) nil))
+         (new-raw (if (consp (cdr e)) (cdr (cdr e)) (cdr e)))
          (orig-str (cond ((stringp orig-raw) orig-raw)
                          ((file-exists-p full-path)
                           (macher-agent--read-content-from-disk-or-buffer full-path))
@@ -100,9 +102,8 @@
 (defun macher-agent--prepare-patch-contexts (context fsm project-root)
   "Calculate and return isolated contexts for virtual buffers and physical files."
   (let* ((vfs-ctx (or (ignore-errors (macher-agent-resolve-context (or fsm context))) context))
-         (raw-contents (or (when vfs-ctx (macher-agent--get-context-contents vfs-ctx))
-                           (macher-agent--get-context-contents context)))
-         (struct-contents (mapcar (lambda (e) (macher-agent--hydrate-vfs-entry e project-root)) raw-contents))
+         (struct-contents (or (when vfs-ctx (macher-agent--get-context-contents vfs-ctx))
+                              (macher-agent--get-context-contents context)))
          (categorised (macher-agent--partition-vfs-entries struct-contents project-root))
          (virtual-contents (car categorised))
          (physical-contents (cdr categorised))

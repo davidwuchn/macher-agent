@@ -89,36 +89,39 @@
     ((error quit) nil)))
 
 (defun macher-agent--apply-preset (preset)
-  "Apply the PRESET directive, merging buffer and preset tools."
-  (let* ((clean-sym (macher-normalise-preset-name preset))
+  "Apply the PRESET directive, safely merging buffer and preset tools."
+  (let* ((clean-sym (if (fboundp 'macher-normalise-preset-name)
+                        (macher-normalise-preset-name preset)
+                      (if (stringp preset) (intern preset) preset)))
          (spec (when (and clean-sym (boundp 'gptel--known-presets)) 
                  (alist-get clean-sym gptel--known-presets))))
+    
     (when spec
       (setq-local macher-agent--active-skill-sym clean-sym)
       (setq-local gptel--preset clean-sym)
+      
       (let ((system-msg (or (plist-get spec :system)
-                            (plist-get spec :system-message)
-                            (plist-get spec :rewrite-directive)))
+                            (plist-get spec :system-message)))
             (model (plist-get spec :model))
             (backend (plist-get spec :backend))
             (temp (plist-get spec :temperature))
             (tokens (plist-get spec :max-tokens))
             (tools (plist-get spec :tools)))
-        (when system-msg
-          (setq-local gptel--system-message system-msg))
-        (when model
-          (setq-local gptel-model model))
-        (when backend
-          (setq-local gptel-backend backend))
-        (when temp
-          (setq-local gptel-temperature temp))
-        (when tokens
-          (setq-local gptel-max-tokens tokens))
+        
+        (when system-msg (setq-local gptel--system-message system-msg))
+        (when model (setq-local gptel-model model))
+        (when backend (setq-local gptel-backend backend))
+        (when temp (setq-local gptel-temperature temp))
+        (when tokens (setq-local gptel-max-tokens tokens))
+        
         (when tools
-          (let* ((actual-tools (if (eq (car tools) :append) (cdr tools) tools))
-                 (resolved-tools (macher-agent-normalize-tools actual-tools))
+          (let* ((actual-tools (if (and (consp tools) (eq (car tools) :append)) 
+                                   (cdr tools) 
+                                 tools))
                  (default-tools (default-value 'gptel-tools)))
-            (setq-local gptel-tools (macher-agent-normalize-tools (append default-tools gptel-tools resolved-tools)))))))))
+            (setq-local gptel-tools 
+                        (macher-agent-normalize-tools 
+                         (append default-tools gptel-tools actual-tools)))))))))
 
 (defvar macher-agent--is-subagent nil)
 (defvar macher-agent--ready-to-reap nil)
@@ -134,7 +137,7 @@
          (is-background (and (listp task) (plist-get task :background)))
          (buf (get-buffer buf-name)))
     (if (not buf)
-        (funcall callback (make-macher-agent-tool-response :status 'error :error (format "ERROR: Sub-agent buffer '%s' not found." buf-name) :buffer-name buf-name))
+        (funcall callback (make-macher-agent-delegate-response :status 'error :error (format "ERROR: Sub-agent buffer '%s' not found." buf-name) :buffer-name buf-name))
       (macher-agent--prepare-subagent-instructions buf instructions preset)
       (with-current-buffer buf
         (unless is-background
@@ -162,9 +165,9 @@
           (macher-agent-gptel-transmit
            task-ctx
            (list :on-success (lambda (res)
-                               (funcall macher-agent--parent-callback (make-macher-agent-tool-response :status 'success :data res :buffer-name buf-name)))
+                               (funcall macher-agent--parent-callback (make-macher-agent-delegate-response :status 'success :data res :buffer-name buf-name)))
                  :on-error (lambda (err)
-                             (funcall macher-agent--parent-callback (make-macher-agent-tool-response :status 'error :error (format "ERROR: %s" err) :buffer-name buf-name))))))))))
+                             (funcall macher-agent--parent-callback (make-macher-agent-delegate-response :status 'error :error (format "ERROR: %s" err) :buffer-name buf-name))))))))))
 
 (defvar macher-agent-subagent-setup-hook nil)
 

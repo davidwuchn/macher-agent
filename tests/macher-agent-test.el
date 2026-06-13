@@ -577,14 +577,14 @@
                                                        :category "test"
                                                        :args (list (list :name "arg1" :type 'string) (list :name "arg2" :type 'string))
                                                        :command-fn (lambda (payload)
-                                                                     (make-macher-agent-tool-response :type 'lisp-result :payload (format "Async %s %s" (plist-get payload :arg1) (plist-get payload :arg2)))))
+                                                                     (make-macher-agent-lisp-result-response :payload (format "Async %s %s" (plist-get payload :arg1) (plist-get payload :arg2)))))
 
                                (macher-agent-make-tool mock-sync-contract-tool
                                                        "Mock sync tool"
                                                        :category "test"
                                                        :args (list (list :name "arg1" :type 'string))
                                                        :command-fn (lambda (payload)
-                                                                     (make-macher-agent-tool-response :type 'lisp-result :payload (format "Sync %s" (plist-get payload :arg1))))))
+                                                                     (make-macher-agent-lisp-result-response :payload (format "Sync %s" (plist-get payload :arg1))))))
 
                               (it "generates variadic signatures for async tools to safely absorb FSM contexts"
                                   (let* ((tool-fn (gptel-tool-function mock-async-contract-tool))

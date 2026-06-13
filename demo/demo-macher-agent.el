@@ -32,8 +32,9 @@ SPEED is the delay between keystrokes (default 0.04 seconds)."
   (when (assoc "macher-agent-plan" gptel-directives)
     (setq-local gptel--system-message (alist-get "macher-agent-plan" gptel-directives))
     (make-local-variable 'gptel-tools)
-    ;; Expose the fan-out tool so it can handle multiple targets in one turn
-    (setq gptel-tools '("spawn_subagent" "delegate_tasks_to_subagents")))
+    (setq gptel-tools (delq nil (mapcar (lambda (t-name) 
+                                          (macher-agent-resolve-to-struct t-name)) 
+                                        '("spawn_subagent" "delegate_tasks_to_subagents")))))
 
   ;; Ensure we are at the bottom of the buffer on a fresh line
   (goto-char (point-max))

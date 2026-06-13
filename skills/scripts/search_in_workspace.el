@@ -16,4 +16,4 @@
                                                                                                       (replace-regexp-in-string "'" "'\\''" pattern))))
                                                                                      (setq output (shell-command-to-string cmd))))
                                             ;; 3. Return the evaluated text to the agent, not a background process
-                                            (make-macher-agent-tool-response :type 'text :payload output))))))
+                                            (make-macher-agent-lisp-result-response :payload output))))))

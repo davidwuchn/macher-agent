@@ -22,7 +22,7 @@
                                                                                        (alist-get 'preset task-obj)
                                                                                        (alist-get "preset" task-obj nil nil #'equal)
                                                                                        "macher-agent-worker")))))
-                                        (make-macher-agent-tool-response :type 'delegate :payload (vconcat normalized-tasks))))
+                                        (make-macher-agent-delegate-response :payload (vconcat normalized-tasks))))
                         :success-fn (lambda (results)
                                       (let ((output (list "All sub-agents completed. Outputs:\n")))
                                         (cl-loop for res across (if (vectorp results) results (vconcat results))

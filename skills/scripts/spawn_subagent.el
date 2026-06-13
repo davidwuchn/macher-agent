@@ -9,6 +9,5 @@
                                              (context (ignore-errors (macher-agent-resolve-context)))
                                              (dir default-directory)
                                              (buf (macher-agent-add-subagent name dir nil context preset)))
-                                        (make-macher-agent-tool-response 
-                                         :type 'lisp-result 
+                                        (make-macher-agent-lisp-result-response 
                                          :payload (format "SUCCESS: Sub-agent created. The EXACT buffer name to use is '%s'." (buffer-name buf))))))
