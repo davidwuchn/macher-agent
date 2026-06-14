@@ -102,7 +102,7 @@
                         (let* ((workspace (make-macher-agent-workspace :project-root "/mock/proj/"))
                                (session (make-macher-agent-session :workspace workspace))
                                (fsm 'mock-fsm)
-                               (macher--fsm-latest fsm))
+                               (macher-agent--active-fsm fsm))
                           
                           (spy-on 'gptel-fsm-info :and-return-value (list :macher-agent-session session))
                           (setf (macher-agent-session-pending-media session) (list (list "/mock/proj/media.png" :mime "image/png")))
@@ -110,10 +110,8 @@
                           (spy-on 'gptel--inject-media :and-return-value nil)
                           (spy-on 'gptel--inject-prompt :and-return-value nil)
                           
-                          ;; Call the rewritten advice directly
                           (macher-agent--inject-media-fsm-advice (lambda (f) f) fsm)
                           
-                          ;; Validate that the FSM property was correctly used and cleared
                           (expect 'gptel--inject-media :to-have-been-called)
                           (expect (macher-agent-session-pending-media session) :to-be nil))))
 

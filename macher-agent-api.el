@@ -84,11 +84,36 @@
   "Check if TOOL is a valid struct."
   (and tool (fboundp 'gptel-tool-p) (gptel-tool-p tool)))
 
+(defsubst macher-agent-canonical-tool-name (tool)
+  "Strictly extract and coerce TOOL into a string name.
+Handles gptel structs, symbols, plists, and raw strings."
+  (and tool
+       (let ((raw-name 
+              (cond
+               ((stringp tool) tool)
+               ((and (fboundp 'gptel-tool-p) (gptel-tool-p tool))
+                (gptel-tool-name tool))
+               ((symbolp tool) (symbol-name tool))
+               ((and (listp tool) (plist-get tool :name))
+                (plist-get tool :name))
+               ((and (listp tool) (plist-get tool :function))
+                (let ((fn (plist-get tool :function)))
+                  (if (listp fn) (plist-get fn :name) fn)))
+               (t (format "%s" tool)))))
+         (if (symbolp raw-name) (symbol-name raw-name) raw-name))))
+
+(defun macher-agent--cache-tool (tool registry)
+  "Cache the TOOL in REGISTRY using its canonical string name."
+  (when (macher-tool-valid-p tool)
+    (let ((canonical-name (macher-agent-canonical-tool-name tool)))
+      (when canonical-name
+        (puthash canonical-name tool registry)))))
+
 (defun macher-agent-force-review ()
   "Manually trigger the diff review screen for any pending virtual edits."
   (interactive)
   (let ((context (macher-agent-resolve-context))
-        (fsm (bound-and-true-p macher--fsm-latest)))
+        (fsm (macher-agent--get-fsm-latest)))
     (if (not (and context (macher-agent--get-context-dirty-p context)))
         (message "No pending edits to review.")
       (macher--build-patch context fsm)
@@ -191,7 +216,7 @@ If VALIDATION-CB is provided, it is called on each form; if it returns nil, an e
       (error
        (message "Macher-Agent: Failed to load tool %s - %s" tool-name err)))
     (when tool
-      (puthash tool-name tool registry))
+      (macher-agent--cache-tool tool registry))
     tool))
 
 (defun macher-agent--read-and-cache-from-disk (tool-name script-paths registry)
@@ -226,7 +251,9 @@ If VALIDATION-CB is provided, it is called on each form; if it returns nil, an e
         (let* ((tool-name (match-string 1 path))
                (registry (if workspace
                              (macher-agent-workspace-tools-registry workspace)
-                           macher-agent-tools-registry)))
+                           macher-agent-tools-registry))
+               (canonical-name (macher-agent-canonical-tool-name tool-name)))
+          (remhash canonical-name registry)
           (remhash tool-name registry)
           (remhash (intern tool-name) registry)))
       
@@ -302,32 +329,35 @@ If VALIDATION-CB is provided, it is called on each form; if it returns nil, an e
   "Retrieve TOOL-NAME from workspace registry or load from VFS/disk, deferring native tools."
   (let* ((workspace (when context (macher-agent--get-context-workspace context)))
          (registry (if workspace (macher-agent-workspace-tools-registry workspace) macher-agent-tools-registry))
-         (cached (gethash tool-name registry))
-         (script-paths (delq nil (list
-                                  (when dir-context (expand-file-name (format "scripts/%s.el" tool-name) dir-context))
-                                  (expand-file-name (format "scripts/%s.el" tool-name) (or (bound-and-true-p macher-agent--bundled-skills-dir) macher-agent-bundled-skills-directory)))))
+         (canonical-name (macher-agent-canonical-tool-name tool-name))
+         (cached (and canonical-name (gethash canonical-name registry)))
+         (script-paths (when canonical-name
+                         (delq nil (list
+                                    (when dir-context (expand-file-name (format "scripts/%s.el" canonical-name) dir-context))
+                                    (expand-file-name (format "scripts/%s.el" canonical-name) (or (bound-and-true-p macher-agent--bundled-skills-dir) macher-agent-bundled-skills-directory))))))
          (loaded-tool nil))
 
     (if cached
         (setq loaded-tool cached)
-      (let ((content-to-eval (macher-agent--locate-tool-source tool-name context dir-context script-paths workspace)))
-        (when content-to-eval
-          (let ((trusted-forms (macher-agent--parse-and-validate-tool-ast content-to-eval tool-name)))
-            (when trusted-forms
-              (setq loaded-tool (macher-agent--evaluate-trusted-tool-ast trusted-forms tool-name)))))))
+      (when canonical-name
+        (let ((content-to-eval (macher-agent--locate-tool-source canonical-name context dir-context script-paths workspace)))
+          (when content-to-eval
+            (let ((trusted-forms (macher-agent--parse-and-validate-tool-ast content-to-eval canonical-name)))
+              (when trusted-forms
+                (setq loaded-tool (macher-agent--evaluate-trusted-tool-ast trusted-forms canonical-name))))))))
     
     (unless loaded-tool
       (let* ((tool-sym (if (symbolp tool-name) tool-name (intern-soft tool-name)))
              (sym-val (when (and tool-sym (boundp tool-sym)) (symbol-value tool-sym))))
         (if (and sym-val (macher-tool-valid-p sym-val))
             (setq loaded-tool sym-val)
-          (let ((tool-name-str (if (symbolp tool-name) (symbol-name tool-name) tool-name)))
+          (when canonical-name
             (setq loaded-tool 
                   (ignore-errors 
-                    (gptel-get-tool tool-name-str)))))))
+                    (gptel-get-tool canonical-name)))))))
     
     (when loaded-tool
-      (puthash tool-name loaded-tool registry))
+      (macher-agent--cache-tool loaded-tool registry))
 
     (or loaded-tool tool-name)))
 
@@ -440,7 +470,7 @@ If VALIDATION-CB is provided, it is called on each form; if it returns nil, an e
                for desc = (plist-get meta :description)
                for model = (plist-get meta :model)
                for tools = (plist-get meta :tools)
-               for tool-names = (mapcar (lambda (t_) (if (macher-tool-valid-p t_) (gptel-tool-name t_) (if (symbolp t_) (symbol-name t_) t_))) tools)
+               for tool-names = (mapcar #'macher-agent-canonical-tool-name tools)
                do (when system-prompt
                     (setf (alist-get sym gptel-directives) system-prompt)
                     (let ((preset-spec (list :description (or desc (format "Agent Profile: %s" sym))
@@ -461,8 +491,8 @@ If VALIDATION-CB is provided, it is called on each form; if it returns nil, an e
     
     (dolist (t_ (append (default-value 'gptel-tools) (bound-and-true-p gptel-tools)))
       (when (and (not found) (macher-tool-valid-p t_))
-        (let ((t-name (format "%s" (gptel-tool-name t_))))
-          (when (equal (replace-regexp-in-string "-" "_" t-name) normalized-target)
+        (let ((t-name (macher-agent-canonical-tool-name t_)))
+          (when (and t-name (equal (replace-regexp-in-string "-" "_" t-name) normalized-target))
             (setq found t_)))))
     
     (unless found
@@ -473,8 +503,8 @@ If VALIDATION-CB is provided, it is called on each form; if it returns nil, an e
                       (cl-loop for (name . tool) in tools-alist
                                until found
                                do (when (macher-tool-valid-p tool)
-                                    (let ((t-name (format "%s" (gptel-tool-name tool))))
-                                      (when (equal (replace-regexp-in-string "-" "_" t-name) normalized-target)
+                                    (let ((t-name (macher-agent-canonical-tool-name tool)))
+                                      (when (and t-name (equal (replace-regexp-in-string "-" "_" t-name) normalized-target))
                                         (setq found tool)))))))))
     found))
 
@@ -513,12 +543,17 @@ If VALIDATION-CB is provided, it is called on each form; if it returns nil, an e
   "Normalise, resolve, and deduplicate a mixed list of TOOLS.
 Accepts a list of tool representations (names, symbols, structs, functions, or nested lists),
 recursively flattens them, resolves them to `gptel-tool' structs via `macher-agent-resolve-tool'
-or native fallback, filters out nil, and deduplicates by name in a single pass."
-  (let ((flat-resolved (macher-agent-resolve-item tools)))
-    (cl-remove-duplicates
-     (delq nil flat-resolved)
-     :key (lambda (t_) (format "%s" (gptel-tool-name t_)))
-     :test #'equal)))
+or native fallback, filters out nil, and deduplicates by name using a hash table."
+  (let ((flat-resolved (delq nil (macher-agent-resolve-item tools)))
+        (seen (make-hash-table :test 'equal))
+        (unique nil))
+    (dolist (tool flat-resolved)
+      (let* ((raw-name (macher-agent-canonical-tool-name tool))
+             (canon-name (if (stringp raw-name) (substring-no-properties raw-name) raw-name)))
+        (when (and canon-name (not (gethash canon-name seen)))
+          (puthash canon-name t seen)
+          (push tool unique))))
+    (nreverse unique)))
 
 (defun macher-agent-resolve-to-struct (t-item)
   "Convert a tool item into a gptel-tool struct."
@@ -528,10 +563,11 @@ or native fallback, filters out nil, and deduplicates by name in a single pass."
   "Clone and wrap the tool so it ALWAYS runs in the project root."
   (if (macher-tool-valid-p tool)
       (let* ((orig-fn (gptel-tool-function tool))
-             (tool-sym (intern (gptel-tool-name tool)))
-             (cached-wrapped-fn (get tool-sym 'macher-agent-wrapped-fn)))
+             (tool-name-str (macher-agent-canonical-tool-name tool))
+             (tool-sym (when tool-name-str (intern tool-name-str)))
+             (cached-wrapped-fn (when tool-sym (get tool-sym 'macher-agent-wrapped-fn))))
         
-        (if (eq orig-fn cached-wrapped-fn)
+        (if (and cached-wrapped-fn (eq orig-fn cached-wrapped-fn))
             tool
           
           (let ((new-tool (copy-sequence tool)))
@@ -540,7 +576,8 @@ or native fallback, filters out nil, and deduplicates by name in a single pass."
                     (macher-agent-with-project-root 
                      (apply orig-fn args))))
             
-            (put tool-sym 'macher-agent-wrapped-fn (gptel-tool-function new-tool))
+            (when tool-sym
+              (put tool-sym 'macher-agent-wrapped-fn (gptel-tool-function new-tool)))
             new-tool)))
     tool))
 

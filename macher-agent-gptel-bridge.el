@@ -11,32 +11,73 @@
 (declare-function macher-agent--build-virtual-patch "macher-agent-vfs-client")
 (declare-function macher-agent--reap-buffer "macher-agent-orchestration")
 (declare-function macher-agent-initialize-skills "macher-agent-api")
+(declare-function macher-agent-canonical-tool-name "macher-agent-api")
 
-(defun macher-agent-sync-prompt-transformer (&rest _args)
-  "Synchronise VFS, ephemerally compose skills, and strip tags."
-  (let* ((macher-agent--allow-lazy-init t)
-         (ctx (macher-agent-resolve-context)))
+(defun macher-agent-sync-prompt-transformer (async-fn fsm)
+  "Synchronise the virtual file system, normalise the active tools list,
+and compose skill profiles securely.
+
+This function acts exclusively as a pre-wire transformer. It executes
+strictly within the temporary transmission buffer managed by the system.
+It parses and strips inline skill tags locally, preventing destructive
+side effects to the user's source buffer. It then invokes the pure
+composition engine to merge the base state with the inline presets,
+applying the resulting transmission state ephemerally before network dispatch."
+  (let* ((info (when fsm (gptel-fsm-info fsm)))
+         (orig-buf (or (when info (plist-get info :buffer)) (current-buffer)))
+         (macher-agent--allow-lazy-init t)
+         (ctx (macher-agent-resolve-context fsm)))
+
+    (when (and fsm ctx)
+      (setf (gptel-fsm-info fsm)
+            (plist-put (gptel-fsm-info fsm) :macher-agent-context ctx)))
+
     (when ctx
-      (macher-agent--auto-sync-context ctx)
-      (when (fboundp 'macher-agent-initialize-skills)
-        (macher-agent-initialize-skills ctx))))
+      (with-current-buffer orig-buf
+        (macher-agent--auto-sync-context ctx)
+        (when (fboundp 'macher-agent-initialize-skills)
+          (macher-agent-initialize-skills ctx))))
 
-  (save-excursion
-    (goto-char (point-min))
     (let ((matched-skills nil))
-      
-      (while (re-search-forward "^@\\([[:alnum:]_-]+\\)\\b\\s-*" nil t)
-        (push (intern (match-string-no-properties 1)) matched-skills)
-        (replace-match ""))
-      
+      (save-excursion
+        (goto-char (point-min))
+        (while (re-search-forward "@\\([[:alnum:]_-]+\\)\\b\\s-*" nil t)
+          (push (intern (match-string-no-properties 1)) matched-skills)
+          (replace-match "")))
+
       (unless matched-skills
-        (let ((active-sys gptel--system-message))
-          (when-let* ((sym (cl-loop for (s . sys) in gptel-directives
+        (let ((active-sys (with-current-buffer orig-buf gptel--system-message))
+              (directives (with-current-buffer orig-buf gptel-directives)))
+          (when-let* ((sym (cl-loop for (s . sys) in directives
                                     when (equal sys active-sys) return s)))
             (push sym matched-skills))))
-      
-      (when (and matched-skills (fboundp 'macher-agent--apply-composed-skills))
-        (macher-agent--apply-composed-skills (nreverse matched-skills))))))
+
+      (let* ((base-state
+              (with-current-buffer orig-buf
+                (list :model gptel-model
+                      :system gptel--system-message
+                      :temperature (bound-and-true-p gptel-temperature)
+                      :max-tokens (bound-and-true-p gptel-max-tokens)
+                      :tools gptel-tools
+                      :known-presets (bound-and-true-p gptel--known-presets))))
+             (presets (with-current-buffer orig-buf (bound-and-true-p macher-agent-presets)))
+             (payload (when (fboundp 'macher-agent-compose-payload)
+                        (macher-agent-compose-payload base-state (append presets (nreverse matched-skills))))))
+
+        (when payload
+          (setq-local gptel--system-message (plist-get payload :system))
+          (setq-local gptel-model (plist-get payload :model))
+          (setq-local gptel-temperature (plist-get payload :temperature))
+          (setq-local gptel-max-tokens (plist-get payload :max-tokens))
+          (setq-local gptel-tools (plist-get payload :tools)))
+          
+        (when info
+          (plist-put (gptel-fsm-info fsm) :tools 
+                     (mapcar #'macher-agent-canonical-tool-name gptel-tools)))))
+
+    (when (and async-fn (functionp async-fn))
+      (funcall async-fn))))
+
 
 (defun macher-agent-post-response-reaper (_beg _end)
   "Reap the sub-agent buffer if flagged for disposal."
@@ -53,24 +94,16 @@
   (let* ((target-buffer (macher-agent-task-context-target-buffer task-context))
          (sys-msg (macher-agent-task-context-system-message task-context))
          (success-cb (plist-get callbacks :on-success))
-         (error-cb (plist-get callbacks :on-error)))
+         (error-cb (plist-get callbacks :on-error))
+         (ctx (ignore-errors (macher-agent-resolve-context))))
     
     (with-current-buffer target-buffer
       (setq-local gptel--system-message sys-msg)
       
-      (let ((transform-hook nil))
-        (setq transform-hook
-              (lambda (async-fn fsm)
-                (setq-local macher--fsm-latest fsm)
-                (funcall async-fn)
-                (remove-hook 'gptel-prompt-transform-functions transform-hook t)))
-        (add-hook 'gptel-prompt-transform-functions transform-hook nil t))
-
       (let ((response-hook nil))
         (setq response-hook
               (lambda (_beg _end)
                 (let ((res (string-trim (buffer-substring-no-properties (point-min) (point-max)))))
-                  
                   
                   (if (and (macher-agent-subagent-p)
                            (not (string-empty-p res)))
@@ -191,45 +224,26 @@ Returns a cons cell (BACKEND . MODEL-FORMAT) if found, otherwise nil."
 (advice-add 'gptel--handle-post-tool :around #'macher-agent--bind-active-fsm-advice)
 
 (defun macher-agent--enforce-tool-scope (tool &rest _args)
-  "Enforce that TOOL is explicitly within the buffer-local `gptel-tools'
-or the active request FSM.
-If not, block execution to prevent hallucinated or globally-leaked tools."
-  (let* ((tool-name (cond ((stringp tool) tool)
-                          ((and (fboundp 'gptel-tool-p) (gptel-tool-p tool))
-                           (gptel-tool-name tool))
-                          ((and (listp tool) (plist-get tool :name))
-                           (plist-get tool :name))
-                          ((and (listp tool) (plist-get tool :function))
-                           (let ((fn (plist-get tool :function)))
-                             (if (listp fn) (plist-get fn :name) fn)))
-                          ((symbolp tool) (symbol-name tool))
-                          (t (format "%s" tool))))
-         
+  "Enforce that TOOL is explicitly within the authorised scope.
+If not, block execution to prevent hallucinated or globally-leaked tools.
+
+To robustly validate the tool across execution boundaries (including
+asynchronous callbacks and temporary buffer switches), the function
+retrieves the active finite state machine (FSM) or fallback references
+and compares the incoming tool against the authorised toolset.
+
+It reads the tool names exclusively from the finite state machine snapshot,
+ignoring buffer-local variables to avoid race conditions."
+  (let* ((canonical-name (macher-agent-canonical-tool-name tool))
          (fsm (or macher-agent--active-fsm
                   (bound-and-true-p macher--fsm-latest)
                   (bound-and-true-p gptel--fsm-last)))
          (info (when fsm (gptel-fsm-info fsm)))
-         
          (fsm-tools (when info (plist-get info :tools)))
-         
-         (in-fsm (and fsm-tools
-                      (cl-find tool-name fsm-tools
-                               :key (lambda (t_) 
-                                      (if (and (fboundp 'gptel-tool-p) (gptel-tool-p t_))
-                                          (gptel-tool-name t_)
-                                        (format "%s" t_)))
-                               :test #'string=)))
-         
-         (local-tool (or in-fsm
-                         (and (boundp 'gptel-tools)
-                              (cl-find tool-name gptel-tools
-                                       :key (lambda (t_) 
-                                              (if (and (fboundp 'gptel-tool-p) (gptel-tool-p t_))
-                                                  (gptel-tool-name t_)
-                                                (format "%s" t_)))
-                                       :test #'string=)))))
-    (unless local-tool
-      (list :block (format "ERROR: Tool '%s' is out of scope. It was not provided to this sub-agent." tool-name)))))
+         (authorised-names
+          (mapcar #'macher-agent-canonical-tool-name fsm-tools)))
+    (unless (and canonical-name (member canonical-name authorised-names))
+      (list :block (format "ERROR: Tool '%s' is out of scope. It was not provided to this sub-agent." (or canonical-name tool))))))
 
 (defun macher-agent-setup-gptel-buffer ()
   "Set up a gptel buffer with macher-agent capabilities if in an active agent session."

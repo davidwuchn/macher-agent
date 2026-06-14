@@ -32,22 +32,6 @@
 (cl-defmethod macher-agent-execute-response ((res macher-agent-tool-response) _context on-success _on-error)
   (funcall on-success (macher-agent-tool-response-payload res)))
 
-(cl-defmethod macher-agent-execute-response ((res macher-agent-process-response) context on-success on-error)
-  (let ((payload (macher-agent-tool-response-payload res)))
-    (if (stringp payload)
-        (macher-agent--run-in-persistent-sandbox context payload on-success on-error)
-      (funcall on-error (list :status 'error :error "Process payload must be a string.")))))
-
-(cl-defmethod macher-agent-execute-response ((res macher-agent-delegate-response) _context on-success _on-error)
-  (macher-agent-execute-parallel (macher-agent-tool-response-payload res) on-success))
-
-(cl-defmethod macher-agent-execute-response ((res macher-agent-nohup-response) _context on-success _on-error)
-  (macher-agent--run-async-cmd "detached" (macher-agent-tool-response-payload res) default-directory (lambda (_ _)))
-  (funcall on-success "SUCCESS: Process started."))
-
-(cl-defmethod macher-agent-execute-response ((res macher-agent-lisp-result-response) _context on-success _on-error)
-  (funcall on-success (macher-agent-tool-response-payload res)))
-
 (defvar macher-agent-allowed-tools nil
   "List of custom tool names that should receive the macher-context.")
 
@@ -68,11 +52,10 @@ If nil, the buffer executes silently in the background."
   "Resolve the current agent context."
   (or passed-context
       (ignore-errors (macher-agent-current-context))
-      (when (and (boundp 'macher--fsm-latest) macher--fsm-latest)
-        (if (fboundp 'gptel-fsm-info)
-            (plist-get (funcall 'gptel-fsm-info macher--fsm-latest) :macher--context)
-          (when (fboundp 'mock-gptel-fsm-info)
-            (plist-get (funcall 'mock-gptel-fsm-info macher--fsm-latest) :macher--context))))))
+      (when (and (boundp 'macher-agent--active-fsm) macher-agent--active-fsm)
+        (let ((info (macher-agent--extract-fsm-info macher-agent--active-fsm)))
+          (or (plist-get info :macher-agent-context)
+              (plist-get info :macher--context))))))
 
 (defun macher-agent--format-directives (result-data)
   "Append pending system instructions to RESULT-DATA if any exist."
@@ -319,28 +302,6 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
       (funcall orig-fun file))))
 
 (advice-add 'gptel--base64-encode :around #'macher-agent--gptel-base64-encode-advice)
-
-(macher-agent-make-tool macher-agent-commit-buffer-tool
-    "Directly overwrite an Emacs buffer and synchronise the agent's memory immediately, bypassing the patch review step."
-  :category "plan"
-  :args (list '(:name "buffer_name" :type string)
-              '(:name "content" :type string))
-  :command-fn (lambda (payload context _root)
-                (let ((buffer_name (plist-get payload :buffer_name))
-                      (content (plist-get payload :content)))
-                  (let ((actual-name (macher-agent--resolve-buffer-name buffer_name)))
-                    (macher-agent--ensure-access context actual-name)
-                    (let ((target-buffer (get-buffer-create actual-name)))
-                      (with-current-buffer target-buffer
-                        (when (bound-and-true-p auto-save-visited-mode)
-                          (auto-save-visited-mode -1))
-                        (insert content)
-                        (set-buffer-modified-p t))
-                      (when context
-                        (macher-agent--update-context-file context actual-name content)
-                        (macher-agent--auto-sync-context context))
-                      (make-macher-agent-lisp-result-response
-                       :payload (format "SUCCESS: Buffer '%s' has been directly overwritten and synchronised. Awaiting user save." actual-name)))))))
 
 (with-eval-after-load 'gptel-transient
   (ignore-errors

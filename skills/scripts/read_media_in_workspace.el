@@ -24,17 +24,16 @@
                                           (error "Cannot read media. The file does not exist in VFS or on disk at: %s" abs-path))
                                         
                                         (let* ((mime (mailcap-file-name-to-mime-type abs-path))
-                                               (info (when (bound-and-true-p macher--fsm-latest)
-                                                       (macher-agent--extract-fsm-info macher--fsm-latest)))
+                                               (info (when (bound-and-true-p macher-agent--active-fsm)
+                                                       (macher-agent--extract-fsm-info macher-agent--active-fsm)))
                                                (session (when info (plist-get info :macher-agent-session))))
                                           (unless mime
                                             (error "Could not determine MIME type for media: %s" abs-path))
                                           
-                                          ;; Auto-generate session if bypassed by sub-agent orchestrator
                                           (unless session
                                             (setq session (make-macher-agent-session :id (buffer-name) :workspace workspace))
-                                            (when info
-                                              (setf (gptel-fsm-info macher--fsm-latest) (plist-put info :macher-agent-session session))))
+                                            (when (and info (bound-and-true-p macher-agent--active-fsm))
+                                              (setf (gptel-fsm-info macher-agent--active-fsm) (plist-put info :macher-agent-session session))))
                                           
                                           (setf (macher-agent-session-pending-media session)
                                                 (list (list abs-path :mime mime)))
