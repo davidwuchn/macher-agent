@@ -265,7 +265,8 @@ If REPLACE-ALL is nil, errors if OLD-TEXT occurs more than once."
 (defun macher-agent--extract-fsm-context (fsm)
   "Extract the active context from a finite-state machine (FSM)."
   (let ((info (macher-agent--extract-fsm-info fsm)))
-    (and info (plist-get info :macher--context))))
+    (and info (or (plist-get info :macher-agent-context)
+                  (plist-get info :macher--context)))))
 
 (defun macher-agent-resolve-context (&optional ctx-or-fsm)
   "Resolve the active context from CTX-OR-FSM or state.
@@ -503,8 +504,8 @@ Uniformly applies security and path normalisation checks."
          (orig (macher-agent-vfs-entry-orig entry))
          (new (macher-agent-vfs-entry-curr entry))
          (current-state (macher-agent--read-content-from-disk-or-buffer path)))
-    (if (not (equal orig current-state))
-        (if (equal new current-state)
+    (if (not (equal (or orig "") (or current-state "")))
+        (if (equal (or new "") (or current-state ""))
             (progn (setf (macher-agent-vfs-entry-orig entry) current-state) t)
           (progn
             (setf (macher-agent-vfs-entry-orig entry) current-state)
@@ -581,6 +582,7 @@ Used to prevent race conditions during shadow-buffer patch generation.")
       (insert "\nHere is your proposed patch:\n```diff\n" content "\n```\n"))))
 
 (defun macher-agent-clear-context ()
+  "Clear the active context and reset state."
   (interactive)
   (if (not macher-agent--persistent-context)
       (message "No active context to clear in this buffer.")
@@ -589,7 +591,6 @@ Used to prevent race conditions during shadow-buffer patch generation.")
       (when ws-root
         (remhash (expand-file-name ws-root) macher-agent-active-workspaces)))
     (setq-local macher-agent--persistent-context nil)
-    (setq-local macher--fsm-latest nil)
     (run-hooks 'macher-agent-context-mutated-hook)
     (message "Agent memory cleared. It will take a fresh snapshot of the disk on its next task.")))
 

@@ -153,7 +153,7 @@
                                     (with-current-buffer buf
                                       (setq-local macher-agent--is-workspace t)
                                       (setq-local macher-agent--persistent-context ctx)
-                                      (setq-local macher--fsm-latest nil))
+                                      (setq-local macher-agent--active-fsm nil))
                                     
                                     (with-current-buffer buf
                                       (macher-agent-apply-virtual-buffers))
@@ -343,7 +343,7 @@
                                         (it "permits access to valid media files inside the workspace without triggering VFS text security locks"
                                             (let* ((gptel-track-media t)
                                                    (session (make-macher-agent-session :id "test"))
-                                                   (macher--fsm-latest 'mock-fsm)
+                                                   (macher-agent--active-fsm 'mock-fsm)
                                                    (mock-info (list :macher-agent-session session))
                                                    (ctx (macher--make-context :contents nil))
                                                    (tool-fn (gptel-tool-function macher-agent-read-media-in-workspace-tool)))
@@ -367,7 +367,7 @@
                                             (let* ((gptel-track-media t)
                                                    (gptel-context nil)
                                                    (session (make-macher-agent-session :id "test"))
-                                                   (macher--fsm-latest 'mock-fsm)
+                                                   (macher-agent--active-fsm 'mock-fsm)
                                                    (mock-info (list :macher-agent-session session))
                                                    (ctx (macher--make-context :contents (list (macher-agent-vfs-make-entry "test.png" "" "img-data"))))
                                                    (tool-fn (gptel-tool-function macher-agent-read-media-in-workspace-tool)))
@@ -531,7 +531,7 @@
                     (describe "Interactive Commands and State (macher-agent-orchestration.el)"
                               (it "macher-agent-add-buffer-to-scope explicitly errors out if no existing session is found"
                                   (let ((buf (generate-new-buffer "lazy-target")))
-                                    (let ((macher--fsm-latest nil)
+                                    (let ((macher-agent--active-fsm nil)
                                           (macher-agent-active-workspaces (make-hash-table :test 'equal))
                                           (macher-agent--persistent-context nil))
                                       (cl-letf (((symbol-function 'buffer-list) (lambda () nil)))
@@ -560,14 +560,12 @@
                                       (expect (buffer-string) :to-equal "new text"))
                                     (kill-buffer buf)))
 
-                              (it "clears persistent context and latest FSM upon user request"
+                              (it "clears persistent context upon user request"
                                   (let ((buf (generate-new-buffer "active-session")))
                                     (with-current-buffer buf
                                       (setq-local macher-agent--persistent-context 'some-data)
-                                      (setq-local macher--fsm-latest 'some-fsm)
                                       (macher-agent-clear-context)
-                                      (expect macher-agent--persistent-context :to-be nil)
-                                      (expect macher--fsm-latest :to-be nil))
+                                      (expect macher-agent--persistent-context :to-be nil))
                                     (kill-buffer buf))))
 
                     (describe "Tool Signatures (Macro Contracts)"

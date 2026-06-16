@@ -6,7 +6,7 @@
 (require 'macher-agent-vfs-client)
 
 (declare-function macher-agent-gptel-transmit "macher-agent-gptel-bridge" (task-context callbacks))
-(declare-function macher-agent-sync-prompt-transformer "macher-agent-gptel-bridge" (prompt))
+(declare-function macher-agent-sync-prompt-transformer "macher-agent-gptel-bridge" (async-fn fsm))
 (declare-function macher-agent-post-response-reaper "macher-agent-gptel-bridge" (beg end))
 (declare-function macher-agent--set-system-message "macher-agent-gptel-tools" (msg))
 (declare-function macher-agent-resolve-context "macher-agent-vfs-client")
@@ -28,7 +28,8 @@
   (let* ((task-list (append tasks nil))
          (total (length task-list))
          (completed 0)
-         (results (make-list total nil)))
+         (results (make-list total nil))
+         (completed-flags (make-vector total nil)))
     (if (= total 0)
         (funcall final-callback nil)
       (cl-loop for task in task-list
@@ -37,10 +38,12 @@
                     (macher-agent-spawn-task 
                      task 
                      (lambda (result)
-                       (setf (nth idx results) result)
-                       (cl-incf completed)
-                       (when (= completed total)
-                         (funcall final-callback results)))))))))
+                       (unless (aref completed-flags idx)
+                         (aset completed-flags idx t)
+                         (setf (nth idx results) result)
+                         (cl-incf completed)
+                         (when (= completed total)
+                           (funcall final-callback results))))))))))
 
 (defun macher-agent-subagent-p (&optional buffer)
   "Return non-nil if BUFFER is a subagent."
@@ -96,58 +99,94 @@
                    (t (format "%s" preset)))))
     (intern (replace-regexp-in-string "^@+" "" str))))
 
+(defun macher-agent-compose-payload (base-state inline-presets)
+  "Pure function to compose a transmission payload.
+Merges BASE-STATE with the resolved configuration of INLINE-PRESETS.
+Returns a property list containing the unified state."
+  (let ((composed-system nil)
+        (accumulated-base-sys (plist-get base-state :system))
+        (composed-tools (append (plist-get base-state :tools) nil))
+        (final-model (plist-get base-state :model))
+        (final-temp (plist-get base-state :temperature))
+        (final-tokens (plist-get base-state :max-tokens))
+        (known-presets (plist-get base-state :known-presets)))
+    
+    (cl-labels
+        ((apply-spec (sym spec)
+           (when-let ((parents (plist-get spec :parents)))
+             (dolist (parent (if (listp parents) parents (list parents)))
+               (let ((parent-spec (alist-get parent known-presets)))
+                 (when parent-spec (apply-spec parent parent-spec)))))
+
+
+           (when-let ((sys-spec (or (plist-get spec :system) (plist-get spec :system-message))))
+             (if (and (consp sys-spec) (keywordp (car sys-spec)))
+                 (setq accumulated-base-sys (gptel--modify-value accumulated-base-sys sys-spec))
+               (push (format "### Skill: %s\n%s\n" sym sys-spec) composed-system)))
+
+           (when-let ((tools-spec (plist-get spec :tools)))
+             (let ((resolved (gptel--modify-value composed-tools tools-spec)))
+               (setq composed-tools 
+                     (cl-loop for t-obj in (if (listp resolved) resolved (list resolved))
+                              collect (if (stringp t-obj) (or (ignore-errors (gptel-get-tool t-obj)) t-obj) t-obj)))))
+
+           (when-let ((mod (plist-get spec :model))) (setq final-model mod))
+           (when-let ((temp (plist-get spec :temperature))) (setq final-temp temp))
+           (when-let ((tok (plist-get spec :max-tokens))) (setq final-tokens tok))))
+
+      (dolist (sym inline-presets)
+        (let* ((clean-sym (if (fboundp 'macher-normalise-preset-name)
+                              (macher-normalise-preset-name sym) sym))
+               (spec (when clean-sym (alist-get clean-sym known-presets)))
+               (tool (when (and (not spec) clean-sym (fboundp 'gptel-get-tool))
+                       (or (ignore-errors (gptel-get-tool (symbol-name clean-sym)))
+                           (ignore-errors (gptel-get-tool (replace-regexp-in-string "-" "_" (symbol-name clean-sym))))))))
+          (cond
+           (spec (apply-spec sym spec))
+           (tool (push tool composed-tools))))))
+
+    (let ((final-sys (string-join (delq nil (cons accumulated-base-sys (nreverse composed-system))) "\n---\n"))
+          (final-tools (if (fboundp 'macher-agent-normalize-tools)
+                           (macher-agent-normalize-tools composed-tools)
+                         composed-tools)))
+      (list :model final-model
+            :system final-sys
+            :temperature final-temp
+            :max-tokens final-tokens
+            :tools final-tools))))
+
+(defun macher-agent--apply-payload-locally (payload)
+  "Apply the composed PAYLOAD strictly to the current buffer.
+Used during initialisation seeding to establish base state."
+  (setq-local gptel--system-message (plist-get payload :system))
+  (setq-local gptel-model (plist-get payload :model))
+  (setq-local gptel-temperature (plist-get payload :temperature))
+  (setq-local gptel-max-tokens (plist-get payload :max-tokens))
+  (setq-local gptel-tools (plist-get payload :tools)))
+
 (defun macher-agent--apply-preset (preset-or-presets)
   "Polymorphic wrapper to safely route legacy calls into the modern compositor."
-  (let ((presets (cond ((listp preset-or-presets) preset-or-presets)
-                       ((vectorp preset-or-presets) (append preset-or-presets nil))
-                       (t (list preset-or-presets)))))
-    (when (fboundp 'macher-agent--apply-composed-skills)
-      (macher-agent--apply-composed-skills presets))))
-
-(defun macher-agent--apply-composed-skills (skill-syms)
-  "Compose multiple skills into a unified system prompt and toolset."
-  (let ((composed-system nil)
-        (composed-tools nil)
-        (final-model nil)
-        (final-temp nil)
-        (final-tokens nil))
-    
-    (dolist (sym skill-syms)
-      (let* ((clean-sym (if (fboundp 'macher-normalise-preset-name)
-                            (macher-normalise-preset-name sym) sym))
-             (spec (when (and clean-sym (boundp 'gptel--known-presets)) 
-                     (alist-get clean-sym gptel--known-presets))))
-        (when spec
-          (when-let ((sys (or (plist-get spec :system) (plist-get spec :system-message))))
-            (push (format "### Skill: %s\n%s\n" sym sys) composed-system))
-          
-          (when-let ((tools (plist-get spec :tools)))
-            (setq composed-tools 
-                  (append composed-tools 
-                          (if (and (consp tools) (eq (car tools) :append)) (cdr tools) tools))))
-          
-          (when-let ((mod (plist-get spec :model))) (setq final-model mod))
-          (when-let ((temp (plist-get spec :temperature))) (setq final-temp temp))
-          (when-let ((tok (plist-get spec :max-tokens))) (setq final-tokens tok)))))
-
-    (when composed-system
-      (setq-local gptel--system-message 
-                  (string-join (nreverse composed-system) "\n---\n")))
-    
-    (when final-model (setq-local gptel-model final-model))
-    (when final-temp (setq-local gptel-temperature final-temp))
-    (when final-tokens (setq-local gptel-max-tokens final-tokens))
-    
-    (when composed-tools
-      (setq-local gptel-tools 
-                  (macher-agent-normalize-tools 
-                   (append (default-value 'gptel-tools) gptel-tools composed-tools))))))
+  (let* ((presets (cond ((listp preset-or-presets) preset-or-presets)
+                        ((vectorp preset-or-presets) (append preset-or-presets nil))
+                        (t (list preset-or-presets))))
+         (base-state (list :model gptel-model
+                           :system gptel--system-message
+                           :temperature (bound-and-true-p gptel-temperature)
+                           :max-tokens (bound-and-true-p gptel-max-tokens)
+                           :tools gptel-tools
+                           :known-presets (bound-and-true-p gptel--known-presets)))
+         (payload (macher-agent-compose-payload base-state presets)))
+    (macher-agent--apply-payload-locally payload)))
 
 (defvar macher-agent--is-subagent nil)
 (defvar macher-agent--ready-to-reap nil)
 
+(defvar-local macher-agent-presets nil
+  "List of active preset or skill symbols for the current buffer.")
+
 (put 'macher-agent--is-subagent 'permanent-local t)
 (put 'macher-agent--ready-to-reap 'permanent-local t)
+(put 'macher-agent-presets 'permanent-local t)
 
 (defun macher-agent-spawn-task (task callback)
   "Spawn a task inside a target subagent."
@@ -155,7 +194,8 @@
          (instructions (if (listp task) (plist-get task :instructions) ""))
          (presets (if (listp task) (or (plist-get task :presets) (plist-get task :preset)) nil))
          (is-background (and (listp task) (plist-get task :background)))
-         (buf (get-buffer buf-name)))
+         (buf (get-buffer buf-name))
+         (callback-fired nil))
     (if (not buf)
         (funcall callback (make-macher-agent-delegate-response :status 'error :error (format "ERROR: Sub-agent buffer '%s' not found." buf-name) :buffer-name buf-name))
       (macher-agent--prepare-subagent-instructions buf instructions presets)
@@ -172,7 +212,13 @@
                           (unless is-background
                             (setq-local macher-agent--ready-to-reap t))))
                       
-                      (funcall callback res)))
+                      (unless callback-fired
+                        (setq callback-fired t)
+                        (when (buffer-live-p buf)
+                          (with-current-buffer buf 
+                            (unless is-background
+                              (setq-local macher-agent--ready-to-reap t))))
+                        (funcall callback res))))
 
         (let* ((first-preset (cond ((stringp presets) presets)
                                    ((symbolp presets) (symbol-name presets))
@@ -251,9 +297,16 @@
       (setq gptel-tools (macher-agent-normalize-tools (append gptel-tools parent-tools))))
 
     (when presets
-      (let ((preset-list (if (listp presets) presets (list presets))))
-        (when (fboundp 'macher-agent--apply-composed-skills)
-          (macher-agent--apply-composed-skills preset-list))))
+      (let* ((preset-list (if (listp presets) presets (list presets)))
+             (base-state (list :model gptel-model
+                               :system gptel--system-message
+                               :temperature (bound-and-true-p gptel-temperature)
+                               :max-tokens (bound-and-true-p gptel-max-tokens)
+                               :tools gptel-tools
+                               :known-presets (bound-and-true-p gptel--known-presets)))
+             (payload (macher-agent-compose-payload base-state preset-list)))
+        (setq-local macher-agent-presets (delete-dups (append macher-agent-presets preset-list)))
+        (macher-agent--apply-payload-locally payload)))
     
     (add-hook 'gptel-prompt-transform-functions #'macher-agent-sync-prompt-transformer nil t)
     (add-hook 'gptel-post-response-functions #'macher-agent-post-response-reaper nil t)
@@ -288,9 +341,16 @@
     (unless (string-empty-p instructions)
       (insert (substring-no-properties instructions)))
     (when presets
-      (let ((preset-list (if (listp presets) presets (list presets))))
-        (when (fboundp 'macher-agent--apply-composed-skills)
-          (macher-agent--apply-composed-skills preset-list))))))
+      (let* ((preset-list (if (listp presets) presets (list presets)))
+             (base-state (list :model gptel-model
+                               :system gptel--system-message
+                               :temperature (bound-and-true-p gptel-temperature)
+                               :max-tokens (bound-and-true-p gptel-max-tokens)
+                               :tools gptel-tools
+                               :known-presets (bound-and-true-p gptel--known-presets)))
+             (payload (macher-agent-compose-payload base-state preset-list)))
+        (setq-local macher-agent-presets (delete-dups (append macher-agent-presets preset-list)))
+        (macher-agent--apply-payload-locally payload)))))
 
 (defun macher-agent-apply-virtual-buffers ()
   (interactive)

@@ -235,6 +235,32 @@
                                   (expect preset-def :not :to-be nil)
                                   (expect (plist-get preset-def :tools) :to-equal '(:append ("the_tool")))))))))
 
+                    (it "merges and applies buffer-local macher-agent-presets during composed skill evaluation"
+                        (let* ((gptel-tools nil)
+                               (gptel--known-presets nil)
+                               (gptel-directives nil)
+                               (mock-tool-obj (if (fboundp 'gptel-make-tool)
+                                                  (gptel-make-tool :name "the_tool" :function (lambda () nil) :description "A tool")
+                                                'the-tool)))
+                          (spy-on 'gptel-tool-p :and-return-value t)
+                          (let* ((ctx (macher-agent-resolve-context))
+                                 (workspace (macher-agent--get-context-workspace ctx)))
+                            (puthash "selected-tool" mock-tool-obj (macher-agent-workspace-tools-registry workspace))
+                            (setf (alist-get 'test-preset (macher-agent-workspace-skills-alist workspace))
+                                  (list :description "test" :system "test system" :tools (list mock-tool-obj) :context-dir nil))
+                            
+                            (with-temp-buffer
+                              (let ((gptel--known-presets nil))
+                                (macher-agent-initialize-skills ctx)
+                                (setq-local macher-agent-presets '(test-preset))
+                                (setq-local gptel-tools nil)
+                                (let ((payload (macher-agent-compose-payload 
+                                                (list :model nil :system nil :temperature nil :max-tokens nil :tools nil :known-presets gptel--known-presets)
+                                                '(test-preset))))
+                                  (macher-agent--apply-payload-locally payload))
+                                (expect gptel-tools :not :to-be nil)
+                                (expect (car gptel-tools) :to-equal mock-tool-obj))))))
+
                     (it "expands org-macros in SKILL.md body"
                         (let* ((parsed (macher-agent-parse-skill-file "tests/fixtures/skills/macro-skill/SKILL.md")))
                           (expect (plist-get parsed :body) :to-match "Version: 0.1.0")))
