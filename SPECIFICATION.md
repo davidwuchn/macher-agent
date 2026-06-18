@@ -122,6 +122,19 @@ When an agent flags its execution as complete via `macher-agent-submit-task-resu
 2. The enforcer MUST check if the requested tool exists in the specific FSM's authorised tool list or the buffer-local `gptel-tools` by comparing their canonical string names resolved via `macher-agent-canonical-tool-name`, eliminating multiple type-checking routines in execution hooks.
 3. If the tool is not explicitly authorised for that sub-agent, execution MUST be blocked, returning an out-of-scope error to the LLM.
 
+### 5.4 Tool lifecycle and hook architecture
+
+The tool macro `macher-agent-make-tool` automatically instruments generated functions with standard Emacs hooks. This allows external packages, user configurations, and multi-agent orchestrators to intercept, validate, or mutate tool executions globally.
+
+#### 5.4.1 Exposed lifecycle hooks
+
+The following hooks are exposed globally. Each hook is called with the tool name (as a symbol) and its evaluated arguments (as a plist):
+
+1. `macher-agent-pre-tool-use-hook`: Executes before any tool logic runs. Run via `run-hook-with-args-until-failure`. If any function in this hook returns nil or signals an error, the tool execution is immediately aborted.
+2. `macher-agent-permission-request-hook`: Executes after `macher-agent-pre-tool-use-hook` but before the main body. Designed for interactive approvals (for example, launching an `ediff` session for a file write). This hook is permissive by default; if the hook is empty, execution proceeds. Run via `run-hook-with-args-until-failure`.
+3. `macher-agent-post-tool-use-hook`: Executes immediately after the tool body completes successfully. Run via `run-hook-with-args`. Receives the tool name, arguments, and the resulting output of the tool. Used for updating virtual file systems, triggering background linters, or logging.
+4. `macher-agent-post-tool-use-failure-hook`: Executes if the tool body throws an Emacs Lisp error. Run via `run-hook-with-args`. Receives the tool name, arguments, and the error signal data. Used for feeding structured failure context back to the LLM.
+
 ---
 
 ## 6. Upstream bridge contracts (gptel and macher)

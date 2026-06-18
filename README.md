@@ -11,7 +11,8 @@ https://github.com/user-attachments/assets/461e695a-1315-4975-bbfb-c3a411819e11
 4. [Agent Skills and Registration](#agent-skills-and-registration)
 5. [Advanced Context (Media and Instructions)](#advanced-context-media-and-instructions)
 6. [Orchestrating Workflows](#orchestrating-workflows)
-7. [Command Reference](#command-reference)
+7. [Lifecycle Hook Mapping Matrix](#lifecycle-hook-mapping-matrix)
+8. [Command Reference](#command-reference)
 
 ## Core Concepts and Architecture
 
@@ -277,6 +278,20 @@ Finally, wire the nodes and edges together to compile the application. This API 
 In an autonomous setup, a planner agent creates sub-agents, delegates tasks, and waits for a response via tool calls. The parent agent can run these sub-agents in the background using the event-bus orchestrator (`macher-agent-execute-parallel`), guaranteeing the sub-agents share the parent's uncommitted VFS memory.
 
 Alternatively, you can create sub-agents manually using interactive commands. You type instructions into the sub-agent buffer and trigger it. The sub-agent runs asynchronously and generates a patch.
+
+## Lifecycle Hook Mapping Matrix
+
+This matrix defines how the Claude Code specification maps conceptually and technically through the Emacs ecosystem down into the `macher-agent` implementation.
+
+| Claude Code Event | gptel Integration | Macher VFS Concept | Macher-Agent Tool Hook |
+| --- | --- | --- | --- |
+| **`SessionStart`** | `gptel-mode-hook` | `macher-init-session-hook` | N/A (Handled at workspace init) |
+| **`UserPromptSubmit`** | `gptel-pre-response-functions` | `macher-before-send-hook` | N/A (Handled at request dispatch) |
+| **`PreToolUse`** | Intercept via tool wrapper | `macher-pre-execute-tool-hook` | **`macher-agent-pre-tool-use-hook`** |
+| **`PermissionRequest`** | Interactive custom wrappers | `macher-diff-review-hook` | **`macher-agent-permission-request-hook`** |
+| **`PostToolUse`** | Callback return structure | `macher-post-execute-tool-hook` | **`macher-agent-post-tool-use-hook`** |
+| **`PostToolUseFailure`** | Callback error handling | `macher-error-recovery-hook` | **`macher-agent-post-tool-use-failure-hook`** |
+| **`Stop` / `SubagentStop**` | `gptel-post-response-functions` | `macher-post-response-hook` | N/A (Handled at completion) |
 
 ## Command Reference
 
