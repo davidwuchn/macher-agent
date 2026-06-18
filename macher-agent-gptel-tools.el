@@ -48,6 +48,41 @@ If nil, the buffer executes silently in the background."
                  function)
   :group 'macher-agent)
 
+(defcustom macher-agent-pre-tool-use-hook nil
+  "Hook run before any macher-agent tool logic runs.
+Each function in this hook is called with the tool name (as a
+symbol) and the evaluated arguments (as a plist).
+If any function in this hook returns nil or signals an error, the
+tool execution is immediately aborted."
+  :type 'hook
+  :group 'macher-agent)
+
+(defcustom macher-agent-permission-request-hook nil
+  "Hook run after `macher-agent-pre-tool-use-hook' but before the main body.
+Each function in this hook is called with the tool name (as a
+symbol) and the evaluated arguments (as a plist).
+This hook is permissive by default; if the hook is empty, the
+execution proceeds.  If any function in this hook returns nil or
+signals an error, the execution is immediately aborted."
+  :type 'hook
+  :group 'macher-agent)
+
+(defcustom macher-agent-post-tool-use-hook nil
+  "Hook run immediately after the tool's body completes successfully.
+Each function in this hook is called with the tool name (as a
+symbol), the evaluated arguments (as a plist), and the
+resulting output of the tool."
+  :type 'hook
+  :group 'macher-agent)
+
+(defcustom macher-agent-post-tool-use-failure-hook nil
+  "Hook run if the tool's body throws an Emacs Lisp error.
+Each function in this hook is called with the tool name (as a
+symbol), the evaluated arguments (as a plist), and the error
+signal data."
+  :type 'hook
+  :group 'macher-agent)
+
 (defun macher-agent--resolve-context (passed-context)
   "Resolve the current agent context."
   (or passed-context
@@ -147,28 +182,48 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
                                                             (succ-eval ,success-fn)
                                                             (filter-eval ,output-filter-fn)
                                                             (wrap-cb (macher-agent--wrap-callback callback)))
-                                                       (condition-case err
-                                                           (let* ((action (let* ((arity (func-arity cmd-eval))
-                                                                                 (max-args (cdr arity)))
-                                                                            (if (or (eq max-args 'many) (>= max-args 3))
-                                                                                (funcall cmd-eval payload context root)
-                                                                              (funcall cmd-eval payload))))
-                                                                  
-                                                                  (on-success 
+                                                       (let ((abort-val
+                                                              (catch 'tool-abort
+                                                                (condition-case err
+                                                                    (unless (run-hook-with-args-until-failure 'macher-agent-pre-tool-use-hook ',name-symbol payload)
+                                                                      (throw 'tool-abort (list :error "Execution blocked by macher-agent-pre-tool-use-hook")))
+                                                                  (error
+                                                                   (throw 'tool-abort (list :error (format "Execution blocked by error in macher-agent-pre-tool-use-hook: %s" (error-message-string err))))))
+                                                                (condition-case err
+                                                                    (unless (run-hook-with-args-until-failure 'macher-agent-permission-request-hook ',name-symbol payload)
+                                                                      (throw 'tool-abort (list :error "Permission denied by macher-agent-permission-request-hook")))
+                                                                  (error
+                                                                   (throw 'tool-abort (list :error (format "Permission denied by error in macher-agent-permission-request-hook: %s" (error-message-string err))))))
+                                                                nil)))
+                                                         (if abort-val
+                                                             (funcall wrap-cb (list :status 'error :error (plist-get abort-val :error)))
+                                                           (let* ((on-success 
                                                                    (lambda (response-obj)
-                                                                     (let* ((raw-payload (if (macher-agent-tool-response-p response-obj)
-                                                                                             (macher-agent-tool-response-payload response-obj)
-                                                                                           response-obj))
-                                                                            (success-data (if succ-eval (funcall succ-eval raw-payload) raw-payload))
-                                                                            (final-data (if filter-eval (funcall filter-eval success-data) success-data)))
-                                                                       (funcall wrap-cb (list :status 'success :data final-data))))))
-                                                             
-                                                             (unless (macher-agent-tool-response-p action)
-                                                               (error "Tool contract violation: command must return a macher-agent-tool-response struct"))
-                                                             
-                                                             (macher-agent-execute-response action context on-success wrap-cb))
-                                                         (error
-                                                          (funcall wrap-cb (list :status 'error :error (error-message-string err))))))))))))))
+                                                                     (condition-case err
+                                                                         (let* ((raw-payload (if (macher-agent-tool-response-p response-obj)
+                                                                                                 (macher-agent-tool-response-payload response-obj)
+                                                                                               response-obj))
+                                                                                (success-data (if succ-eval (funcall succ-eval raw-payload) raw-payload))
+                                                                                (final-data (if filter-eval (funcall filter-eval success-data) success-data)))
+                                                                           (run-hook-with-args 'macher-agent-post-tool-use-hook ',name-symbol payload final-data)
+                                                                           (funcall wrap-cb (list :status 'success :data final-data)))
+                                                                       (error
+                                                                        (run-hook-with-args 'macher-agent-post-tool-use-failure-hook ',name-symbol payload err)
+                                                                        (funcall wrap-cb (list :status 'error :error (error-message-string err))))))))
+                                                             (condition-case err
+                                                                 (let* ((action (let* ((arity (func-arity cmd-eval))
+                                                                                       (max-args (cdr arity)))
+                                                                                  (if (or (eq max-args 'many) (>= max-args 3))
+                                                                                      (funcall cmd-eval payload context root)
+                                                                                    (funcall cmd-eval payload)))))
+                                                                   
+                                                                   (unless (macher-agent-tool-response-p action)
+                                                                     (error "Tool contract violation: command must return a macher-agent-tool-response struct"))
+                                                                   
+                                                                   (macher-agent-execute-response action context on-success wrap-cb))
+                                                               (error
+                                                                (run-hook-with-args 'macher-agent-post-tool-use-failure-hook ',name-symbol payload err)
+                                                                (funcall wrap-cb (list :status 'error :error (error-message-string err)))))))))))))))))
 
 (cl-defmethod macher-agent-execute-response ((res macher-agent-process-response) context on-success on-error)
   (let ((payload (macher-agent-tool-response-payload res)))

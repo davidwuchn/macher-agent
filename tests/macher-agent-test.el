@@ -596,6 +596,88 @@
                                          (arity (func-arity tool-fn)))
                                     (expect (car arity) :to-equal 0)
                                     (expect (cdr arity) :to-equal 'many))))
+
+                    (describe "Tool Lifecycle Hooks"
+                              (before-each
+                               (setq macher-agent-pre-tool-use-hook nil)
+                               (setq macher-agent-permission-request-hook nil)
+                               (setq macher-agent-post-tool-use-hook nil)
+                               (setq macher-agent-post-tool-use-failure-hook nil))
+
+                              (it "runs pre-tool-use-hook and aborts if it returns nil"
+                                  (let ((pre-called nil)
+                                        (callback-result nil))
+                                    (add-hook 'macher-agent-pre-tool-use-hook
+                                              (lambda (name args)
+                                                (setq pre-called (list name args))
+                                                nil))
+                                    (funcall (gptel-tool-function mock-sync-contract-tool)
+                                             "hello"
+                                             (lambda (res) (setq callback-result res)))
+                                    (expect pre-called :to-equal (list 'mock-sync-contract-tool '(:arg1 "hello")))
+                                    (expect callback-result :to-match "Execution blocked by macher-agent-pre-tool-use-hook")))
+
+                              (it "runs pre-tool-use-hook and aborts if it signals an error"
+                                  (let ((callback-result nil))
+                                    (add-hook 'macher-agent-pre-tool-use-hook
+                                              (lambda (_name _args)
+                                                (error "Custom pre error")))
+                                    (funcall (gptel-tool-function mock-sync-contract-tool)
+                                             "hello"
+                                             (lambda (res) (setq callback-result res)))
+                                    (expect callback-result :to-match "Execution blocked by error in macher-agent-pre-tool-use-hook: Custom pre error")))
+
+                              (it "runs permission-request-hook and succeeds by default if empty"
+                                  (let ((callback-result nil))
+                                    (funcall (gptel-tool-function mock-sync-contract-tool)
+                                             "hello"
+                                             (lambda (res) (setq callback-result res)))
+                                    (expect callback-result :to-match "Sync hello")))
+
+                              (it "runs permission-request-hook and aborts if it returns nil"
+                                  (let ((perm-called nil)
+                                        (callback-result nil))
+                                    (add-hook 'macher-agent-permission-request-hook
+                                              (lambda (name args)
+                                                (setq perm-called (list name args))
+                                                nil))
+                                    (funcall (gptel-tool-function mock-sync-contract-tool)
+                                             "hello"
+                                             (lambda (res) (setq callback-result res)))
+                                    (expect perm-called :to-equal (list 'mock-sync-contract-tool '(:arg1 "hello")))
+                                    (expect callback-result :to-match "Permission denied by macher-agent-permission-request-hook")))
+
+                              (it "runs post-tool-use-hook upon successful execution"
+                                  (let ((post-called nil)
+                                        (callback-result nil))
+                                    (add-hook 'macher-agent-post-tool-use-hook
+                                              (lambda (name args result)
+                                                (setq post-called (list name args result))))
+                                    (funcall (gptel-tool-function mock-sync-contract-tool)
+                                             "world"
+                                             (lambda (res) (setq callback-result res)))
+                                    (expect callback-result :to-match "Sync world")
+                                    (expect post-called :to-equal (list 'mock-sync-contract-tool '(:arg1 "world") "Sync world"))))
+
+                              (it "runs post-tool-use-failure-hook if the tool body throws an error"
+                                  (macher-agent-make-tool mock-error-tool
+                                      "Mock error tool"
+                                    :category "test"
+                                    :args (list (list :name "arg1" :type 'string))
+                                    :command-fn (lambda (_payload)
+                                                  (error "Failing intentionally")))
+                                  (let ((failure-called nil)
+                                        (callback-result nil))
+                                    (add-hook 'macher-agent-post-tool-use-failure-hook
+                                              (lambda (name args err)
+                                                (setq failure-called (list name args err))))
+                                    (funcall (gptel-tool-function mock-error-tool)
+                                             "fail"
+                                             (lambda (res) (setq callback-result res)))
+                                    (expect callback-result :to-match "Failing intentionally")
+                                    (expect (car failure-called) :to-be 'mock-error-tool)
+                                    (expect (cadr failure-called) :to-equal '(:arg1 "fail"))
+                                    (expect (error-message-string (caddr failure-called)) :to-equal "Failing intentionally"))))
                     
                     (describe "Agent Skills (macher-agent-skills.el)"
                               (before-each
