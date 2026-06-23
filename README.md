@@ -2,7 +2,7 @@
 
 An Emacs-native LLM agent harness with isolated sandboxing, asynchronous sub-agent orchestration, and a strict 3-tier virtual file system.
 
-https://github.com/user-attachments/assets/7f591217-ec81-4b5b-9e5b-1060979570dd
+https://github.com/user-attachments/assets/35908782-ee2b-4243-8b93-ad8381cfee5c
 
 ## Table of Contents
 1. [Core Concepts and Architecture](#core-concepts-and-architecture)
