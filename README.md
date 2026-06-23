@@ -12,9 +12,9 @@ https://github.com/user-attachments/assets/35908782-ee2b-4243-8b93-ad8381cfee5c
 
 ## Changes in gptel/macher when enabled
 
-### gptel: No longer able to change global state (to avoid race conditions). Prompt level presets are composed.
+gptel: No longer able to change global state (to avoid race conditions). Prompt level presets are composed.
 
-### macher: execute tools against VFS. VFS persists until cleared or applied.
+macher: execute tools against VFS. VFS persists until cleared or applied.
 
 ## Table of Contents
 1. [Core Concepts and Architecture](#core-concepts-and-architecture)
