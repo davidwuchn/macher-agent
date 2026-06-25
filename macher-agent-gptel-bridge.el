@@ -46,7 +46,7 @@ applying the resulting transmission state ephemerally before network dispatch."
           (replace-match "")))
 
       (unless matched-skills
-        (let ((active-sys (with-current-buffer orig-buf gptel--system-message))
+        (let ((active-sys (with-current-buffer orig-buf gptel-system-prompt))
               (directives (with-current-buffer orig-buf gptel-directives)))
           (when-let* ((sym (cl-loop for (s . sys) in directives
                                     when (equal sys active-sys) return s)))
@@ -55,7 +55,7 @@ applying the resulting transmission state ephemerally before network dispatch."
       (let* ((base-state
               (with-current-buffer orig-buf
                 (list :model gptel-model
-                      :system gptel--system-message
+                      :system gptel-system-prompt
                       :temperature (bound-and-true-p gptel-temperature)
                       :max-tokens (bound-and-true-p gptel-max-tokens)
                       :tools gptel-tools
@@ -65,12 +65,12 @@ applying the resulting transmission state ephemerally before network dispatch."
                         (macher-agent-compose-payload base-state (append presets (nreverse matched-skills))))))
 
         (when payload
-          (setq-local gptel--system-message (plist-get payload :system))
+          (setq-local gptel-system-prompt (plist-get payload :system))
           (setq-local gptel-model (plist-get payload :model))
           (setq-local gptel-temperature (plist-get payload :temperature))
           (setq-local gptel-max-tokens (plist-get payload :max-tokens))
           (setq-local gptel-tools (plist-get payload :tools)))
-          
+        
         (when info
           (plist-put (gptel-fsm-info fsm) :tools 
                      (mapcar #'macher-agent-canonical-tool-name gptel-tools)))))
@@ -98,7 +98,7 @@ applying the resulting transmission state ephemerally before network dispatch."
          (ctx (ignore-errors (macher-agent-resolve-context))))
     
     (with-current-buffer target-buffer
-      (setq-local gptel--system-message sys-msg)
+      (setq-local gptel-system-prompt sys-msg)
       
       (let ((response-hook nil))
         (setq response-hook
@@ -179,9 +179,13 @@ applying the resulting transmission state ephemerally before network dispatch."
 (defvar macher-agent--allow-gptel-restore nil
   "Dynamic variable controlling whether `gptel--restore-state' is allowed to execute.")
 
+(defvar-local macher-agent--is-restored-session nil
+  "Flag indicating whether the buffer is currently being restored from a saved state.")
+
 (defun macher-agent--gptel-restore-advice (orig-fun &rest args)
-  "Bypass `gptel--restore-state' unless explicitly allowed."
+  "Bypass `gptel--restore-state' unless explicitly allowed, tagging the buffer."
   (when macher-agent--allow-gptel-restore
+    (setq-local macher-agent--is-restored-session t)
     (let ((current-root (macher-agent-root nil)))
       (when (and current-root (fboundp 'macher-agent--init-workspace-state))
         (macher-agent--init-workspace-state current-root)))
@@ -250,6 +254,10 @@ ignoring buffer-local variables to avoid race conditions."
   (let* ((macher-agent--allow-lazy-init nil)
          (ctx (ignore-errors (macher-agent-resolve-context))))
     (when ctx
+      (when (bound-and-true-p macher-agent--is-restored-session)
+        ;; Replace defaults: prevent the prompt transformer from composing inherited presets.
+        (setq-local macher-agent-presets nil)
+        (setq-local macher-agent--is-restored-session nil))
       (add-hook 'gptel-prompt-transform-functions #'macher-agent-sync-prompt-transformer nil t)
       (add-hook 'gptel-pre-tool-call-functions #'macher-agent--enforce-tool-scope nil t))))
 
