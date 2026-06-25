@@ -8,7 +8,6 @@
 (declare-function macher-agent-gptel-transmit "macher-agent-gptel-bridge" (task-context callbacks))
 (declare-function macher-agent-sync-prompt-transformer "macher-agent-gptel-bridge" (async-fn fsm))
 (declare-function macher-agent-post-response-reaper "macher-agent-gptel-bridge" (beg end))
-(declare-function macher-agent--set-system-message "macher-agent-gptel-tools" (msg))
 (declare-function macher-agent-resolve-context "macher-agent-vfs-client")
 (declare-function macher-agent--inject-context-state "macher-agent-vfs-client" (context &optional directives))
 (declare-function macher-agent--init-workspace-state "macher-agent-vfs-client")
@@ -118,21 +117,17 @@ Returns a property list containing the unified state."
                (let ((parent-spec (alist-get parent known-presets)))
                  (when parent-spec (apply-spec parent parent-spec)))))
 
-           ;; Implement the exclusive override.
            (when (plist-get spec :exclusive)
              (setq accumulated-base-sys nil
                    composed-system nil
-                   composed-tools nil
-                   final-model nil
-                   final-temp nil
-                   final-tokens nil))
+                   composed-tools nil))
 
            (when-let ((sys-spec (or (plist-get spec :system) (plist-get spec :system-message))))
              (if (and (consp sys-spec) (keywordp (car sys-spec)))
                  (setq accumulated-base-sys (gptel--modify-value accumulated-base-sys sys-spec))
                (push (format "### Skill: %s\n%s\n" sym sys-spec) composed-system)))
 
-           (when-let ((tools-spec (plist-get spec :tools)))
+           (when-let ((tools-spec (or (plist-get spec :tools) (plist-get spec :allowed-tools))))
              (let ((resolved (gptel--modify-value composed-tools tools-spec)))
                (setq composed-tools 
                      (cl-loop for t-obj in (if (listp resolved) resolved (list resolved))
@@ -164,13 +159,13 @@ Returns a property list containing the unified state."
             :tools final-tools))))
 
 (defun macher-agent--apply-payload-locally (payload)
-  "Apply the composed PAYLOAD strictly to the current buffer.
-Used during initialisation seeding to establish base state."
-  (setq-local gptel-system-prompt (plist-get payload :system))
-  (setq-local gptel-model (plist-get payload :model))
-  (setq-local gptel-temperature (plist-get payload :temperature))
-  (setq-local gptel-max-tokens (plist-get payload :max-tokens))
-  (setq-local gptel-tools (plist-get payload :tools)))
+  "Apply a composed payload to the current buffer variables."
+  (when payload
+    (when (plist-member payload :system) (setq-local gptel-system-prompt (plist-get payload :system)))
+    (when (plist-member payload :model) (setq-local gptel-model (plist-get payload :model)))
+    (when (plist-member payload :temperature) (setq-local gptel-temperature (plist-get payload :temperature)))
+    (when (plist-member payload :max-tokens) (setq-local gptel-max-tokens (plist-get payload :max-tokens)))
+    (when (plist-member payload :tools) (setq-local gptel-tools (plist-get payload :tools)))))
 
 (defun macher-agent--apply-preset (preset-or-presets)
   "Polymorphic wrapper to safely route legacy calls into the modern compositor."
@@ -178,7 +173,7 @@ Used during initialisation seeding to establish base state."
                         ((vectorp preset-or-presets) (append preset-or-presets nil))
                         (t (list preset-or-presets))))
          (base-state (list :model gptel-model
-                           :system gptel-system-prompt
+                           :system (bound-and-true-p gptel-system-prompt)
                            :temperature (bound-and-true-p gptel-temperature)
                            :max-tokens (bound-and-true-p gptel-max-tokens)
                            :tools gptel-tools
@@ -307,7 +302,7 @@ Used during initialisation seeding to establish base state."
     (when presets
       (let* ((preset-list (if (listp presets) presets (list presets)))
              (base-state (list :model gptel-model
-                               :system gptel-system-prompt
+                               :system nil
                                :temperature (bound-and-true-p gptel-temperature)
                                :max-tokens (bound-and-true-p gptel-max-tokens)
                                :tools gptel-tools
@@ -351,7 +346,7 @@ Used during initialisation seeding to establish base state."
     (when presets
       (let* ((preset-list (if (listp presets) presets (list presets)))
              (base-state (list :model gptel-model
-                               :system gptel-system-prompt
+                               :system nil
                                :temperature (bound-and-true-p gptel-temperature)
                                :max-tokens (bound-and-true-p gptel-max-tokens)
                                :tools gptel-tools

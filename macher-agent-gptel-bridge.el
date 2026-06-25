@@ -13,6 +13,8 @@
 (declare-function macher-agent-initialize-skills "macher-agent-api")
 (declare-function macher-agent-canonical-tool-name "macher-agent-api")
 
+(defvar gptel-system-prompt)
+
 (defun macher-agent-sync-prompt-transformer (async-fn fsm)
   "Synchronise the virtual file system, normalise the active tools list,
 and compose skill profiles securely.
@@ -23,8 +25,9 @@ It parses and strips inline skill tags locally, preventing destructive
 side effects to the user's source buffer. It then invokes the pure
 composition engine to merge the base state with the inline presets,
 applying the resulting transmission state ephemerally before network dispatch."
-  (let* ((info (when fsm (gptel-fsm-info fsm)))
-         (orig-buf (or (when info (plist-get info :buffer)) (current-buffer)))
+  (let* ((temp-buf (current-buffer))
+         (info (when fsm (gptel-fsm-info fsm)))
+         (orig-buf (or (when info (plist-get info :buffer)) temp-buf))
          (macher-agent--allow-lazy-init t)
          (ctx (macher-agent-resolve-context fsm)))
 
@@ -40,11 +43,16 @@ applying the resulting transmission state ephemerally before network dispatch."
 
     (let ((matched-skills nil))
       (save-excursion
-        (goto-char (point-min))
-        (while (re-search-forward "@\\([[:alnum:]_-]+\\)\\b\\s-*" nil t)
-          (push (intern (match-string-no-properties 1)) matched-skills)
-          (replace-match "")))
-
+        (goto-char (or (previous-single-property-change (point-max) 'gptel) (point-min)))
+        (while (re-search-forward "@\\([[:alnum:]_-]+\\)" nil t)
+          (when (or (= (match-beginning 0) (point-min))
+                    (memq (char-before (match-beginning 0)) '(?\s ?\t ?\n ?\r ?>)))
+            
+            (push (intern (match-string-no-properties 1)) matched-skills)
+            (replace-match "")
+            (when (looking-at "[ \t]+")
+              (replace-match "")))))
+      
       (unless matched-skills
         (let ((active-sys (with-current-buffer orig-buf gptel-system-prompt))
               (directives (with-current-buffer orig-buf gptel-directives)))
@@ -60,24 +68,27 @@ applying the resulting transmission state ephemerally before network dispatch."
                       :max-tokens (bound-and-true-p gptel-max-tokens)
                       :tools gptel-tools
                       :known-presets (bound-and-true-p gptel--known-presets))))
-             (presets (with-current-buffer orig-buf (bound-and-true-p macher-agent-presets)))
              (payload (when (fboundp 'macher-agent-compose-payload)
-                        (macher-agent-compose-payload base-state (append presets (nreverse matched-skills))))))
+                        (macher-agent-compose-payload base-state (nreverse matched-skills)))))
 
         (when payload
-          (setq-local gptel-system-prompt (plist-get payload :system))
-          (setq-local gptel-model (plist-get payload :model))
-          (setq-local gptel-temperature (plist-get payload :temperature))
-          (setq-local gptel-max-tokens (plist-get payload :max-tokens))
-          (setq-local gptel-tools (plist-get payload :tools)))
+          (when (plist-member payload :system) (setq-local gptel-system-prompt (plist-get payload :system)))
+          (when (plist-member payload :model) (setq-local gptel-model (plist-get payload :model)))
+          (when (plist-member payload :temperature) (setq-local gptel-temperature (plist-get payload :temperature)))
+          (when (plist-member payload :max-tokens) (setq-local gptel-max-tokens (plist-get payload :max-tokens)))
+          (when (plist-member payload :tools) (setq-local gptel-tools (plist-get payload :tools))))
         
-        (when info
-          (plist-put (gptel-fsm-info fsm) :tools 
-                     (mapcar #'macher-agent-canonical-tool-name gptel-tools)))))
-
+        (when (and payload fsm)
+          (let ((new-info (copy-sequence (gptel-fsm-info fsm))))
+            (when (plist-member payload :system) (setq new-info (plist-put new-info :system (plist-get payload :system))))
+            (when (plist-member payload :model) (setq new-info (plist-put new-info :model (plist-get payload :model))))
+            (when (plist-member payload :temperature) (setq new-info (plist-put new-info :temperature (plist-get payload :temperature))))
+            (when (plist-member payload :max-tokens) (setq new-info (plist-put new-info :max-tokens (plist-get payload :max-tokens))))
+            (when (plist-member payload :tools) (setq new-info (plist-put new-info :tools (plist-get payload :tools))))
+            (setf (gptel-fsm-info fsm) new-info)))))
+    
     (when (and async-fn (functionp async-fn))
       (funcall async-fn))))
-
 
 (defun macher-agent-post-response-reaper (_beg _end)
   "Reap the sub-agent buffer if flagged for disposal."
@@ -90,33 +101,20 @@ applying the resulting transmission state ephemerally before network dispatch."
                              (macher-agent--reap-buffer buf)))))))
 
 (defun macher-agent-gptel-transmit (task-context callbacks)
-  "Facade to transmit network request, attaching async-safe local hooks."
+  "Facade to transmit network request using the programmatic API."
   (let* ((target-buffer (macher-agent-task-context-target-buffer task-context))
          (sys-msg (macher-agent-task-context-system-message task-context))
          (success-cb (plist-get callbacks :on-success))
-         (error-cb (plist-get callbacks :on-error))
-         (ctx (ignore-errors (macher-agent-resolve-context))))
+         (error-cb (plist-get callbacks :on-error)))
     
-    (with-current-buffer target-buffer
-      (setq-local gptel-system-prompt sys-msg)
-      
-      (let ((response-hook nil))
-        (setq response-hook
-              (lambda (_beg _end)
-                (let ((res (string-trim (buffer-substring-no-properties (point-min) (point-max)))))
-                  
-                  (if (and (macher-agent-subagent-p)
-                           (not (string-empty-p res)))
-                      (message "DEBUG BRIDGE: Stream ended for sub-agent. Deferring to tool execution...")
-                    
-                    (if (not (string-empty-p res))
-                        (when success-cb (funcall success-cb res))
-                      (when error-cb (funcall error-cb "Buffer stopped silently or returned empty.")))
-                    
-                    (remove-hook 'gptel-post-response-functions response-hook t)))))
-        (add-hook 'gptel-post-response-functions response-hook nil t))
-
-      (gptel-send))))
+    (gptel-request nil
+      :buffer target-buffer
+      :system sys-msg
+      :stream nil
+      :callback (lambda (response info)
+                  (if response
+                      (when success-cb (funcall success-cb response))
+                    (when error-cb (funcall error-cb (plist-get info :status))))))))
 
 (defun macher-agent--setup-tools-advice (orig-fn &rest args)
   "Sync the VFS and inject the sandbox session before tools are executed."
@@ -255,7 +253,6 @@ ignoring buffer-local variables to avoid race conditions."
          (ctx (ignore-errors (macher-agent-resolve-context))))
     (when ctx
       (when (bound-and-true-p macher-agent--is-restored-session)
-        ;; Replace defaults: prevent the prompt transformer from composing inherited presets.
         (setq-local macher-agent-presets nil)
         (setq-local macher-agent--is-restored-session nil))
       (add-hook 'gptel-prompt-transform-functions #'macher-agent-sync-prompt-transformer nil t)
