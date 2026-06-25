@@ -152,7 +152,7 @@ Handles gptel structs, symbols, plists, and raw strings."
       (org-macro-initialize-templates)
       (org-macro-replace-all org-macro-templates)
       (goto-char (point-min))
-      (let ((name nil) (desc nil) (tools nil) (body nil) (has-tools nil) (model nil))
+      (let ((name nil) (desc nil) (tools nil) (body nil) (has-tools nil) (model nil) (exclusive nil))
         (when (re-search-forward "^---\n" nil t)
           (let ((start (point)))
             (when (re-search-forward "^---\n" nil t)
@@ -163,6 +163,8 @@ Handles gptel structs, symbols, plists, and raw strings."
                   (setq desc (match-string 1 frontmatter)))
                 (when (string-match "^model:[ \t]*\"?\\([^\n\"]+\\)\"?" frontmatter)
                   (setq model (match-string 1 frontmatter)))
+                (when (string-match "^exclusive:[ \t]*\\(true\\|yes\\|1\\)" frontmatter)
+                  (setq exclusive t))
                 (when (string-match "^allowed-tools:" frontmatter)
                   (setq has-tools t)
                   (setq tools (macher-agent--parse-yaml-array frontmatter "allowed-tools")))))))
@@ -173,6 +175,7 @@ Handles gptel structs, symbols, plists, and raw strings."
               :model model
               :has-tools has-tools
               :allowed-tools tools
+              :exclusive exclusive
               :body body)))))
 
 (defun macher-agent--secure-ast-p (form)
@@ -387,6 +390,7 @@ If VALIDATION-CB is provided, it is called on each form; if it returns nil, an e
              (desc (plist-get parsed :description))
              (model (plist-get parsed :model))
              (tool-names (plist-get parsed :allowed-tools))
+             (exclusive (plist-get parsed :exclusive))
              (workspace (when context (macher-agent--get-context-workspace context)))
              (skill-base-dir (file-name-directory skill-file)))
         
@@ -399,7 +403,7 @@ If VALIDATION-CB is provided, it is called on each form; if it returns nil, an e
                                                        (macher-agent-resolve-tool tname context skill-base-dir))
                                                      tool-names)))))
             (setf (alist-get sym alist)
-                  (list :system body :description desc :model (when model (intern model)) :tools resolved-tools))
+                  (list :system body :description desc :model (when model (intern model)) :tools resolved-tools :exclusive exclusive))
             (if workspace
                 (setf (macher-agent-workspace-skills-alist workspace) alist)
               (setq macher-agent-global-skills-alist alist))))))))
@@ -470,14 +474,17 @@ If VALIDATION-CB is provided, it is called on each form; if it returns nil, an e
                for desc = (plist-get meta :description)
                for model = (plist-get meta :model)
                for tools = (plist-get meta :tools)
+               for exclusive = (plist-get meta :exclusive)
                for tool-names = (mapcar #'macher-agent-canonical-tool-name tools)
                do (when system-prompt
                     (setf (alist-get sym gptel-directives) system-prompt)
                     (let ((preset-spec (list :description (or desc (format "Agent Profile: %s" sym))
                                              :system system-prompt)))
+                      (when exclusive (setq preset-spec (plist-put preset-spec :exclusive t)))
                       (when model (setq preset-spec (plist-put preset-spec :model model)))
                       (when tool-names 
-                        (setq preset-spec (plist-put preset-spec :tools `(:append ,tool-names))))
+                        (setq preset-spec (plist-put preset-spec :tools 
+                                                     (if exclusive tool-names `(:append ,tool-names)))))
                       (setf (alist-get sym gptel--known-presets) preset-spec))))))
   
   (when (fboundp 'gptel--setup-directive-menu)
@@ -516,7 +523,9 @@ If VALIDATION-CB is provided, it is called on each form; if it returns nil, an e
     (if (and resolved (macher-tool-valid-p resolved))
         (list resolved)
       (let ((native (macher-agent--find-native-tool item)))
-        (when native (list native))))))
+        (if native
+            (list native)
+          (and resolved (list resolved)))))))
 
 (cl-defgeneric macher-agent-resolve-item (item)
   "Resolve an ITEM of any type into a list of gptel-tool structs."
@@ -597,7 +606,7 @@ or native fallback, filters out nil, and deduplicates by name using a hash table
 
   (setq-local gptel--set-buffer-locally t)
   
-  (setq-local gptel-tools (macher-agent-normalize-tools (append (default-value 'gptel-tools) gptel-tools)))
+  (setq-local gptel-tools nil)
 
   (unless (macher-agent-subagent-p)
     (when default-directory
