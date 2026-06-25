@@ -481,7 +481,7 @@ If VALIDATION-CB is provided, it is called on each form; if it returns nil, an e
                       (setf (alist-get sym gptel--known-presets) preset-spec))))))
   
   (when (fboundp 'gptel--setup-directive-menu)
-    (gptel--setup-directive-menu 'gptel--system-message "Agent Profile")))
+    (gptel--setup-directive-menu 'gptel-system-prompt "Agent Profile")))
 
 (defun macher-agent--find-native-tool (tool-name)
   "Find a gptel-tool registered natively via `gptel-make-tool`."
@@ -589,7 +589,7 @@ or native fallback, filters out nil, and deduplicates by name using a hash table
   (make-local-variable 'gptel-tools)
   (make-local-variable 'gptel-model)
   (make-local-variable 'gptel-backend)
-  (make-local-variable 'gptel--system-message)
+  (make-local-variable 'gptel-system-prompt)
   (make-local-variable 'gptel-temperature)
   (make-local-variable 'gptel-max-tokens)
   (make-local-variable 'gptel--tool-names)
@@ -619,7 +619,7 @@ or native fallback, filters out nil, and deduplicates by name using a hash table
          (content (buffer-string))
          (active-backend gptel-backend)
          (active-model gptel-model)
-         (active-sys gptel--system-message)
+         (active-sys gptel-system-prompt)
          (active-skill (bound-and-true-p macher-agent--active-skill-sym)))
     
     (with-current-buffer (generate-new-buffer new-name)
@@ -631,7 +631,7 @@ or native fallback, filters out nil, and deduplicates by name using a hash table
       
       (when active-backend (setq-local gptel-backend active-backend))
       (when active-model (setq-local gptel-model active-model))
-      (when active-sys (setq-local gptel--system-message active-sys))
+      (when active-sys (setq-local gptel-system-prompt active-sys))
       (when active-skill (setq-local macher-agent--active-skill-sym active-skill))
       
       (switch-to-buffer (current-buffer)))))

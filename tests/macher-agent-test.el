@@ -446,7 +446,27 @@
                                       (expect (length filtered-tools) :to-equal 1)
                                       (expect (gptel-tool-name (car filtered-tools)) :to-equal "my_custom_tool")))))
                     (describe "Virtual File System (VFS) Sandbox Isolation"
-                              
+
+                              (describe "deletions and moves"
+                                        (it "preserves explicit nil values to correctly register deletions"
+                                            (let* ((entry (cons "test.txt" nil))
+                                                   (hydrated (macher-agent--hydrate-vfs-entry entry "/mock/root")))
+                                              (expect (macher-agent-vfs-entry-curr hydrated) :to-be nil)))
+
+                                        (it "physically removes a file from sandbox during process-entries if new-content is nil"
+                                            (let* ((entries '("test.txt"))
+                                                   (sandbox-dir (make-temp-file "macher-test-sandbox-" t))
+                                                   (target-file (expand-file-name "test.txt" sandbox-dir)))
+                                              (with-temp-file target-file (insert "existing"))
+                                              (expect (file-exists-p target-file) :to-be t)
+                                              (macher-agent--vfs-process-entries
+                                               entries
+                                               sandbox-dir
+                                               (lambda (e) e)
+                                               (lambda (_) nil))
+                                              (expect (file-exists-p target-file) :to-be nil)
+                                              (delete-directory sandbox-dir t))))
+
                               (describe "macher-agent--vfs-apply-overlay"
                                         
                                         (it "reroutes virtual edits to the ephemeral sandbox, protecting the physical disk"
@@ -566,7 +586,35 @@
                                       (setq-local macher-agent--persistent-context 'some-data)
                                       (macher-agent-clear-context)
                                       (expect macher-agent--persistent-context :to-be nil))
-                                    (kill-buffer buf))))
+                                    (kill-buffer buf)))
+
+                              (it "clears active presets during setup if the restored session tag is present"
+                                  (let ((buf (generate-new-buffer "restored-session-buf"))
+                                        (ctx (macher--make-context :workspace (make-macher-agent-workspace :project-root "/tmp/") :contents nil)))
+                                    (with-current-buffer buf
+                                      (setq-local macher-agent--is-workspace t)
+                                      (setq-local macher-agent--persistent-context ctx)
+                                      (setq-local macher-agent-presets '(some-preset))
+                                      (setq-local macher-agent--is-restored-session t)
+                                      (macher-agent-setup-gptel-buffer)
+                                      (expect macher-agent-presets :to-be nil)
+                                      (expect macher-agent--is-restored-session :to-be nil))
+                                    (kill-buffer buf)))
+
+                              (it "handles exclusive override flag by resetting accumulated base and preceding state"
+                                  (let ((base-state '(:model gpt-3.5-turbo
+                                                             :system "Base system message"
+                                                             :temperature 0.7
+                                                             :max-tokens 100
+                                                             :tools ("tool1")
+                                                             :known-presets ((preset-a . (:system "Preset A prompt" :temperature 0.5 :tools ("toolA")))
+                                                                             (preset-b . (:system "Preset B prompt" :exclusive t :temperature 0.2 :tools ("toolB"))))))
+                                        (presets '(preset-a preset-b)))
+                                    (let ((payload (macher-agent-compose-payload base-state presets)))
+                                      ;; Since preset-b has exclusive t, it resets preset-a and base-state!
+                                      (expect (plist-get payload :system) :to-equal "### Skill: preset-b\nPreset B prompt\n")
+                                      (expect (plist-get payload :temperature) :to-equal 0.2)
+                                      (expect (plist-get payload :tools) :to-equal '("toolB"))))))
 
                     (describe "Tool Signatures (Macro Contracts)"
                               (before-all

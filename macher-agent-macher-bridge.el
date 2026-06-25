@@ -109,7 +109,10 @@ This function strictly assumes a raw cons-cell representation and converts it."
                          ((file-exists-p full-path)
                           (macher-agent--read-content-from-disk-or-buffer full-path))
                          (t nil)))
-         (new-str (if (stringp new-raw) new-raw (or orig-str ""))))
+         ;; Fix: Safely preserve explicit nil values to correctly register deletions.
+         (new-str (if (consp (cdr e))
+                      (cdr (cdr e))
+                    (if (stringp (cdr e)) (cdr e) (or orig-str "")))))
     (make-macher-agent-vfs-entry :path path :orig orig-str :curr new-str)))
 
 (defun macher-agent--dehydrate-vfs-entry (entry)
