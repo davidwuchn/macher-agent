@@ -119,24 +119,45 @@ Handles gptel structs, symbols, plists, and raw strings."
       (macher--build-patch context fsm)
       (message "SUCCESS: Patch review screen(s) generated for pending edits."))))
 
-(defun macher-agent--parse-yaml-array (text key)
-  "Extract a YAML list for KEY from TEXT."
-  (let ((items nil))
-    (if (string-match (format "^%s:[ \t]*\\[\\(.*\\)\\]" key) text)
-        (let* ((inner (match-string 1 text))
-               (raw-items (split-string inner "[, \t\n\r\"]+" t)))
-          (setq items raw-items))
-      (let* ((lines (split-string text "\n"))
-             (in-list nil))
-        (dolist (line lines)
+(defun macher-agent--parse-frontmatter (text)
+  "Parse a YAML frontmatter TEXT block into a hash table."
+  (let ((ht (make-hash-table :test 'equal))
+        (lines (split-string text "\n"))
+        (current-list-key nil)
+        (current-list-val nil))
+    (dolist (line lines)
+      (cond
+       ((and current-list-key (string-match "^[ \t]*-[ \t]+\"?\\([^\"]+\\)\"?" line))
+        (push (string-trim (match-string 1 line)) current-list-val))
+
+       ((string-match "^\\([A-Za-z0-9_-]+\\):[ \t]*\\(.*\\)$" line)
+        (when current-list-key
+          (puthash current-list-key (nreverse current-list-val) ht)
+          (setq current-list-key nil
+                current-list-val nil))
+        
+        (let* ((key (match-string 1 line))
+               (raw-val (string-trim (match-string 2 line))))
           (cond
-           ((string-match (format "^%s:" key) line) (setq in-list t))
-           ((and in-list (string-match "^[ \t]*-[ \t]+\"?\\([^\"]+\\)\"?" line))
-            (push (match-string 1 line) items))
-           ((and in-list (string-match "^[A-Za-z0-9_-]+:" line))
-            (setq in-list nil))))
-        (setq items (nreverse items))))
-    items))
+           ((string-match "^\\[\\(.*\\)\\]$" raw-val)
+            (let* ((inner (match-string 1 raw-val))
+                   (items (split-string inner "[, \t\n\r\"]+" t)))
+              (puthash key items ht)))
+           
+           ((string-empty-p raw-val)
+            (setq current-list-key key
+                  current-list-val nil))
+           
+           (t
+            (let ((clean-val (replace-regexp-in-string "\\`['\"]\\|['\"]\\'" "" raw-val)))
+              (cond
+               ((member (downcase clean-val) '("true" "yes" "1")) (puthash key t ht))
+               ((member (downcase clean-val) '("false" "no" "0")) (puthash key nil ht))
+               (t (puthash key clean-val ht))))))))))
+    
+    (when current-list-key
+      (puthash current-list-key (nreverse current-list-val) ht))
+    ht))
 
 (defun macher-agent-parse-skill-file (filepath)
   "Parse a SKILL.md file at FILEPATH extracting frontmatter and body."
@@ -152,30 +173,28 @@ Handles gptel structs, symbols, plists, and raw strings."
       (org-macro-initialize-templates)
       (org-macro-replace-all org-macro-templates)
       (goto-char (point-min))
-      (let ((name nil) (desc nil) (tools nil) (body nil) (has-tools nil) (model nil) (exclusive nil))
-        (when (re-search-forward "^---\n" nil t)
-          (let ((start (point)))
-            (when (re-search-forward "^---\n" nil t)
-              (let ((frontmatter (buffer-substring-no-properties start (match-beginning 0))))
-                (when (string-match "^name:[ \t]*\"?\\([^\n\"]+\\)\"?" frontmatter)
-                  (setq name (match-string 1 frontmatter)))
-                (when (string-match "^description:[ \t]*\"?\\([^\n\"]+\\)\"?" frontmatter)
-                  (setq desc (match-string 1 frontmatter)))
-                (when (string-match "^model:[ \t]*\"?\\([^\n\"]+\\)\"?" frontmatter)
-                  (setq model (match-string 1 frontmatter)))
-                (when (string-match "^exclusive:[ \t]*\\(true\\|yes\\|1\\)" frontmatter)
-                  (setq exclusive t))
-                (when (string-match "^allowed-tools:" frontmatter)
-                  (setq has-tools t)
-                  (setq tools (macher-agent--parse-yaml-array frontmatter "allowed-tools")))))))
+      
+      (let ((fm-hash (make-hash-table :test 'equal))
+            body name has-tools)
+        
+        (when-let* (((re-search-forward "^---\n" nil t))
+                    (start (point))
+                    ((re-search-forward "^---\n" nil t))
+                    (frontmatter (buffer-substring-no-properties start (match-beginning 0))))
+          (setq fm-hash (macher-agent--parse-frontmatter frontmatter)))
+        
         (setq body (string-trim (buffer-substring-no-properties (point) (point-max))))
+        (setq name (gethash "name" fm-hash))
+        
+        (setq has-tools (not (eq (gethash "allowed-tools" fm-hash 'missing) 'missing)))
+        
         (list :name name
               :name-sym (when name (intern name))
-              :description desc
-              :model model
+              :description (gethash "description" fm-hash)
+              :model (gethash "model" fm-hash)
               :has-tools has-tools
-              :allowed-tools tools
-              :exclusive exclusive
+              :allowed-tools (gethash "allowed-tools" fm-hash)
+              :exclusive (gethash "exclusive" fm-hash)
               :body body)))))
 
 (defun macher-agent--secure-ast-p (form)

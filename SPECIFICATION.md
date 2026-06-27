@@ -98,7 +98,7 @@ When an agent flags its execution as complete via `macher-agent-submit-task-resu
 
 1. The buffer MUST be marked with `macher-agent--ready-to-reap`.
 2. A post-response hook (`macher-agent-post-response-reaper`) MUST execute on a `0` timer.
-3. The reaper MUST forcefully kill all active OS processes attached to the buffer.
+3. The reaper MUST abort any active gptel process associated with the buffer via `gptel-abort`.
 4. The reaper MUST delete the buffer without prompting the user.
 
 ---
@@ -177,10 +177,10 @@ The system MUST intercept `gptel`'s private networking and stream insertion func
 
 #### 6.2.2 Media and prompt injection (advice)
 
-* **Target:** `gptel--handle-wait`
+* **Target:** `gptel--fsm-transition`
 * **Interception:** `advice-add :around` (`#'macher-agent--inject-media-fsm-advice`)
-* **Inputs Received:** `(fsm &rest args)`
-* **Behaviour:** Before the network request fires, the advice MUST extract the session via `(plist-get (gptel-fsm-info fsm) :macher-agent-session)`. If `pending-media` is present in the session, the advice MUST invoke `gptel--inject-media` and `gptel--inject-prompt`, then set `pending-media` strictly to `nil`.
+* **Inputs Received:** `(machine &optional new-state &rest args)`
+* **Behaviour:** Before transitioning to the WAIT state, the advice MUST extract the session via `(plist-get (gptel-fsm-info machine) :macher-agent-session)`. If `pending-media` is present in the session, the advice MUST invoke `gptel--inject-media` and `gptel--inject-prompt`, then set `pending-media` strictly to `nil`.
 
 #### 6.2.3 Base64 VFS override (advice)
 
@@ -253,7 +253,7 @@ Because `macher` relies on Emacs physical buffers and `macher-agent` uses pure-m
 ### 7.1 The gptel bridge
 
 1. **Nil response protection**: `gptel--insert-response` MUST be advised to gracefully handle empty (`nil`) streaming chunks without throwing Emacs type-errors.
-2. **Media injection**: `gptel--handle-wait` MUST be advised. If the VFS session contains `pending-media` (for example, a tool read an image), the base64 encoded data MUST be injected directly into the LLM request FSM immediately before network transmission.
+2. **Media injection**: `gptel--fsm-transition` MUST be advised. If the VFS session contains `pending-media` (for example, a tool read an image), the base64 encoded data MUST be injected directly into the LLM request FSM immediately before transitioning to the WAIT state.
 3. **Base64 override**: The native `gptel--base64-encode` MUST be intercepted to check the VFS first. If the file exists in the agent's memory, it MUST encode the virtual string instead of reading the physical disk.
 
 ### 7.2 The macher bridge (patch generation)

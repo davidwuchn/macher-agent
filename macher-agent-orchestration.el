@@ -56,39 +56,16 @@
 
 (defun macher-agent--reap-buffer (buf)
   "A garbage collector that natively aborts hidden gptel networks."
-  (condition-case nil
-      (when (buffer-live-p buf)
-        (with-current-buffer buf
-          (when (and (macher-agent-subagent-p)
-                     (macher-agent-ready-to-reap-p))
-            
-            (set-buffer-modified-p nil)
-
-            (when (fboundp 'gptel-abort)
-              (ignore-errors (gptel-abort)))
-
-            (dolist (proc (process-list))
-              (let* ((p-buf (process-buffer proc))
-                     (target-buf nil))
-                
-                (when (and p-buf (buffer-live-p p-buf))
-                  (with-current-buffer p-buf
-                    (setq target-buf
-                          (or (when (bound-and-true-p gptel--info)
-                                (plist-get gptel--info :buffer))
-                              (when (and (boundp 'gptel--fsm) gptel--fsm (fboundp 'gptel-fsm-info))
-                                (plist-get (gptel-fsm-info gptel--fsm) :buffer))))))
-
-                (when (or (eq p-buf buf)
-                          (eq target-buf buf))
-                  (set-process-query-on-exit-flag proc nil)
-                  (set-process-sentinel proc nil)
-                  (delete-process proc))))
-
-            (let ((kill-buffer-query-functions nil)
-                  (kill-buffer-hook nil))
-              (kill-buffer buf)))))
-    ((error quit) nil)))
+  (when (buffer-live-p buf)
+    (with-current-buffer buf
+      (when (and (macher-agent-subagent-p)
+                 (macher-agent-ready-to-reap-p))
+        (set-buffer-modified-p nil)
+        (when (fboundp 'gptel-abort)
+          (gptel-abort buf))
+        (let ((kill-buffer-query-functions nil)
+              (kill-buffer-hook nil))
+          (kill-buffer buf))))))
 
 (defun macher-normalise-preset-name (preset)
   "Normalise a preset name, stripping @ symbols safely even if passed a list."
