@@ -101,20 +101,34 @@ applying the resulting transmission state ephemerally before network dispatch."
                              (macher-agent--reap-buffer buf)))))))
 
 (defun macher-agent-gptel-transmit (task-context callbacks)
-  "Facade to transmit network request using the programmatic API."
+  "Facade to transmit network request, restoring buffer-centric execution."
   (let* ((target-buffer (macher-agent-task-context-target-buffer task-context))
          (sys-msg (macher-agent-task-context-system-message task-context))
          (success-cb (plist-get callbacks :on-success))
          (error-cb (plist-get callbacks :on-error)))
     
-    (gptel-request nil
-      :buffer target-buffer
-      :system sys-msg
-      :stream nil
-      :callback (lambda (response info)
-                  (if response
-                      (when success-cb (funcall success-cb response))
-                    (when error-cb (funcall error-cb (plist-get info :status))))))))
+    (with-current-buffer target-buffer
+      (setq-local gptel-system-prompt sys-msg)
+      
+      (let ((response-hook nil))
+        (setq response-hook
+              (lambda (_beg _end)
+                (let ((res (string-trim (buffer-substring-no-properties (point-min) (point-max)))))
+                  
+                  (if (and (macher-agent-subagent-p)
+                           (not (string-empty-p res)))
+                      (message "DEBUG BRIDGE: Stream ended for sub-agent. Deferring to tool execution...")
+                    
+                    (if (not (string-empty-p res))
+                        (when success-cb (funcall success-cb res))
+                      (when error-cb (funcall error-cb "Buffer stopped silently or returned empty.")))
+                    
+                    (remove-hook 'gptel-post-response-functions response-hook t)))))
+        
+        (add-hook 'gptel-post-response-functions response-hook nil t))
+
+      (goto-char (point-max))
+      (gptel-send))))
 
 (defun macher-agent--setup-tools-advice (orig-fn &rest args)
   "Sync the VFS and inject the sandbox session before tools are executed."
