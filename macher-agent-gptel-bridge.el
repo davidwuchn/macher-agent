@@ -31,6 +31,9 @@ applying the resulting transmission state ephemerally before network dispatch.
 The payload is applied to buffer variables first, and the finite state machine 
 property list is subsequently updated directly.
 
+When an inline skill is used without a prompt its body becomes a prompt
+within the hidden buffer, behaving like a command.
+
 ASYNC-FN is a function to call asynchronously.
 FSM is the finite-state machine.
 
@@ -51,12 +54,18 @@ Return the result of ASYNC-FN."
         (when (fboundp 'macher-agent-initialize-skills)
           (macher-agent-initialize-skills ctx))))
 
-    (let ((matched-skills nil))
+    (let ((matched-skills nil)
+          (inline-preset-used nil)
+          (prompt-start (save-excursion
+                          (goto-char (or (previous-single-property-change (point-max) 'gptel) (point-min)))
+                          (point))))
+      
       (save-excursion
-        (goto-char (or (previous-single-property-change (point-max) 'gptel) (point-min)))
+        (goto-char prompt-start)
         (while (re-search-forward "@\\([[:alnum:]_-]+\\)" nil t)
           (when (or (= (match-beginning 0) (point-min))
                     (memq (char-before (match-beginning 0)) '(?\s ?\t ?\n ?\r ?>)))
+            (setq inline-preset-used t)
             (push (intern (match-string-no-properties 1)) matched-skills)
             (replace-match "")
             (when (looking-at "[ \t]+")
@@ -69,25 +78,57 @@ Return the result of ASYNC-FN."
                                     when (equal sys active-sys) return s)))
             (push sym matched-skills))))
 
-      (when-let* (((fboundp 'macher-agent-compose-payload))
-                  (base-state
-                   (with-current-buffer orig-buf
-                     (list :model gptel-model
-                           :system gptel-system-prompt
-                           :temperature (bound-and-true-p gptel-temperature)
-                           :max-tokens (bound-and-true-p gptel-max-tokens)
-                           :tools gptel-tools
-                           :known-presets (bound-and-true-p gptel--known-presets))))
-                  (payload (macher-agent-compose-payload base-state (nreverse matched-skills))))
+      (let ((redirected-skill nil))
+        (when inline-preset-used
+          (let ((remaining-text (buffer-substring-no-properties prompt-start (point-max))))
+            (unless (string-match-p "[A-Za-z]" remaining-text)
+              (setq redirected-skill (pop matched-skills)))))
 
-        (macher-agent--apply-payload-locally payload)
-        
-        (when fsm
-          (let ((new-info (copy-sequence (gptel-fsm-info fsm))))
-            (dolist (key '(:system :model :temperature :max-tokens :tools))
-              (when (plist-member payload key)
-                (setq new-info (plist-put new-info key (plist-get payload key)))))
-            (setf (gptel-fsm-info fsm) new-info)))))
+        (when (fboundp 'macher-agent-compose-payload)
+          (let* ((base-state
+                  (with-current-buffer orig-buf
+                    (list :model gptel-model
+                          :system gptel-system-prompt
+                          :temperature (bound-and-true-p gptel-temperature)
+                          :max-tokens (bound-and-true-p gptel-max-tokens)
+                          :tools gptel-tools
+                          :known-presets (bound-and-true-p gptel--known-presets))))
+                 (remaining-skills (nreverse matched-skills))
+                 (all-skills (if redirected-skill 
+                                 (append remaining-skills (list redirected-skill)) 
+                               remaining-skills))
+                 (payload (when all-skills 
+                            (macher-agent-compose-payload base-state all-skills))))
+            
+            (when payload
+              (let* ((sys-payload (when remaining-skills 
+                                    (macher-agent-compose-payload base-state remaining-skills)))
+                     (final-sys-prompt (if sys-payload 
+                                           (plist-get sys-payload :system)
+                                         (plist-get base-state :system))))
+                
+                (setq payload (plist-put payload :system final-sys-prompt)))
+              
+              (macher-agent--apply-payload-locally payload)
+              
+              (when fsm
+                (let ((new-info (copy-sequence (gptel-fsm-info fsm))))
+                  (dolist (key '(:system :model :temperature :max-tokens :tools))
+                    (when (plist-member payload key)
+                      (setq new-info (plist-put new-info key (plist-get payload key)))))
+                  (setf (gptel-fsm-info fsm) new-info))))
+            
+            (when redirected-skill
+              (when-let* ((dummy-base (plist-put (copy-sequence base-state) :system ""))
+                          (dummy-payload (macher-agent-compose-payload dummy-base (list redirected-skill)))
+                          (sys-prompt (plist-get dummy-payload :system))
+                          ((stringp sys-prompt))
+                          ((not (string-empty-p sys-prompt))))
+                (delete-region prompt-start (point-max))
+                (insert sys-prompt)
+                (when fsm
+                  (setf (gptel-fsm-info fsm)
+                        (plist-put (gptel-fsm-info fsm) :prompt sys-prompt)))))))))
     
     (when-let* ((fn async-fn)
                 ((functionp fn)))

@@ -3,18 +3,25 @@
 An Emacs-native LLM agent harness with isolated sandboxing, asynchronous sub-agent orchestration, and a strict 3-tier virtual file system.
 
 https://github.com/user-attachments/assets/35908782-ee2b-4243-8b93-ad8381cfee5c
+macher-agent integrates with gptel and macher. Please review their respective repositories for further video examples of what can be done when all are used in tandem.
 
 ## Another emacs agent harness?
 
 - Strict sandboxes
 - No terminal paradigm
-- No non elisp dependencies (every aspect is hackable)
+- No non elisp dependencies or other runtimes (every aspect is hackable)
 
 ## Changes in gptel/macher when enabled
 
-gptel: No longer able to change global state (to avoid race conditions). Prompt level presets are composed.
+gptel
+- No longer able to change global state (to avoid race conditions), use mode hooks for defaults.
+- Prompt level presets are composed.
+- If an inline preset is used without further text the preset prompt becomes a user prompt rather than a system prompt (similar to a command rather than a skill)
+- As media in gptel is based on absolute paths and gptel can't access the macher vfs an additional media reading method is added based on base64 payloads (this is also important for agents with computer use use-cases).
 
-macher: execute tools against VFS. VFS persists until cleared or applied.
+macher
+- Tools execute against the VFS
+- VFS persists until cleared or applied.
 
 ## Table of Contents
 1. [Core Concepts and Architecture](#core-concepts-and-architecture)
