@@ -3,6 +3,7 @@
 An Emacs-native LLM agent harness with isolated sandboxing, asynchronous sub-agent orchestration, and a strict 3-tier virtual file system.
 
 https://github.com/user-attachments/assets/35908782-ee2b-4243-8b93-ad8381cfee5c
+
 macher-agent integrates with gptel and macher. Please review their respective repositories for further video examples of what can be done when all are used in tandem.
 
 ## Another emacs agent harness?
