@@ -35,22 +35,57 @@
      ,@body))
 
 (defun macher-agent-workspace-resolve-path (path)
+  "Resolve PATH into an absolute buffer name.
+
+PATH is the relative or absolute path string.
+
+Return the resolved absolute buffer name string."
   (macher-agent--resolve-buffer-name path))
 
 (defun macher-agent-context-read (context file)
+  "Read FILE from CONTEXT.
+
+CONTEXT is the active context structure.
+FILE is the relative file path string.
+
+Return the file content string, or nil."
   (macher-agent--read-context-file context file))
 
 (defun macher-agent-context-update (context file content)
+  "Update FILE in CONTEXT with CONTENT.
+
+CONTEXT is the active context structure.
+FILE is the relative file path string.
+CONTENT is the new string content.
+
+Return nil."
   (macher-agent--update-context-file context file content))
 
 (defun macher-agent-scope-add-file (buffer-name context)
+  "Add BUFFER-NAME to the authorised scope in CONTEXT.
+
+BUFFER-NAME is the name of the buffer (string).
+CONTEXT is the active context structure.
+
+Return nil."
   (macher-agent--add-buffer-to-scope-headless buffer-name context))
 
 (defun macher-agent-prepare-instructions (buf instructions preset)
+  "Prepare and inject sub-agent INSTRUCTIONS into BUF with PRESET.
+
+BUF is the target sub-agent buffer.
+INSTRUCTIONS represents the directive string.
+PRESET is the preset symbol or string representing requested skills.
+
+Return nil."
   (macher-agent--prepare-subagent-instructions buf instructions preset))
 
 (defun macher-agent-submit-task-result (result)
-  "Submit the final RESULT for the current agent task."
+  "Submit the final RESULT for the current agent task.
+
+RESULT is the final synthesised answer string.
+
+Return nil."
   (setq-local macher-agent--final-result result)
   (when (boundp 'macher-agent--parent-callback)
     (funcall macher-agent--parent-callback 
@@ -61,32 +96,58 @@
     (makunbound 'macher-agent--parent-callback)))
 
 (defun macher-agent-ui-show (&optional buf)
+  "Show the user interface for BUF.
+
+BUF is the optional buffer to display.
+
+Return nil."
   (macher-agent--show-ui buf))
 
 (defun macher-agent-workspace-root (workspace)
+  "Retrieve the project root directory of WORKSPACE.
+
+WORKSPACE is the workspace object.
+
+Return the project root path string, or nil."
   (if (and (fboundp 'macher-agent-workspace-p) (macher-agent-workspace-p workspace))
       (macher-agent-workspace-project-root workspace)
     (macher--workspace-root workspace)))
 
 (defun macher-context-workspace-root (context)
-  "Navigate the context struct to retrieve the root directory."
+  "Navigate the CONTEXT struct to retrieve the root directory.
+
+CONTEXT is the active context structure.
+
+Return the project root path string, or nil."
   (let ((workspace (when context (macher-agent--get-context-workspace context))))
     (when workspace (macher-agent-root workspace))))
 
 (defun macher-normalise-preset-name (preset)
-  "Remove leading character symbols and convert PRESET to a uniform symbol."
+  "Remove leading character symbols and convert PRESET to a uniform symbol.
+
+PRESET is the preset string or symbol.
+
+Return the normalised preset symbol, or nil."
   (when (and preset (or (symbolp preset) (stringp preset)))
     (let* ((raw-str (if (symbolp preset) (symbol-name preset) preset))
            (clean-str (replace-regexp-in-string "^@+" "" raw-str)))
       (intern clean-str))))
 
 (defun macher-tool-valid-p (tool)
-  "Check if TOOL is a valid struct."
+  "Check if TOOL is a valid struct.
+
+TOOL is the tool object to verify.
+
+Return non-nil if valid, otherwise nil."
   (and tool (fboundp 'gptel-tool-p) (gptel-tool-p tool)))
 
 (defsubst macher-agent-canonical-tool-name (tool)
   "Strictly extract and coerce TOOL into a string name.
-Handles gptel structs, symbols, plists, and raw strings."
+Handles gptel structs, symbols, plists, and raw strings.
+
+TOOL is the tool representation to convert.
+
+Return the canonical tool name string, or nil."
   (and tool
        (let ((raw-name 
               (cond
@@ -103,14 +164,21 @@ Handles gptel structs, symbols, plists, and raw strings."
          (if (symbolp raw-name) (symbol-name raw-name) raw-name))))
 
 (defun macher-agent--cache-tool (tool registry)
-  "Cache the TOOL in REGISTRY using its canonical string name."
+  "Cache the TOOL in REGISTRY using its canonical string name.
+
+TOOL is the tool object to cache.
+REGISTRY is the hash-table representing the registry.
+
+Return nil."
   (when (macher-tool-valid-p tool)
     (let ((canonical-name (macher-agent-canonical-tool-name tool)))
       (when canonical-name
         (puthash canonical-name tool registry)))))
 
 (defun macher-agent-force-review ()
-  "Manually trigger the diff review screen for any pending virtual edits."
+  "Manually trigger the diff review screen for any pending virtual edits.
+
+Return nil."
   (interactive)
   (let ((context (macher-agent-resolve-context))
         (fsm (macher-agent--get-fsm-latest)))
@@ -120,7 +188,11 @@ Handles gptel structs, symbols, plists, and raw strings."
       (message "SUCCESS: Patch review screen(s) generated for pending edits."))))
 
 (defun macher-agent--parse-frontmatter (text)
-  "Parse a YAML frontmatter TEXT block into a hash table."
+  "Parse a YAML frontmatter TEXT block into a hash table.
+
+TEXT is the YAML frontmatter string block.
+
+Return a hash table of key-value pairs."
   (let ((ht (make-hash-table :test 'equal))
         (lines (split-string text "\n"))
         (current-list-key nil)
@@ -160,7 +232,11 @@ Handles gptel structs, symbols, plists, and raw strings."
     ht))
 
 (defun macher-agent-parse-skill-file (filepath)
-  "Parse a SKILL.md file at FILEPATH extracting frontmatter and body."
+  "Parse a SKILL.md file at FILEPATH extracting frontmatter and body.
+
+FILEPATH is the path to the skill file (string).
+
+Return a property list containing skill properties."
   (with-temp-buffer
     (let* ((org-inhibit-startup t)
            (abs-file (expand-file-name filepath))) 
@@ -198,13 +274,22 @@ Handles gptel structs, symbols, plists, and raw strings."
               :body body)))))
 
 (defun macher-agent--secure-ast-p (form)
-  "Return t if FORM is a secure AST node (no top-level definitions)."
+  "Return t if FORM is a secure AST node (no top-level definitions).
+
+FORM is the expression to inspect.
+
+Return t if secure, otherwise nil."
   (not (and (consp form)
             (memq (car form) '(defun cl-defun defvar defcustom defmacro)))))
 
 (defun macher-agent--parse-safe-forms (content &optional validation-cb)
   "Parse CONTENT and return a list of trusted forms.
-If VALIDATION-CB is provided, it is called on each form; if it returns nil, an error is signaled."
+If VALIDATION-CB is provided, it is called on each form; if it returns nil, an error is signaled.
+
+CONTENT is the string block to parse.
+VALIDATION-CB is an optional validation function.
+
+Return a list of parsed forms."
   (with-temp-buffer
     (insert content)
     (goto-char (point-min))
@@ -220,7 +305,13 @@ If VALIDATION-CB is provided, it is called on each form; if it returns nil, an e
       (nreverse forms))))
 
 (defun macher-agent--evaluate-and-cache-tool (content tool-name registry)
-  "Evaluate string CONTENT and cache it in REGISTRY under TOOL-NAME."
+  "Evaluate string CONTENT and cache it in REGISTRY under TOOL-NAME.
+
+CONTENT is the string representation of the tool code.
+TOOL-NAME is the string name of the tool.
+REGISTRY is the hash-table representing the tools registry.
+
+Return the cached tool object, or TOOL-NAME if evaluation fails."
   (let ((tool nil))
     (condition-case err
         (let* ((forms (macher-agent--parse-safe-forms content
@@ -242,7 +333,13 @@ If VALIDATION-CB is provided, it is called on each form; if it returns nil, an e
     tool))
 
 (defun macher-agent--read-and-cache-from-disk (tool-name script-paths registry)
-  "Load and cache a tool from physical disk using SCRIPT-PATHS."
+  "Load and cache a tool from physical disk using SCRIPT-PATHS.
+
+TOOL-NAME is the string name of the tool.
+SCRIPT-PATHS is a list of candidate files on the physical disk.
+REGISTRY is the hash-table representing the tools registry.
+
+Return the cached tool object, or TOOL-NAME if physical loading fails."
   (let ((disk-content nil))
     (catch 'found-disk
       (dolist (path script-paths)
@@ -256,7 +353,11 @@ If VALIDATION-CB is provided, it is called on each form; if it returns nil, an e
       tool-name)))
 
 (defun macher-agent--is-managed-path-p (path)
-  "Evaluate if PATH resides within managed skill or script directories."
+  "Evaluate if PATH resides within managed skill or script directories.
+
+PATH is the string file path to inspect.
+
+Return non-nil if managed, otherwise nil."
   (and path
        (stringp path)
        (or (string-match-p "SKILL\\.md$" path)
@@ -264,7 +365,12 @@ If VALIDATION-CB is provided, it is called on each form; if it returns nil, an e
            (string-match-p "scripts/.*\\.el$" path))))
 
 (defun macher-agent--mutation-dispatcher (&optional path &rest _)
-  "Route file system events to appropriate invalidation or reload handlers."
+  "Route file system events to appropriate invalidation or reload handlers.
+
+PATH is the optional mutated file path string.
+_ represents unused extra hook arguments.
+
+Return nil."
   (when (macher-agent--is-managed-path-p path)
     (let* ((workspace (when (bound-and-true-p macher-agent--persistent-context)
                         (macher-agent--get-context-workspace macher-agent--persistent-context))))
@@ -287,7 +393,15 @@ If VALIDATION-CB is provided, it is called on each form; if it returns nil, an e
 (add-hook 'macher-agent-context-mutated-hook #'macher-agent--mutation-dispatcher)
 
 (defun macher-agent--locate-tool-source (tool-name context dir-context script-paths workspace)
-  "Locate the tool source content for TOOL-NAME."
+  "Locate the tool source content for TOOL-NAME.
+
+TOOL-NAME is the string name of the tool.
+CONTEXT is the active context structure.
+DIR-CONTEXT is the active directory context string.
+SCRIPT-PATHS is a list of script candidate paths.
+WORKSPACE is the active workspace struct.
+
+Return the tool source content string, or nil."
   (let ((vfs-content (when context
                        (let* ((vfs-path (when dir-context (expand-file-name (format "scripts/%s.el" tool-name) dir-context)))
                               (workspace-root (macher-context-workspace-root context))
@@ -318,7 +432,12 @@ If VALIDATION-CB is provided, it is called on each form; if it returns nil, an e
         disk-content))))
 
 (defun macher-agent--parse-and-validate-tool-ast (content tool-name)
-  "Parse CONTENT and validate the AST. Returns a list of trusted forms."
+  "Parse CONTENT and validate the AST. Returns a list of trusted forms.
+
+CONTENT is the tool script content string.
+TOOL-NAME is the string name of the tool.
+
+Return a list of validated trusted forms, or nil."
   (condition-case err
       (macher-agent--parse-safe-forms content
                                       (lambda (f)
@@ -331,7 +450,12 @@ If VALIDATION-CB is provided, it is called on each form; if it returns nil, an e
      nil)))
 
 (defun macher-agent--evaluate-trusted-tool-ast (forms tool-name)
-  "Evaluate trusted FORMS and return the captured tool struct."
+  "Evaluate trusted FORMS and return the captured tool struct.
+
+FORMS is the list of validated tool Lisp expressions.
+TOOL-NAME is the string name of the tool.
+
+Return the evaluated tool struct, or nil."
   (let ((captured-tool nil))
     (condition-case err
         (dolist (form forms)
@@ -348,7 +472,13 @@ If VALIDATION-CB is provided, it is called on each form; if it returns nil, an e
     captured-tool))
 
 (defun macher-agent-resolve-tool (tool-name context dir-context)
-  "Retrieve TOOL-NAME from workspace registry or load from VFS/disk, deferring native tools."
+  "Retrieve TOOL-NAME from workspace registry or load from VFS/disk, deferring native tools.
+
+TOOL-NAME is the name of the tool (string or symbol).
+CONTEXT is the active context structure.
+DIR-CONTEXT is the active directory context string.
+
+Return the resolved tool object, or TOOL-NAME if unresolved."
   (let* ((workspace (when context (macher-agent--get-context-workspace context)))
          (registry (if workspace (macher-agent-workspace-tools-registry workspace) macher-agent-tools-registry))
          (canonical-name (macher-agent-canonical-tool-name tool-name))
@@ -384,7 +514,12 @@ If VALIDATION-CB is provided, it is called on each form; if it returns nil, an e
     (or loaded-tool tool-name)))
 
 (defun macher-agent--load-scripts-from-dir (skills-dir context)
-  "Load script tools from the scripts subdirectory of SKILLS-DIR."
+  "Load script tools from the scripts subdirectory of SKILLS-DIR.
+
+SKILLS-DIR is the path to the skills directory (string).
+CONTEXT is the active context structure.
+
+Return nil."
   (let ((scripts-dir (expand-file-name "scripts" skills-dir)))
     (when (file-directory-p scripts-dir)
       (dolist (script (directory-files scripts-dir t "\\.el$"))
@@ -393,7 +528,12 @@ If VALIDATION-CB is provided, it is called on each form; if it returns nil, an e
           (ignore tool))))))
 
 (defun macher-agent--load-skill-from-path (path &optional context)
-  "Load a skill from PATH and register it natively with gptel."
+  "Load a skill from PATH and register it natively with gptel.
+
+PATH is the path to the skill directory or file (string).
+CONTEXT is the optional active context structure.
+
+Return nil."
   (let ((skill-file (cond
                      ((and (file-directory-p path)
                            (file-exists-p (expand-file-name "SKILL.md" path)))
@@ -428,7 +568,12 @@ If VALIDATION-CB is provided, it is called on each form; if it returns nil, an e
               (setq macher-agent-global-skills-alist alist))))))))
 
 (defun macher-agent-api-register-skills-in-directory (skills-dir &optional context)
-  "Scan SKILLS-DIR for SKILL.md files and load them."
+  "Scan SKILLS-DIR for SKILL.md files and load them.
+
+SKILLS-DIR is the path to the directory (string).
+CONTEXT is the optional active context structure.
+
+Return nil."
   (let* ((expanded-dir (file-name-as-directory (expand-file-name skills-dir)))
          (target-dir (if (file-directory-p (expand-file-name "skills" expanded-dir))
                          (file-name-as-directory (expand-file-name "skills" expanded-dir))
@@ -443,7 +588,11 @@ If VALIDATION-CB is provided, it is called on each form; if it returns nil, an e
              (message "Error loading path %s: %S" path err))))))))
 
 (defun macher-agent--get-system-message-name (sys-msg)
-  "Reverse lookup SYS-MSG to find its short name in local or global skills."
+  "Reverse lookup SYS-MSG to find its short name in local or global skills.
+
+SYS-MSG is the system message prompt string.
+
+Return the short name string, or nil if not found."
   (when (and sys-msg (stringp sys-msg) (not (string-empty-p sys-msg)))
     (let* ((ctx (ignore-errors (macher-agent-resolve-context)))
            (ws (when ctx (macher-agent--get-context-workspace ctx)))
@@ -462,7 +611,12 @@ If VALIDATION-CB is provided, it is called on each form; if it returns nil, an e
                 return (symbol-name sym))))))
 
 (defun macher-agent-initialize-skills (&optional context dir)
-  "Initialise agent skills from all registered directories."
+  "Initialise agent skills from all registered directories.
+
+CONTEXT is the optional active context structure.
+DIR is the optional directory path string to load from.
+
+Return nil."
   (interactive)
   (let ((directories (delq nil (append
                                 (list dir macher-agent--bundled-skills-dir)
@@ -510,7 +664,11 @@ If VALIDATION-CB is provided, it is called on each form; if it returns nil, an e
     (gptel--setup-directive-menu 'gptel-system-prompt "Agent Profile")))
 
 (defun macher-agent--find-native-tool (tool-name)
-  "Find a gptel-tool registered natively via `gptel-make-tool`."
+  "Find a gptel-tool registered natively via `gptel-make-tool`.
+
+TOOL-NAME is the name of the tool (string or symbol).
+
+Return the gptel-tool struct if found, otherwise nil."
   (let* ((t-str (if (symbolp tool-name) (symbol-name tool-name) tool-name))
          (normalized-target (replace-regexp-in-string "-" "_" t-str))
          (found nil))
@@ -535,7 +693,11 @@ If VALIDATION-CB is provided, it is called on each form; if it returns nil, an e
     found))
 
 (defun macher-agent--resolve-tool-in-env (item)
-  "Resolve a tool ITEM using the current workspace environment."
+  "Resolve a tool ITEM using the current workspace environment.
+
+ITEM is the tool identifier (string, symbol, or struct).
+
+Return a list of resolved gptel-tool structs, or nil."
   (let* ((ctx (ignore-errors (macher-agent-resolve-context)))
          (skills-dir (when ctx (macher-agent-context-root ctx)))
          (resolved (macher-agent-resolve-tool item ctx skills-dir)))
@@ -571,7 +733,11 @@ If VALIDATION-CB is provided, it is called on each form; if it returns nil, an e
   "Normalise, resolve, and deduplicate a mixed list of TOOLS.
 Accepts a list of tool representations (names, symbols, structs, functions, or nested lists),
 recursively flattens them, resolves them to `gptel-tool' structs via `macher-agent-resolve-tool'
-or native fallback, filters out nil, and deduplicates by name using a hash table."
+or native fallback, filters out nil, and deduplicates by name using a hash table.
+
+TOOLS is the list of tool representations.
+
+Return a list of unique resolved gptel-tool structures."
   (let ((flat-resolved (delq nil (macher-agent-resolve-item tools)))
         (seen (make-hash-table :test 'equal))
         (unique nil))
@@ -584,11 +750,19 @@ or native fallback, filters out nil, and deduplicates by name using a hash table
     (nreverse unique)))
 
 (defun macher-agent-resolve-to-struct (t-item)
-  "Convert a tool item into a gptel-tool struct."
+  "Convert a tool item into a gptel-tool struct.
+
+T-ITEM is the tool item to convert.
+
+Return the resolved gptel-tool structure, or nil."
   (car (macher-agent-normalize-tools t-item)))
 
 (defun macher-agent--wrap-tool-for-project-root (tool)
-  "Clone and wrap the tool so it ALWAYS runs in the project root."
+  "Clone and wrap the tool so it ALWAYS runs in the project root.
+
+TOOL is the gptel-tool struct to wrap.
+
+Return the wrapped gptel-tool structure."
   (if (macher-tool-valid-p tool)
       (let* ((orig-fn (gptel-tool-function tool))
              (tool-name-str (macher-agent-canonical-tool-name tool))
@@ -612,7 +786,9 @@ or native fallback, filters out nil, and deduplicates by name using a hash table
 (defvar macher-agent--allow-gptel-restore)
 
 (defun macher-agent-gptel-mode-setup ()
-  "Initialise macher-agent defaults for all gptel buffers."
+  "Initialise macher-agent defaults for all gptel buffers.
+
+Return nil."
   (make-local-variable 'gptel--preset)
   (make-local-variable 'gptel-tools)
   (make-local-variable 'gptel-model)
@@ -639,7 +815,11 @@ or native fallback, filters out nil, and deduplicates by name using a hash table
 (add-hook 'gptel-mode-hook #'macher-agent-gptel-mode-setup)
 
 (defun macher-agent-branch-chat (new-name)
-  "Clone the current chat, establishing lineage and inheriting all agent state."
+  "Clone the current chat, establishing lineage and inheriting all agent state.
+
+NEW-NAME is the name of the new branch buffer (string).
+
+Return nil."
   (interactive "sNew branch name: ")
   (let* ((parent-buf (current-buffer))
          (parent-name (buffer-name parent-buf))

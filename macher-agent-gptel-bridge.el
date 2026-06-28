@@ -29,7 +29,12 @@ composition engine to merge the base state with the inline presets,
 applying the resulting transmission state ephemerally before network dispatch.
 
 The payload is applied to buffer variables first, and the finite state machine 
-property list is subsequently updated directly."
+property list is subsequently updated directly.
+
+ASYNC-FN is a function to call asynchronously.
+FSM is the finite-state machine.
+
+Return the result of ASYNC-FN."
   (let* ((temp-buf (current-buffer))
          (info (when fsm (gptel-fsm-info fsm)))
          (orig-buf (or (when info (plist-get info :buffer)) temp-buf))
@@ -89,7 +94,12 @@ property list is subsequently updated directly."
       (funcall fn))))
 
 (defun macher-agent-post-response-reaper (_beg _end)
-  "Reap the sub-agent buffer if flagged for disposal."
+  "Reap the sub-agent buffer if flagged for disposal.
+
+_BEG is the starting position of the text region (integer).
+_END is the ending position of the text region (integer).
+
+Return nil."
   (when (and (macher-agent-subagent-p)
              (macher-agent-ready-to-reap-p))
     (let ((buf (current-buffer)))
@@ -99,7 +109,12 @@ property list is subsequently updated directly."
                              (macher-agent--reap-buffer buf)))))))
 
 (defun macher-agent-gptel-transmit (task-context callbacks)
-  "Facade to transmit network request, restoring buffer-centric execution."
+  "Facade to transmit network request, restoring buffer-centric execution.
+
+TASK-CONTEXT is a macher-agent-task-context struct representing the task.
+CALLBACKS is a list representing the success and error handlers.
+
+Return nil."
   (let* ((target-buffer (macher-agent-task-context-target-buffer task-context))
          (sys-msg (macher-agent-task-context-system-message task-context))
          (success-cb (plist-get callbacks :on-success))
@@ -129,7 +144,11 @@ property list is subsequently updated directly."
       (gptel-send))))
 
 (defun macher-agent--setup-tools-pre-hook (&rest _args)
-  "Sync the VFS and inject the sandbox session before tools are executed."
+  "Sync the VFS and inject the sandbox session before tools are executed.
+
+_ARGS represents the unused arguments passed to the hook.
+
+Return nil."
   (let* ((fsm (or macher-agent--active-fsm
                   (bound-and-true-p macher--fsm-latest)
                   (bound-and-true-p gptel--fsm-last)))
@@ -147,7 +166,13 @@ property list is subsequently updated directly."
           (setf (gptel-fsm-info fsm) (plist-put info :macher-agent-session session)))))))
 
 (defun macher-agent--inject-media-fsm-advice (orig-fun fsm &rest args)
-  "Inject pending tool media into the FSM payload right before transitioning to WAIT."
+  "Inject pending tool media into the FSM payload right before transitioning to WAIT.
+
+ORIG-FUN is the original transition function.
+FSM is the finite-state machine struct.
+ARGS represents the arguments passed to ORIG-FUN.
+
+Return the result of ORIG-FUN."
   (let* ((new-state (car args))
          (target-state (or new-state (ignore-errors (gptel--fsm-next fsm)))))
     (when (or (eq target-state 'WAIT) (null target-state))
@@ -175,7 +200,11 @@ property list is subsequently updated directly."
 (advice-add 'gptel--fsm-transition :around #'macher-agent--inject-media-fsm-advice)
 
 (defun macher-agent--make-safe-callback (orig-cb)
-  "Closure generator: captures orig-cb so it survives async network delays."
+  "Closure generator: captures orig-cb so it survives async network delays.
+
+ORIG-CB is the original callback function.
+
+Return a function."
   (lambda (response &rest cb-args)
     (apply orig-cb (or response "") cb-args)))
 
@@ -183,7 +212,14 @@ property list is subsequently updated directly."
   "Dynamic snapshot of buffer tools.")
 
 (defun macher-agent--protect-nil-responses (orig-fun response info &optional raw)
-  "Prevent nil string crashes at the point of insertion."
+  "Prevent nil string crashes at the point of insertion.
+
+ORIG-FUN is the original insertion function.
+RESPONSE is the string response, which may be nil.
+INFO is the response information.
+RAW is an optional boolean flag.
+
+Return the result of ORIG-FUN."
   (funcall orig-fun (or response "") info raw))
 
 (advice-add 'gptel--insert-response :around #'macher-agent--protect-nil-responses)
@@ -196,7 +232,12 @@ property list is subsequently updated directly."
   "Flag indicating whether the buffer is currently being restored from a saved state.")
 
 (defun macher-agent--gptel-restore-advice (orig-fun &rest args)
-  "Bypass `gptel--restore-state' unless explicitly allowed, tagging the buffer."
+  "Bypass `gptel--restore-state' unless explicitly allowed, tagging the buffer.
+
+ORIG-FUN is the original restoration function.
+ARGS represents the arguments passed to ORIG-FUN.
+
+Return the result of ORIG-FUN."
   (when macher-agent--allow-gptel-restore
     (setq-local macher-agent--is-restored-session t)
     (let ((current-root (macher-agent-root nil)))
@@ -212,8 +253,10 @@ property list is subsequently updated directly."
 
 (defun macher-agent-resolve-backend-and-model (model-name)
   "Find the first backend and model format matching MODEL-NAME.
-MODEL-NAME can be a string or a symbol.
-Returns a cons cell (BACKEND . MODEL-FORMAT) if found, otherwise nil."
+
+MODEL-NAME is a string or symbol specifying the model name.
+
+Return a cons cell (BACKEND . MODEL-FORMAT) if found, otherwise nil."
   (when (and model-name (boundp 'gptel--known-backends))
     (let ((model-str (if (symbolp model-name) (symbol-name model-name) model-name))
           result)
@@ -233,7 +276,13 @@ Returns a cons cell (BACKEND . MODEL-FORMAT) if found, otherwise nil."
   "Dynamically bound to the active FSM during tool execution hooks.")
 
 (defun macher-agent--bind-active-fsm-advice (orig-fn fsm &rest args)
-  "Capture the current FSM dynamically so tool validators do not rely on lagging state variables."
+  "Capture the current FSM dynamically so tool validators do not rely on lagging state variables.
+
+ORIG-FN is the original function being advised.
+FSM is the active finite-state machine.
+ARGS represents the arguments passed to ORIG-FN.
+
+Return the result of ORIG-FN."
   (let ((macher-agent--active-fsm fsm))
     (apply orig-fn fsm args)))
 
@@ -251,7 +300,12 @@ retrieves the active finite state machine (FSM) or fallback references
 and compares the incoming tool against the authorised toolset.
 
 It reads the tool names exclusively from the finite state machine snapshot,
-ignoring buffer-local variables to avoid race conditions."
+ignoring buffer-local variables to avoid race conditions.
+
+TOOL is the tool object or name to be verified.
+_ARGS represents unused arguments passed from the hook.
+
+Return a block list if the tool is out of scope, otherwise nil."
   (let* ((canonical-name (macher-agent-canonical-tool-name tool))
          (fsm (or macher-agent--active-fsm
                   (bound-and-true-p macher--fsm-latest)
@@ -264,7 +318,9 @@ ignoring buffer-local variables to avoid race conditions."
       (list :block (format "ERROR: Tool '%s' is out of scope. It was not provided to this sub-agent." (or canonical-name tool))))))
 
 (defun macher-agent-setup-gptel-buffer ()
-  "Set up a gptel buffer with macher-agent capabilities if in an active agent session."
+  "Set up a gptel buffer with macher-agent capabilities if in an active agent session.
+
+Return nil."
   (let* ((macher-agent--allow-lazy-init nil)
          (ctx (ignore-errors (macher-agent-resolve-context))))
     (when ctx

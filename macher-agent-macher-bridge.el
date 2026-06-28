@@ -10,9 +10,19 @@
 (declare-function macher-agent-vfs-entry-curr "macher-agent-vfs-client")
 
 (defun macher-agent--get-workspace-root (ws)
+  "Resolve the absolute project root of WS.
+
+WS is the workspace object.
+
+Return the absolute path string."
   (macher-agent-root ws))
 
 (defun macher-agent--get-workspace-name (ws)
+  "Retrieve a human-readable name for WS.
+
+WS is the workspace object.
+
+Return the workspace name string."
   (cond
    ((and (fboundp 'macher-agent-workspace-p) (macher-agent-workspace-p ws))
     (file-name-nondirectory (directory-file-name (macher-agent-workspace-project-root ws))))
@@ -23,7 +33,11 @@
    (t "unknown")))
 
 (defun macher-agent--split-vfs-contents (contents)
-  "Split raw VFS contents into pure virtual and physical lists."
+  "Split raw VFS contents into pure virtual and physical lists.
+
+CONTENTS is the list of VFS entry structures.
+
+Return a cons cell (VIRTUAL-CONTENTS . PHYSICAL-CONTENTS)."
   (let ((virtual-contents nil)
         (physical-contents nil))
     (dolist (entry contents)
@@ -36,7 +50,12 @@
     (cons (nreverse virtual-contents) (nreverse physical-contents))))
 
 (defun macher-agent--safe-workspace-hash (workspace &rest _args)
-  "Nuke the core recursive hashing function which causes depth crashes."
+  "Nuke the core recursive hashing function which causes depth crashes.
+
+WORKSPACE is the workspace object.
+_ARGS represents extra arguments passed.
+
+Return the MD5 hash string."
   (let ((path (cond
                ((and (recordp workspace) (eq (type-of workspace) 'macher-agent-workspace))
                 (macher-agent-workspace-project-root workspace))
@@ -53,7 +72,12 @@
   "Internal flag to prevent intercepting our own ephemeral diff contexts.")
 
 (defun macher-agent--override-make-context (orig-fn &rest kwargs)
-  "Intercept the upstream constructor to natively enforce the VFS singleton."
+  "Intercept the upstream constructor to natively enforce the VFS singleton.
+
+ORIG-FN is the original constructor function.
+KWARGS represents keyword arguments passed to the constructor.
+
+Return the context struct."
   (let ((persistent-ctx (bound-and-true-p macher-agent--persistent-context)))
     (if (and persistent-ctx (not macher-agent--bypass-context-override))
         (progn
@@ -80,7 +104,13 @@
 (defun macher-agent--propagate-vfs-to-gptel-target (orig-fn prompt &rest kwargs)
   "Ensure that temporary buffers spawned for async requests inherit the live VFS context.
 This prevents data loss when external packages (like macher) evaluate LLM responses 
-in temporary buffers that lack the agent's buffer-local state."
+in temporary buffers that lack the agent's buffer-local state.
+
+ORIG-FN is the original request function.
+PROMPT is the prompt string.
+KWARGS represents extra keyword arguments.
+
+Return the result of ORIG-FN."
   (let* ((live-ctx (bound-and-true-p macher-agent--persistent-context))
          (raw-buf (plist-get kwargs :buffer))
          (target-buf (when raw-buf (get-buffer raw-buf))))
@@ -94,13 +124,23 @@ in temporary buffers that lack the agent's buffer-local state."
 (advice-add 'gptel-request :around #'macher-agent--propagate-vfs-to-gptel-target)
 
 (cl-defun macher-agent--make-vfs-context (&key workspace contents)
-  "Create an ephemeral context, safely bypassing the singleton constructor interceptor."
+  "Create an ephemeral context, safely bypassing the singleton constructor interceptor.
+
+WORKSPACE is the workspace object.
+CONTENTS is the list of VFS entries.
+
+Return the context struct."
   (let ((macher-agent--bypass-context-override t))
     (macher--make-context :workspace workspace :contents contents)))
 
 (defun macher-agent--hydrate-vfs-entry (e project-root)
   "Hydrate a raw upstream context list from Macher Core into a populated VFS struct.
-This function strictly assumes a raw cons-cell representation and converts it."
+This function strictly assumes a raw cons-cell representation and converts it.
+
+E is the raw upstream context cons cell.
+PROJECT-ROOT is the project root path string.
+
+Return the hydrated macher-agent-vfs-entry struct."
   (let* ((path (car e))
          (full-path (expand-file-name path project-root))
          (orig-raw (if (consp (cdr e)) (car (cdr e)) nil))
@@ -121,14 +161,24 @@ This function strictly assumes a raw cons-cell representation and converts it."
     (make-macher-agent-vfs-entry :path path :orig orig-str :curr new-str)))
 
 (defun macher-agent--dehydrate-vfs-entry (entry)
-  "Dehydrate a VFS struct back into the legacy list format expected by core macher."
+  "Dehydrate a VFS struct back into the legacy list format expected by core macher.
+
+ENTRY is the macher-agent-vfs-entry struct.
+
+Return the dehydrated cons cell."
   (cons (macher-agent-vfs-entry-path entry)
         (cons (macher-agent-vfs-entry-orig entry)
               (macher-agent-vfs-entry-curr entry))))
 
 (defun macher-agent--prepare-patch-contexts (context fsm project-root)
   "Calculate and return isolated contexts for virtual buffers and physical files.
-Convert raw macher cons-cells into virtual file system entry structures safely."
+Convert raw macher cons-cells into virtual file system entry structures safely.
+
+CONTEXT is the active context structure.
+FSM is the finite-state machine object.
+PROJECT-ROOT is the project root directory string.
+
+Return a list containing virtual context, physical context, and physical contents."
   (let* ((vfs-ctx (or (ignore-errors (macher-agent-resolve-context (or fsm context))) context))
          (raw-contents (or (and vfs-ctx (macher-agent--get-context-contents vfs-ctx))
                            (macher-agent--get-context-contents context)))
@@ -157,7 +207,13 @@ Convert raw macher cons-cells into virtual file system entry structures safely."
     (list v-ctx p-ctx physical-contents)))
 
 (defun macher-agent--override-build-patch (orig-fn context &optional fsm)
-  "Override the upstream patch builder to support split Virtual and Physical diffs."
+  "Override the upstream patch builder to support split Virtual and Physical diffs.
+
+ORIG-FN is the original patch building function.
+CONTEXT is the active context structure.
+FSM is the optional finite-state machine.
+
+Return nil."
   (let* ((ws (macher-agent--get-context-workspace context))
          (project-root (macher-agent-root ws))
          (default-directory (file-name-as-directory (expand-file-name project-root)))
@@ -244,6 +300,11 @@ Convert raw macher cons-cells into virtual file system entry structures safely."
 (advice-add 'macher--build-patch :around #'macher-agent--override-build-patch)
 
 (defun macher-agent--get-context-workspace (ctx)
+  "Retrieve the workspace from context CTX.
+
+CTX is the context structure.
+
+Return the workspace struct, or nil."
   (cond
    ((and ctx (fboundp 'macher-context-p) (macher-context-p ctx))
     (let ((ws (and (fboundp 'macher-context-workspace) (macher-context-workspace ctx))))
@@ -257,6 +318,12 @@ Convert raw macher cons-cells into virtual file system entry structures safely."
    (t nil)))
 
 (defun macher-agent--set-context-workspace (ctx ws)
+  "Set the workspace on CTX to WS.
+
+CTX is the context structure.
+WS is the new workspace struct.
+
+Return nil."
   (when (and ctx (fboundp 'macher-context-p) (macher-context-p ctx))
     (setf (macher-context-workspace ctx) ws)))
 
@@ -287,7 +354,9 @@ Convert raw macher cons-cells into virtual file system entry structures safely."
 (macher-agent--def-context-accessor macher-agent--get-context-shadow-buffers macher-context-shadow-buffers macher-agent--set-context-shadow-buffers "Safely assign shadow buffers to the struct if the accessor is defined upstream.")
 
 (defun macher-agent--get-fsm-latest ()
-  "Get the active finite-state machine (FSM) if bound."
+  "Get the active finite-state machine (FSM) if bound.
+
+Return the active finite-state machine struct, or nil."
   (or (and (boundp 'macher-agent--active-fsm) macher-agent--active-fsm)
       (bound-and-true-p gptel--fsm)
       (bound-and-true-p gptel--fsm-last)))

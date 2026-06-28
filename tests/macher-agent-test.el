@@ -352,6 +352,7 @@
                                               (spy-on 'macher-agent-context-classify-entry :and-return-value 'media)
                                               (spy-on 'file-exists-p :and-return-value t)
                                               (spy-on 'mailcap-file-name-to-mime-type :and-return-value "image/png")
+                                              (spy-on 'insert-file-contents-literally :and-call-fake (lambda (&rest _args) (insert "mock-image-data")))
                                               (let ((result (funcall tool-fn "test_workspace_image.png")))
                                                 (expect result :to-match "SUCCESS: Media 'test_workspace_image.png'"))))
                                         (it "throws an error if the tool cannot determine MIME type"
@@ -378,13 +379,13 @@
                                               (let ((result (funcall tool-fn "test.png")))
                                                 (expect result :to-match "SUCCESS: Media")
                                                 (expect gptel-context :to-be nil)
-                                                (expect (macher-agent-session-pending-media session) :to-be-truthy))))
+                                                (expect (car (car (macher-agent-session-pending-media session))) :to-equal "aW1nLWRhdGE="))))
 
                                         (it "injects pending media into FSM payload and clears the queue pre-flight"
                                             (let* ((buf (current-buffer))
                                                    (mock-backend 'mock-backend)
                                                    (mock-data '((:role "system" :content "sys")))
-                                                   (session (make-macher-agent-session :id "test" :pending-media '(("/test.png" :mime "image/png"))))
+                                                   (session (make-macher-agent-session :id "test" :pending-media '(("mockbase64" :mime "image/png"))))
                                                    (mock-info (list :buffer buf :backend mock-backend :data mock-data :macher-agent-session session))
                                                    
                                                    ;; We can safely use a mock symbol again!

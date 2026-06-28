@@ -105,7 +105,7 @@
                                (macher-agent--active-fsm fsm))
                           
                           (spy-on 'gptel-fsm-info :and-return-value (list :macher-agent-session session))
-                          (setf (macher-agent-session-pending-media session) (list (list "/mock/proj/media.png" :mime "image/png")))
+                          (setf (macher-agent-session-pending-media session) (list (list "mockbase64" :mime "image/png")))
                           
                           (spy-on 'gptel--inject-media :and-return-value nil)
                           (spy-on 'gptel--inject-prompt :and-return-value nil)

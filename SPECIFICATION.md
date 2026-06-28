@@ -186,8 +186,8 @@ The system MUST intercept `gptel`'s private networking and stream insertion func
 
 * **Target:** `gptel--base64-encode`
 * **Interception:** `advice-add :around` (`#'macher-agent--gptel-base64-encode-advice`)
-* **Inputs Received:** `(file)` where `file` is an absolute string path.
-* **Behaviour:** The advice MUST intercept the physical disk read. It MUST query the VFS (`macher-agent--read-context-file`) using the path. If VFS content exists, it MUST return the base64 encoded *virtual* string. Only if it returns `nil` may the original upstream physical read execute.
+* **Inputs Received:** `(file)` where `file` is an absolute string path or a raw base64-encoded string.
+* **Behaviour:** The advice MUST check if the input matches any raw base64-encoded string in the active session's pending media. If so, it returns it directly. Otherwise, it MUST intercept the physical disk read. It MUST query the VFS (`macher-agent--read-context-file`) using the path. If VFS content exists, it MUST return the base64 encoded *virtual* string. Only if it returns `nil` may the original upstream physical read execute.
 
 #### 6.2.4 Tool execution scoping (hook)
 
@@ -253,7 +253,7 @@ Because `macher` relies on Emacs physical buffers and `macher-agent` uses pure-m
 ### 7.1 The gptel bridge
 
 1. **Nil response protection**: `gptel--insert-response` MUST be advised to gracefully handle empty (`nil`) streaming chunks without throwing Emacs type-errors.
-2. **Media injection**: `gptel--fsm-transition` MUST be advised. If the VFS session contains `pending-media` (for example, a tool read an image), the base64 encoded data MUST be injected directly into the LLM request FSM immediately before transitioning to the WAIT state.
+2. **Media injection**: `gptel--fsm-transition` MUST be advised. If the VFS session contains `pending-media` (where the tool itself performs the read and base64 serialisation), the raw base64 data MUST be injected directly into the LLM request FSM immediately before transitioning to the WAIT state.
 3. **Base64 override**: The native `gptel--base64-encode` MUST be intercepted to check the VFS first. If the file exists in the agent's memory, it MUST encode the virtual string instead of reading the physical disk.
 
 ### 7.2 The macher bridge (patch generation)

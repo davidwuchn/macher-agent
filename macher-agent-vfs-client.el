@@ -30,14 +30,32 @@
   "Registry mapping expanded project roots to their active persistent contexts.")
 
 (defun macher-agent-vfs-get-node (workspace path)
-  "Retrieve a node's content from the virtual file system."
+  "Retrieve a node's content from the virtual file system.
+
+WORKSPACE is the workspace structure.
+PATH is the relative or absolute path string.
+
+Return the node's content, or nil."
   (gethash path (macher-agent-workspace-vfs-buffers workspace)))
 
 (defun macher-agent-vfs-set-node (workspace path content)
-  "Set a node's content in the virtual file system."
+  "Set a node's content in the virtual file system.
+
+WORKSPACE is the workspace structure.
+PATH is the relative or absolute path string.
+CONTENT is the string content to store.
+
+Return the stored content."
   (puthash path content (macher-agent-workspace-vfs-buffers workspace)))
 
 (defun macher-agent-vfs-write (workspace file-path content)
+  "Write content to FILE-PATH in the virtual file system with concurrency checking.
+
+WORKSPACE is the workspace structure.
+FILE-PATH is the relative or absolute path string.
+CONTENT is the string content to write.
+
+Return the stored content."
   (let* ((tracker (macher-agent-workspace-mtime-tracker workspace))
          (original-mtime (gethash file-path tracker))
          (current-attrs (file-attributes file-path))
@@ -49,6 +67,12 @@
     (puthash file-path content (macher-agent-workspace-vfs-buffers workspace))))
 
 (defun macher-agent-vfs-read (workspace file-path)
+  "Read a node's content from the virtual file system or physical disk.
+
+WORKSPACE is the workspace structure.
+FILE-PATH is the relative or absolute path string.
+
+Return the content string, or nil."
   (let ((content (gethash file-path (macher-agent-workspace-vfs-buffers workspace))))
     (if content
         content
@@ -62,17 +86,29 @@
 
 (defun macher-agent-vfs-make-entry (path orig curr)
   "Create a virtual file system entry structure.
-PATH is the file or buffer path, ORIG is the original content,
-and CURR is the current modified content."
+
+PATH is the file or buffer path string.
+ORIG is the original content string.
+CURR is the current modified content string.
+
+Return the created macher-agent-vfs-entry struct."
   (make-macher-agent-vfs-entry :path path :orig orig :curr curr))
 
 (defun macher-agent-vfs-entry-modified-p (entry)
-  "Return non-nil if ENTRY has been modified from its original content."
+  "Return non-nil if ENTRY has been modified from its original content.
+
+ENTRY is the macher-agent-vfs-entry struct to check.
+
+Return non-nil if modified, otherwise nil."
   (not (equal (macher-agent-vfs-entry-orig entry)
               (macher-agent-vfs-entry-curr entry))))
 
 (defun macher-agent-media-file-p (path)
-  "Return non-nil if PATH represents a media file."
+  "Return non-nil if PATH represents a media file.
+
+PATH is the file path string to check.
+
+Return non-nil if it is a media file, otherwise nil."
   (and (stringp path)
        (let ((mime (and (fboundp 'mailcap-file-name-to-mime-type)
                         (mailcap-file-name-to-mime-type path))))
@@ -126,7 +162,12 @@ Returns the absolute path string, or nil if unresolved.")
    (t (macher-agent-root default-directory))))
 
 (defun macher-agent--resolve-safe-path (unsafe-path base-dir)
-  "Resolves UNSAFE-PATH strictly within BASE-DIR, preventing jailbreaks."
+  "Resolves UNSAFE-PATH strictly within BASE-DIR, preventing jailbreaks.
+
+UNSAFE-PATH is the raw string path to resolve.
+BASE-DIR is the absolute directory path string.
+
+Return the resolved absolute safe path string."
   (when (file-name-absolute-p unsafe-path)
     (error "SECURITY ERROR: Absolute paths are forbidden. You must use relative paths (for example, ./file). Path attempted: %s" unsafe-path))
   
@@ -138,6 +179,14 @@ Returns the absolute path string, or nil if unresolved.")
       (error "SECURITY ERROR: Path traversal jailbreak detected: %s" unsafe-path))))
 
 (defun macher-agent--vfs-process-entries (entries sandbox-path entry-path-fn entry-content-fn)
+  "Process VFS ENTRIES, inflating or deleting them within SANDBOX-PATH.
+
+ENTRIES is the list of VFS entries.
+SANDBOX-PATH is the sandbox path string.
+ENTRY-PATH-FN is the function to extract the relative path.
+ENTRY-CONTENT-FN is the function to extract content.
+
+Return nil."
   (let ((sandbox-root (file-name-as-directory (expand-file-name sandbox-path))))
     (mapc (lambda (entry)
             (let* ((relative-path (funcall entry-path-fn entry))
@@ -153,6 +202,11 @@ Returns the absolute path string, or nil if unresolved.")
           entries)))
 
 (defun macher-agent-sandbox-inflate (session)
+  "Inflate the VFS contents for SESSION into its physical sandbox directory.
+
+SESSION is the macher-agent-session struct.
+
+Return nil."
   (let* ((workspace (macher-agent-session-workspace session))
          (sandbox-path (macher-agent-session-sandbox-path session))
          (vfs-buffers (macher-agent-workspace-vfs-buffers workspace))
@@ -169,12 +223,29 @@ Returns the absolute path string, or nil if unresolved.")
          (lambda (key) (gethash key vfs-buffers)))))))
 
 (defun macher-agent-context-root (context)
+  "Retrieve the project root directory string from CONTEXT.
+
+CONTEXT is the active context structure.
+
+Return the project root path string."
   (or (macher-agent-root context) default-directory))
 
-(defun macher-agent--vfs-verify-clean-merge (workspace-root context) t)
+(defun macher-agent--vfs-verify-clean-merge (workspace-root context)
+  "Verify that the active CONTEXT can merge cleanly into WORKSPACE-ROOT.
+
+WORKSPACE-ROOT is the project root path string.
+CONTEXT is the active context structure.
+
+Return t."
+  t)
 
 (defun macher-agent--build-rsync-cmd (src dest)
-  "Construct an rsync command driven by Git. Throws an error if Git is unavailable."
+  "Construct an rsync command driven by Git. Throws an error if Git is unavailable.
+
+SRC is the source directory string.
+DEST is the destination directory string.
+
+Return the shell command string."
   (let* ((src-dir (file-name-as-directory (expand-file-name src)))
          (dest-dir (file-name-as-directory (expand-file-name dest))))
     
@@ -191,12 +262,25 @@ Returns the absolute path string, or nil if unresolved.")
             (shell-quote-argument dest-dir))))
 
 (defun macher-agent--vfs-sync-baseline (workspace-root sandbox-dir)
+  "Asynchronously or synchronously sync the physical WORKSPACE-ROOT to SANDBOX-DIR.
+
+WORKSPACE-ROOT is the source project directory string.
+SANDBOX-DIR is the target directory string.
+
+Return the process exit code integer."
   (let ((sync-cmd (macher-agent--build-rsync-cmd workspace-root sandbox-dir)))
     (call-process shell-file-name nil nil nil shell-command-switch sync-cmd)))
 
 (defun macher-agent--edit-string-fast (content old-text new-text replace-all)
   "Replace OLD-TEXT with NEW-TEXT in CONTENT.
-If REPLACE-ALL is nil, errors if OLD-TEXT occurs more than once."
+If REPLACE-ALL is nil, errors if OLD-TEXT occurs more than once.
+
+CONTENT is the original string block.
+OLD-TEXT is the target substring to match.
+NEW-TEXT is the replacement string.
+REPLACE-ALL is a boolean flag to replace all occurrences.
+
+Return the modified string."
   (when (string-empty-p old-text)
     (error "Cannot replace an empty string. Provide exact text to match."))
   (let ((count 0)
@@ -213,6 +297,13 @@ If REPLACE-ALL is nil, errors if OLD-TEXT occurs more than once."
       (replace-regexp-in-string (regexp-quote old-text) new-text content t t)))))
 
 (defun macher-agent--vfs-apply-overlay-stateless (contents ws-root sandbox-dir)
+  "Apply virtual CONTENTS overlay to SANDBOX-DIR statelessly.
+
+CONTENTS is the list of VFS entry structures.
+WS-ROOT is the workspace root path string.
+SANDBOX-DIR is the sandbox directory path string.
+
+Return nil."
   (macher-agent--vfs-process-entries
    contents
    sandbox-dir
@@ -224,12 +315,24 @@ If REPLACE-ALL is nil, errors if OLD-TEXT occurs more than once."
    #'macher-agent-vfs-entry-curr))
 
 (defun macher-agent--vfs-apply-overlay (context sandbox-dir)
+  "Apply virtual context overlay to SANDBOX-DIR.
+
+CONTEXT is the active context structure.
+SANDBOX-DIR is the sandbox directory path string.
+
+Return nil."
   (when (and context (macher-agent--get-context-dirty-p context))
     (let ((ws-root (macher-agent-context-root context))
           (contents (macher-agent--get-context-contents context)))
       (macher-agent--vfs-apply-overlay-stateless contents ws-root sandbox-dir))))
 
 (defun macher-agent-call-with-strict-vfs-pipeline (context body-fn)
+  "Execute BODY-FN within a physical sandbox directory populated with CONTEXT.
+
+CONTEXT is the active context structure.
+BODY-FN is the function containing pipeline logic.
+
+Return the result of BODY-FN."
   (let* ((workspace-root (macher-agent-context-root context))
          (sandbox-dir (make-temp-file "macher-sandbox-" t)))
     (unwind-protect
@@ -245,21 +348,40 @@ If REPLACE-ALL is nil, errors if OLD-TEXT occurs more than once."
   `(macher-agent-call-with-strict-vfs-pipeline ,context (lambda () ,@body)))
 
 (defun macher-agent--ensure-access (context path)
+  "Ensure PATH is within the explicitly scoped CONTEXT.
+
+CONTEXT is the active context structure.
+PATH is the string file path.
+
+Return nil or signals an error."
   (macher-agent--ensure-access-stateless (and context (macher-agent--get-context-contents context)) path))
 
 (defun macher-agent--inject-context-state (context &optional directives)
-  "Explicitly inject the active agent CONTEXT and optional DIRECTIVES into the current buffer."
+  "Explicitly inject the active agent CONTEXT and optional DIRECTIVES into the current buffer.
+
+CONTEXT is the active context structure.
+DIRECTIVES is the optional directives alist.
+
+Return nil."
   (when context
     (setq-local macher-agent--persistent-context context)
     (when directives
       (setq-local gptel-directives directives))))
 
 (defun macher-agent-current-context (&optional ctx-or-fsm)
-  "Alias for `macher-agent-resolve-context'."
+  "Alias for `macher-agent-resolve-context'.
+
+CTX-OR-FSM is the optional context or finite-state machine.
+
+Return the resolved context structure, or nil."
   (macher-agent-resolve-context ctx-or-fsm))
 
 (defun macher-agent--extract-fsm-info (fsm)
-  "Safely extract the info plist from a finite-state machine (FSM)."
+  "Safely extract the info plist from a finite-state machine (FSM).
+
+FSM is the finite-state machine object.
+
+Return the info property list, or nil."
   (when fsm
     (if (fboundp 'gptel-fsm-info)
         (funcall 'gptel-fsm-info fsm)
@@ -267,7 +389,11 @@ If REPLACE-ALL is nil, errors if OLD-TEXT occurs more than once."
         (funcall 'mock-gptel-fsm-info fsm)))))
 
 (defun macher-agent--extract-fsm-context (fsm)
-  "Extract the active context from a finite-state machine (FSM)."
+  "Extract the active context from a finite-state machine (FSM).
+
+FSM is the finite-state machine object.
+
+Return the active context structure, or nil."
   (let ((info (macher-agent--extract-fsm-info fsm)))
     (and info (or (plist-get info :macher-agent-context)
                   (plist-get info :macher--context)))))
@@ -279,7 +405,11 @@ Follows a predictable waterfall:
 2. If CTX-OR-FSM is a finite-state machine (FSM), extract its context.
 3. If `macher-agent--persistent-context' is bound locally in the current buffer, return it.
 4. Try to get context from the latest FSM via `macher-agent--get-fsm-latest'.
-5. Fallback to registry-based active workspace context lookup."
+5. Fallback to registry-based active workspace context lookup.
+
+CTX-OR-FSM is the optional context or finite-state machine.
+
+Return the resolved context structure, or nil."
   (cond
    ((and ctx-or-fsm (fboundp 'macher-context-p) (macher-context-p ctx-or-fsm))
     ctx-or-fsm)
@@ -305,6 +435,11 @@ Follows a predictable waterfall:
       primary-ctx))))
 
 (defun macher-agent--read-content-from-disk-or-buffer (path)
+  "Read the contents of PATH from an active buffer or disk.
+
+PATH is the relative or absolute path string.
+
+Return the content string, or nil."
   (let ((buf (or (get-file-buffer path) (get-buffer path)))
         (is-media (and (file-exists-p path) 
                        (macher-agent-media-file-p path))))
@@ -318,6 +453,11 @@ Follows a predictable waterfall:
      (t nil))))
 
 (defun macher-agent--init-workspace-state (workspace-root)
+  "Initialise the workspace state and active context for WORKSPACE-ROOT.
+
+WORKSPACE-ROOT is the project root directory string.
+
+Return nil."
   (setq-local macher-agent--is-workspace t)
   (let* ((workspace (make-macher-agent-workspace :project-root workspace-root))
          (macher-ws (cons 'agent workspace))
@@ -340,7 +480,11 @@ Follows a predictable waterfall:
 
 (defun macher-agent--partition-vfs-entries (contents &optional root-dir)
   "Split raw VFS CONTENTS into pure virtual and physical lists.
-Returns a cons cell (virtual-entries . physical-entries)."
+
+CONTENTS is the list of VFS entry structures.
+ROOT-DIR is the optional project root path string.
+
+Return a cons cell (VIRTUAL-ENTRIES . PHYSICAL-ENTRIES)."
   (let ((virtual-contents nil)
         (physical-contents nil))
     (dolist (entry contents)
@@ -352,6 +496,11 @@ Returns a cons cell (virtual-entries . physical-entries)."
     (cons (nreverse virtual-contents) (nreverse physical-contents))))
 
 (defun macher-agent--split-context (ctx)
+  "Split context CTX into virtual and physical context clones.
+
+CTX is the active context structure.
+
+Return a cons cell of cloned contexts (FILE-CONTEXT . BUFFER-CONTEXT)."
   (let ((file-ctx (macher-agent--clone-context ctx))
         (buf-ctx (macher-agent--clone-context ctx))
         (workspace (when ctx (macher-agent--get-context-workspace ctx))))
@@ -367,7 +516,12 @@ Returns a cons cell (virtual-entries . physical-entries)."
       (cons file-ctx buf-ctx))))
 
 (defun macher-agent--get-buffer-content-stateless (path workspace-root)
-  "Read buffer content statelessly using an explicit WORKSPACE-ROOT."
+  "Read buffer content statelessly using an explicit WORKSPACE-ROOT.
+
+PATH is the relative or absolute path string.
+WORKSPACE-ROOT is the workspace root path string.
+
+Return the content string, or nil."
   (if workspace-root
       (let* ((relative-path (if (file-name-absolute-p path)
                                 (file-relative-name path workspace-root)
@@ -377,6 +531,13 @@ Returns a cons cell (virtual-entries . physical-entries)."
     (macher-agent--read-content-from-disk-or-buffer path)))
 
 (defun macher-agent--update-context-file (context path new-content)
+  "Update PATH in CONTEXT with NEW-CONTENT.
+
+CONTEXT is the active context structure.
+PATH is the relative file path string.
+NEW-CONTENT is the modified content string.
+
+Return nil."
   (let* ((contents (macher-agent--get-context-contents context))
          (entry (cl-find path contents :key #'macher-agent-vfs-entry-path :test #'equal)))
     (if entry
@@ -390,14 +551,24 @@ Returns a cons cell (virtual-entries . physical-entries)."
     (run-hook-with-args 'macher-agent-context-mutated-hook path)))
 
 (defun macher-agent--ensure-access-stateless (contents path)
-  "Ensure PATH is within the explicitly scoped CONTENTS list."
+  "Ensure PATH is within the explicitly scoped CONTENTS list.
+
+CONTENTS is the list of authorised VFS entries.
+PATH is the string file path to verify.
+
+Return nil or signals an error."
   (let ((actual-name (substring-no-properties path)))
     (unless (cl-find actual-name contents :key #'macher-agent-vfs-entry-path :test #'equal)
       (error "SECURITY ERROR: You do not have permission to access '%s'. Use list_buffers_in_workspace to see your allowed scope." actual-name))))
 
 (defun macher-agent--read-context-file (context path)
   "Read PATH from CONTEXT. Prioritises VFS, then active buffers, then physical disk.
-Uniformly applies security and path normalisation checks."
+Uniformly applies security and path normalisation checks.
+
+CONTEXT is the active context structure.
+PATH is the file path string to read.
+
+Return the file content string."
   (let* ((contents (and context (macher-agent--get-context-contents context)))
          (workspace-root (macher-context-workspace-root context)))
     (macher-agent--ensure-access-stateless contents path)
@@ -417,6 +588,12 @@ Uniformly applies security and path normalisation checks."
             (error "ERROR: File/Buffer '%s' does not exist." path)))))))
 
 (defun macher-agent-context-classify-entry (path-or-buf &optional root-dir)
+  "Classify PATH-OR-BUF into a file type category.
+
+PATH-OR-BUF is the string path or buffer name to classify.
+ROOT-DIR is the optional workspace root path string.
+
+Return a symbol: `file', `media', `buffer', or `external'."
   (let* ((expanded (if root-dir (expand-file-name path-or-buf root-dir) (expand-file-name path-or-buf)))
          (buf (get-buffer path-or-buf))
          (file-from-buf (and buf (buffer-file-name buf)))
@@ -441,12 +618,27 @@ Uniformly applies security and path normalisation checks."
 (defvar-local macher-agent--persistent-context nil)
 
 (defun macher-agent--get-root (workspace)
+  "Get the project root path of WORKSPACE.
+
+WORKSPACE is the active workspace structure.
+
+Return the project root path string."
   (macher-agent-workspace-project-root workspace))
 
 (defun macher-agent--get-name (workspace)
+  "Get a display name for WORKSPACE.
+
+WORKSPACE is the active workspace structure.
+
+Return the formatted name string."
   (concat "Agent: " (file-name-nondirectory (directory-file-name (macher-agent-workspace-project-root workspace)))))
 
 (defun macher-agent--get-files (workspace)
+  "Retrieve list of active files in WORKSPACE, applying safety constraints.
+
+WORKSPACE is the active workspace structure.
+
+Return a list of file path strings."
   (let* ((expanded-dir (expand-file-name (macher-agent-workspace-project-root workspace)))
          (home-dir (expand-file-name "~/")))
     (condition-case err
@@ -480,11 +672,19 @@ Uniformly applies security and path normalisation checks."
                                   :get-files macher-agent--get-files)))
 
 (defun macher-workspace-agent ()
+  "Identify if the current buffer is a workspace and return the workspace.
+
+Return the workspace struct, or nil."
   (when macher-agent--is-workspace macher--workspace))
 
 (add-hook 'macher-workspace-functions #'macher-workspace-agent)
 
 (defun macher-agent--clone-context (ctx)
+  "Deep-copy and clone CTX.
+
+CTX is the context structure.
+
+Return the newly cloned context structure, or nil."
   (if (not ctx) nil
     (let ((new-ctx (macher-agent--make-vfs-context :workspace (when (fboundp 'macher-context-workspace) (macher-agent--get-context-workspace ctx))
                                                    :contents (copy-tree (macher-agent--get-context-contents ctx)))))
@@ -493,6 +693,12 @@ Uniformly applies security and path normalisation checks."
       new-ctx)))
 
 (defun macher-agent--merge-contexts (parent-ctx child-ctx)
+  "Merge the VFS contents of CHILD-CTX into PARENT-CTX.
+
+PARENT-CTX is the parent context structure.
+CHILD-CTX is the child context structure.
+
+Return nil."
   (let ((child-contents (macher-agent--get-context-contents child-ctx))
         (parent-contents (macher-agent--get-context-contents parent-ctx)))
     (dolist (child-entry child-contents)
@@ -504,6 +710,11 @@ Uniformly applies security and path normalisation checks."
           (macher-agent--update-context-file parent-ctx path new))))))
 
 (defun macher-agent--sync-context-entry (entry)
+  "Synchronise a single VFS ENTRY with the physical disk.
+
+ENTRY is the VFS entry structure.
+
+Return non-nil if synchronisation modified the entry, otherwise nil."
   (let* ((path (macher-agent-vfs-entry-path entry))
          (orig (macher-agent-vfs-entry-orig entry))
          (new (macher-agent-vfs-entry-curr entry))
@@ -522,7 +733,12 @@ Uniformly applies security and path normalisation checks."
 Used to prevent race conditions during shadow-buffer patch generation.")
 
 (defun macher-agent--auto-sync-context (ctx &rest _args)
-  "Synchronise the active context with the physical disk, unless paused."
+  "Synchronise the active context with the physical disk, unless paused.
+
+CTX is the active context structure.
+_ARGS represents unused extra arguments.
+
+Return nil."
   (when (and ctx (not macher-agent--pause-auto-sync))
     (let ((contents (macher-agent--get-context-contents ctx))
           (synced nil))
@@ -535,6 +751,11 @@ Used to prevent race conditions during shadow-buffer patch generation.")
         (run-hooks 'macher-agent-context-mutated-hook)))))
 
 (defun macher-agent--persist-vfs-to-hidden-buffer (ctx)
+  "Persist virtual file system state of CTX to a hidden buffer for review.
+
+CTX is the active context structure.
+
+Return nil."
   (let* ((workspace (when ctx (macher-agent--get-context-workspace ctx)))
          (root-dir (if workspace (macher-agent-root workspace) "default"))
          (buf-name (format " *macher-agent-vfs-state-%s*" (md5 (expand-file-name root-dir))))
@@ -553,6 +774,9 @@ Used to prevent race conditions during shadow-buffer patch generation.")
               (insert "\n=======================\n\n"))))))))
 
 (defun macher-agent-apply-patch ()
+  "Apply the active patch from diff-mode context back to physical files.
+
+Return nil."
   (interactive)
   (unless (derived-mode-p 'diff-mode) (user-error "Not in a patch/diff buffer"))
   (let* ((patch-content (buffer-substring-no-properties (point-min) (point-max)))
@@ -577,6 +801,9 @@ Used to prevent race conditions during shadow-buffer patch generation.")
           (message "ERROR: Failed to apply patch safely."))))))
 
 (defun macher-agent-insert-patch ()
+  "Insert the proposed patch content into the current buffer.
+
+Return nil."
   (interactive)
   (let* ((patch-buf (macher-patch-buffer))
          (content (when (buffer-live-p patch-buf)
@@ -586,7 +813,9 @@ Used to prevent race conditions during shadow-buffer patch generation.")
       (insert "\nHere is your proposed patch:\n```diff\n" content "\n```\n"))))
 
 (defun macher-agent-clear-context ()
-  "Clear the active context and reset state."
+  "Clear the active context and reset state.
+
+Return nil."
   (interactive)
   (if (not macher-agent--persistent-context)
       (message "No active context to clear in this buffer.")

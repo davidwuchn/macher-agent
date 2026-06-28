@@ -24,6 +24,12 @@
   system-message)
 
 (defun macher-agent-execute-parallel (tasks final-callback)
+  "Execute TASKS in parallel and run FINAL-CALLBACK upon completion.
+
+TASKS is the list of tasks to spawn.
+FINAL-CALLBACK is the function to run with the results.
+
+Return nil."
   (let* ((task-list (append tasks nil))
          (total (length task-list))
          (completed 0)
@@ -45,17 +51,29 @@
                            (funcall final-callback results))))))))))
 
 (defun macher-agent-subagent-p (&optional buffer)
-  "Return non-nil if BUFFER is a subagent."
+  "Return non-nil if BUFFER is a subagent.
+
+BUFFER is the optional buffer to check, defaulting to the current buffer.
+
+Return non-nil if buffer is a subagent, otherwise nil."
   (with-current-buffer (or buffer (current-buffer))
     (bound-and-true-p macher-agent--is-subagent)))
 
 (defun macher-agent-ready-to-reap-p (&optional buffer)
-  "Return non-nil if BUFFER is ready to be reaped."
+  "Return non-nil if BUFFER is ready to be reaped.
+
+BUFFER is the optional buffer to check, defaulting to the current buffer.
+
+Return non-nil if buffer is ready to be reaped, otherwise nil."
   (with-current-buffer (or buffer (current-buffer))
     (bound-and-true-p macher-agent--ready-to-reap)))
 
 (defun macher-agent--reap-buffer (buf)
-  "A garbage collector that natively aborts hidden gptel networks."
+  "A garbage collector that natively aborts hidden gptel networks.
+
+BUF is the buffer to reap.
+
+Return nil."
   (when (buffer-live-p buf)
     (with-current-buffer buf
       (when (and (macher-agent-subagent-p)
@@ -68,7 +86,11 @@
           (kill-buffer buf))))))
 
 (defun macher-normalise-preset-name (preset)
-  "Normalise a preset name, stripping @ symbols safely even if passed a list."
+  "Normalise a preset name, stripping @ symbols safely even if passed a list.
+
+PRESET is the preset identifier (string, symbol, or list).
+
+Return the normalised preset symbol, or nil."
   (let ((str (cond ((stringp preset) preset)
                    ((symbolp preset) (symbol-name preset))
                    ((and (listp preset) (stringp (car preset))) (car preset))
@@ -78,7 +100,12 @@
 (defun macher-agent-compose-payload (base-state inline-presets)
   "Pure function to compose a transmission payload.
 Merges BASE-STATE with the resolved configuration of INLINE-PRESETS.
-Returns a property list containing the unified state."
+Returns a property list containing the unified state.
+
+BASE-STATE is the base state property list.
+INLINE-PRESETS is the list of inline preset symbols.
+
+Return the unified state property list."
   (let ((composed-system nil)
         (accumulated-base-sys (plist-get base-state :system))
         (composed-tools (append (plist-get base-state :tools) nil))
@@ -136,7 +163,11 @@ Returns a property list containing the unified state."
             :tools final-tools))))
 
 (defun macher-agent--apply-payload-locally (payload)
-  "Apply a composed payload to the current buffer variables."
+  "Apply a composed payload to the current buffer variables.
+
+PAYLOAD is the composed state property list.
+
+Return nil."
   (when payload
     (when (plist-member payload :system) (setq-local gptel-system-prompt (plist-get payload :system)))
     (when (plist-member payload :model) (setq-local gptel-model (plist-get payload :model)))
@@ -145,7 +176,11 @@ Returns a property list containing the unified state."
     (when (plist-member payload :tools) (setq-local gptel-tools (plist-get payload :tools)))))
 
 (defun macher-agent--apply-preset (preset-or-presets)
-  "Polymorphic wrapper to safely route legacy calls into the modern compositor."
+  "Polymorphic wrapper to safely route legacy calls into the modern compositor.
+
+PRESET-OR-PRESETS represents the preset symbol, list, or vector.
+
+Return nil."
   (let* ((presets (cond ((listp preset-or-presets) preset-or-presets)
                         ((vectorp preset-or-presets) (append preset-or-presets nil))
                         (t (list preset-or-presets))))
@@ -169,7 +204,12 @@ Returns a property list containing the unified state."
 (put 'macher-agent-presets 'permanent-local t)
 
 (defun macher-agent-spawn-task (task callback)
-  "Spawn a task inside a target subagent."
+  "Spawn a task inside a target subagent.
+
+TASK is the task specification list or name.
+CALLBACK is the completion callback function.
+
+Return nil."
   (let* ((buf-name (if (listp task) (plist-get task :buffer_name) task))
          (instructions (if (listp task) (plist-get task :instructions) ""))
          (presets (if (listp task) (or (plist-get task :presets) (plist-get task :preset)) nil))
@@ -222,6 +262,12 @@ Returns a property list containing the unified state."
 (defvar macher-agent-subagent-setup-hook nil)
 
 (defun macher-agent--add-buffer-to-scope-headless (buf-name persistent-context)
+  "Add BUF-NAME to PERSISTENT-CONTEXT scope headlessly.
+
+BUF-NAME is the string buffer name.
+PERSISTENT-CONTEXT is the active context structure.
+
+Return nil."
   (get-buffer-create buf-name)
   (when persistent-context
     (let* ((contents (macher-agent--get-context-contents persistent-context))
@@ -234,6 +280,11 @@ Returns a property list containing the unified state."
 
 ;;;###autoload
 (defun macher-agent-add-buffer-to-scope (buffer)
+  "Add BUFFER to the scope of the current agent.
+
+BUFFER is the buffer object or string name.
+
+Return nil."
   (interactive "BAdd buffer to current agent's scope: ")
   (let* ((buf-name (if (stringp buffer) buffer (buffer-name buffer)))
          (ctx (macher-agent-resolve-context)))
@@ -243,10 +294,29 @@ Returns a property list containing the unified state."
     (message "SUCCESS: Added '%s' to the agent's restricted scope." buf-name)))
 
 (defun macher-agent--resolve-buffer-name (name)
+  "Coerce NAME into a string name.
+
+NAME is the string representing buffer name.
+
+Return the coerced buffer name string."
   (substring-no-properties name))
 
 (defun macher-agent--prepare-subagent-buffer (buf full-dir context &optional presets parent-tools parent-model parent-backend parent-presets parent-directives parent-temp parent-tokens)
-  "Prepare a subagent buffer, locking its directory and composing its requested skills."
+  "Prepare a subagent buffer, locking its directory and composing its requested skills.
+
+BUF is the target buffer.
+FULL-DIR is the path to lock.
+CONTEXT is the active context structure.
+PRESETS represents the requested presets.
+PARENT-TOOLS is the parent's tools list.
+PARENT-MODEL is the parent's model.
+PARENT-BACKEND is the parent's backend.
+PARENT-PRESETS represents the parent's known presets.
+PARENT-DIRECTIVES represents the parent's directives.
+PARENT-TEMP is the parent's temperature.
+PARENT-TOKENS is the parent's max tokens.
+
+Return nil."
   (with-current-buffer buf
     (setq default-directory (file-name-as-directory (macher-agent-root full-dir)))
     
@@ -294,7 +364,15 @@ Returns a property list containing the unified state."
     (run-hooks 'macher-agent-subagent-setup-hook)))
 
 (defun macher-agent-add-subagent (name dir &optional instructions context presets)
-  "Create and prepare a new subagent buffer, inheriting parent state and composing PRESETS."
+  "Create and prepare a new subagent buffer, inheriting parent state and composing PRESETS.
+
+NAME is the subagent name string.
+DIR is the workspace directory path string.
+INSTRUCTIONS is the optional instructions string.
+CONTEXT is the optional active context structure.
+PRESETS represents optional requested presets.
+
+Return the newly created subagent buffer."
   (let* ((parent-tools (bound-and-true-p gptel-tools))
          (parent-model (bound-and-true-p gptel-model))
          (parent-backend (bound-and-true-p gptel-backend))
@@ -316,7 +394,13 @@ Returns a property list containing the unified state."
     buf))
 
 (defun macher-agent--prepare-subagent-instructions (buf instructions &optional presets)
-  "Insert INSTRUCTIONS into BUF and compose its system message."
+  "Insert INSTRUCTIONS into BUF and compose its system message.
+
+BUF is the target buffer.
+INSTRUCTIONS is the instructions string.
+PRESETS represents the optional requested presets.
+
+Return nil."
   (with-current-buffer buf
     (unless (string-empty-p instructions)
       (insert (substring-no-properties instructions)))
@@ -333,6 +417,9 @@ Returns a property list containing the unified state."
         (macher-agent--apply-payload-locally payload)))))
 
 (defun macher-agent-apply-virtual-buffers ()
+  "Apply the uncommitted VFS memory content back to virtual buffers.
+
+Return nil."
   (interactive)
   (let* ((ctx (macher-agent-resolve-context))
          (contents (and ctx (macher-agent--get-context-contents ctx))))

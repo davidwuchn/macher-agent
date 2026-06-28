@@ -84,7 +84,11 @@ signal data."
   :group 'macher-agent)
 
 (defun macher-agent--resolve-context (passed-context)
-  "Resolve the current agent context."
+  "Resolve the current agent context.
+
+PASSED-CONTEXT is the context object passed in, which may be nil.
+
+Return the resolved context structure, or nil."
   (or passed-context
       (ignore-errors (macher-agent-current-context))
       (when (and (boundp 'macher-agent--active-fsm) macher-agent--active-fsm)
@@ -93,7 +97,11 @@ signal data."
               (plist-get info :macher--context))))))
 
 (defun macher-agent--format-directives (result-data)
-  "Append pending system instructions to RESULT-DATA if any exist."
+  "Append pending system instructions to RESULT-DATA if any exist.
+
+RESULT-DATA is the string response from a tool execution.
+
+Return the formatted string."
   (let ((final-str result-data))
     (when macher-agent--pending-instructions-queue
       (setq final-str (concat final-str "\n\n=== SYSTEM DIRECTIVE ===\n"
@@ -102,7 +110,11 @@ signal data."
     final-str))
 
 (defun macher-agent--wrap-callback (gptel-cb)
-  "Create a callback wrapper that parses the result and formats directives."
+  "Create a callback wrapper that parses the result and formats directives.
+
+GPTEL-CB is the original gptel callback function, which may be nil.
+
+Return a function callback."
   (lambda (plist-result)
     (let ((final-str (if (eq (plist-get plist-result :status) 'success)
                          (plist-get plist-result :data)
@@ -114,18 +126,30 @@ signal data."
         (macher-agent--format-directives final-str)))))
 
 (defun macher-agent--show-ui (buf)
-  "Internal wrapper to safely trigger the display function."
+  "Internal wrapper to safely trigger the display function.
+
+BUF is the buffer to display.
+
+Return nil."
   (when macher-agent-display-subagent-fn
     (funcall macher-agent-display-subagent-fn buf)))
 
 (defun macher-agent--hide-ui (buf)
-  "Internal wrapper to safely trigger the hide function."
+  "Internal wrapper to safely trigger the hide function.
+
+BUF is the buffer to hide.
+
+Return nil."
   (when macher-agent-hide-subagent-fn
     (funcall macher-agent-hide-subagent-fn buf)))
 
 (defun macher-agent--insert-hidden (text)
   "Insert TEXT visually hidden via a display overlay, but fully readable by gptel.
-This overrides font-lock and prevents markdown-mode from revealing the text."
+This overrides font-lock and prevents markdown-mode from revealing the text.
+
+TEXT is the string to insert.
+
+Return nil."
   (let* ((start (point))
          (_ (insert text))
          (ov (make-overlay start (point))))
@@ -133,7 +157,13 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
     (overlay-put ov 'insert-behind-hooks '(ignore))))
 
 (defun macher-agent--middleware-pipeline (all-args schema next-fn)
-  "Extracts context, isolates callbacks, and perfectly aligns the payload payload."
+  "Extracts context, isolates callbacks, and perfectly aligns the payload payload.
+
+ALL-ARGS is the list of all arguments passed to the tool.
+SCHEMA is the tool's parameter schema list.
+NEXT-FN is the function to process the parsed payload and context.
+
+Return the result of calling NEXT-FN."
   (let* ((callback (cl-find-if #'functionp all-args))
          (injected-context (cl-find-if (lambda (x) (and (boundp 'macher-context-p) 
                                                         (fboundp 'macher-context-p) 
@@ -252,7 +282,14 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
   (funcall on-success res))
 
 (defun macher-agent--run-async-cmd (name cmd dir callback)
-  "Executes a command using explicit lexical capture for background safety."
+  "Executes a command using explicit lexical capture for background safety.
+
+NAME is the process name string.
+CMD is the shell command string to execute.
+DIR is the working directory string.
+CALLBACK is the function to call upon process exit.
+
+Return the process object."
   (let* ((out-buf (generate-new-buffer (format " *%s*" name)))
          (default-directory dir))
     (make-process
@@ -267,7 +304,14 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
                      (funcall callback exit-code output)))))))
 
 (defun macher-agent--run-in-persistent-sandbox (context command on-success on-error)
-  "Executes COMMAND asynchronously within a dynamically generated VFS sandbox."
+  "Executes COMMAND asynchronously within a dynamically generated VFS sandbox.
+
+CONTEXT is the active context structure.
+COMMAND is the shell command string to run.
+ON-SUCCESS is the success callback function.
+ON-ERROR is the error callback function.
+
+Return nil."
   (let* ((workspace-root (if context (macher-agent-context-root context) default-directory))
          (sandbox-dir (make-temp-file "macher-sandbox-" t)))
     (condition-case err
@@ -299,7 +343,12 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
        (funcall on-error (list :status 'error :error (error-message-string err)))))))
 
 (defun macher-agent--read-file-vfs-aware (file-path context)
-  "Read a file, prioritising the uncommitted VFS memory over the physical disk."
+  "Read a file, prioritising the uncommitted VFS memory over the physical disk.
+
+FILE-PATH is the string path of the file to read.
+CONTEXT is the active context structure.
+
+Return the file contents string, or nil."
   (let* ((vfs-entry (when context (cl-find file-path (macher-context-contents context) :key #'macher-agent-vfs-entry-path :test #'equal)))
          (vfs-content (when vfs-entry (macher-agent-vfs-entry-curr vfs-entry))))
     (cond
@@ -314,11 +363,19 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
   "List of instruction strings to append to the tool's return payload.")
 
 (defun macher-agent-add-pending-instruction (instruction)
-  "Push an INSTRUCTION directive to steer the LLM after tool execution."
+  "Push an INSTRUCTION directive to steer the LLM after tool execution.
+
+INSTRUCTION is the directive string to push.
+
+Return nil."
   (push instruction macher-agent--pending-instructions-queue))
 
 (defun macher-agent--format-error (err)
-  "Standardise the error message string for the LLM."
+  "Standardise the error message string for the LLM.
+
+ERR is the error signal data or object.
+
+Return the formatted error message string."
   (let ((msg (error-message-string err)))
     (if (string-match-p "^\\(ERROR\\|SECURITY ERROR\\):" msg)
         msg
@@ -337,24 +394,39 @@ This overrides font-lock and prevents markdown-mode from revealing the text."
   "Global alist mapping buffers to their pending media.")
 
 (defun macher-agent--gptel-base64-encode-advice (orig-fun file)
-  "Read FILE from VFS if available before encoding."
-  (let* ((ctx (ignore-errors (macher-agent-current-context)))
-         (workspace (when ctx (macher-context-workspace ctx)))
-         (workspace-root (when workspace (macher-agent--get-workspace-root workspace)))
-         (actual-name (if (and workspace-root (file-name-absolute-p file))
-                          (file-relative-name file workspace-root)
-                        file))
-         (content (when ctx 
-                    (condition-case nil
-                        (macher-agent--read-context-file ctx actual-name)
-                      (error nil)))))
-    (if content
-        (with-temp-buffer
-          (set-buffer-multibyte nil)
-          (insert content)
-          (base64-encode-region (point-min) (point-max) :no-line-break)
-          (buffer-string))
-      (funcall orig-fun file))))
+  "Read FILE from VFS if available before encoding.
+If FILE is the raw base64-encoded media in the active session's pending media,
+return it directly without re-encoding.
+
+ORIG-FUN is the original encoding function.
+FILE is the string path of the file or base64 data.
+
+Return the base64-encoded representation string."
+  (let* ((fsm (or (and (boundp 'macher-agent--active-fsm) macher-agent--active-fsm)
+                  (and (boundp 'macher--fsm-latest) (symbol-value 'macher--fsm-latest))
+                  (and (boundp 'gptel--fsm-last) (symbol-value 'gptel--fsm-last))))
+         (info (when fsm (ignore-errors (gptel-fsm-info fsm))))
+         (session (when info (plist-get info :macher-agent-session)))
+         (pending (when session (macher-agent-session-pending-media session))))
+    (if (and pending (cl-some (lambda (item) (string= file (car item))) pending))
+        file
+      (let* ((ctx (ignore-errors (macher-agent-current-context)))
+             (workspace (when ctx (macher-context-workspace ctx)))
+             (workspace-root (when workspace (macher-agent--get-workspace-root workspace)))
+             (actual-name (if (and workspace-root (file-name-absolute-p file))
+                              (file-relative-name file workspace-root)
+                            file))
+             (content (when ctx 
+                        (condition-case nil
+                            (macher-agent--read-context-file ctx actual-name)
+                          (error nil)))))
+        (if content
+            (with-temp-buffer
+              (set-buffer-multibyte nil)
+              (insert content)
+              (base64-encode-region (point-min) (point-max) :no-line-break)
+              (buffer-string))
+          (funcall orig-fun file))))))
 
 (advice-add 'gptel--base64-encode :around #'macher-agent--gptel-base64-encode-advice)
 
